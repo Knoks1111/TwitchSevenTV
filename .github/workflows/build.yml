@@ -28,7 +28,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/theos
-          key: theos-ios-${{ runner.os }}-v6
+          key: theos-ios-${{ runner.os }}-v7
 
       - name: 🔧 Installer Theos + SDK iOS
         if: steps.cache-theos.outputs.cache-hit != 'true'
@@ -102,37 +102,19 @@ jobs:
           echo "📋 SDKs:"; ls "$THEOS/sdks/"
           echo "✅ Theos + SDK prêts"
 
-      - name: 🔑 Installer ldid + insert_dylib
+      - name: 🔑 Installer ldid + lief
         run: |
           set -euo pipefail
 
-          # ── ldid via brew ──
+          # ldid via brew (signe les binaires iOS sans certificat Apple)
           brew install ldid
-          echo "✅ ldid: $(ldid 2>&1 | head -1 || true)"
+          ldid 2>&1 | head -1 || true
+          echo "✅ ldid: $(which ldid)"
 
-          # ── insert_dylib: essai brew d'abord, puis compilation manuelle ──
-          if brew install insert_dylib 2>/dev/null; then
-            echo "✅ insert_dylib installé via brew"
-          else
-            echo "⚠️  brew install insert_dylib échoué — compilation depuis source..."
-            git clone --depth=1 https://github.com/Tyilo/insert_dylib /tmp/insert_dylib_src
-
-            # Le fichier source peut être à la racine OU dans un sous-dossier
-            CPP_FILE=$(find /tmp/insert_dylib_src -name "main.cpp" | head -1)
-            if [ -z "$CPP_FILE" ]; then
-              echo "❌ main.cpp introuvable dans le repo insert_dylib"
-              find /tmp/insert_dylib_src -type f | head -30
-              exit 1
-            fi
-            echo "📄 Source trouvée: $CPP_FILE"
-
-            clang++ -std=c++11 -o /usr/local/bin/insert_dylib "$CPP_FILE"
-            chmod +x /usr/local/bin/insert_dylib
-            echo "✅ insert_dylib compilé depuis: $CPP_FILE"
-          fi
-
-          # Vérification finale
-          which insert_dylib && echo "✅ insert_dylib prêt: $(which insert_dylib)"
+          # lief via pip — injecte les dépendances dylib dans les Mach-O
+          # Remplace insert_dylib (projet Xcode non compilable en CI)
+          pip3 install lief --quiet
+          python3 -c "import lief; print('✅ lief', lief.__version__)"
 
       - name: 🔨 Compiler le tweak
         run: |
@@ -154,7 +136,7 @@ jobs:
 
           make -j$(sysctl -n hw.ncpu) package FINALPACKAGE=1 $MAKE_EXTRA
 
-          # ── Trouver le .dylib ──
+          # Trouver le .dylib compilé
           DYLIB_PATH=$(find .theos -name "TwitchSevenTV.dylib" 2>/dev/null | head -1)
           if [ -z "$DYLIB_PATH" ]; then
             echo "❌ TwitchSevenTV.dylib introuvable après make"
@@ -162,12 +144,12 @@ jobs:
             exit 1
           fi
 
-          # ── Signer le .dylib MAINTENANT avant toute injection ──
+          # Signer le .dylib immédiatement après compilation
           echo "🔑 Signature ldid: $DYLIB_PATH"
           ldid -S "$DYLIB_PATH"
-          echo "✅ ldid OK — type: $(file "$DYLIB_PATH")"
+          echo "✅ ldid OK — $(file "$DYLIB_PATH")"
 
-          # ── Trouver le .deb ──
+          # Trouver le .deb
           DEB_PATH=$(find packages -name "*.deb" 2>/dev/null | head -1)
           if [ -z "$DEB_PATH" ]; then
             echo "❌ Aucun .deb dans packages/"
@@ -202,8 +184,7 @@ jobs:
           FILE_TYPE=$(file --brief Twitch.ipa)
           echo "Type: $FILE_TYPE"
           if ! echo "$FILE_TYPE" | grep -qiE "zip|archive"; then
-            echo "❌ Pas une IPA valide — lien expiré ?"
-            echo "   Re-upload l'IPA et mets à jour le secret TWITCH_IPA_URL"
+            echo "❌ Pas une IPA valide — lien expiré ? Re-upload sur Filebin et mets à jour TWITCH_IPA_URL"
             exit 1
           fi
 
@@ -214,8 +195,8 @@ jobs:
           set -euo pipefail
           DYLIB_PATH="${{ env.DYLIB_PATH }}"
 
-          echo "📱 IPA source:  $(du -sh Twitch.ipa | cut -f1)"
-          echo "🔧 .dylib:      $DYLIB_PATH"
+          echo "📱 IPA source: $(du -sh Twitch.ipa | cut -f1)"
+          echo "🔧 .dylib:     $DYLIB_PATH"
 
           # ── 1. Extraire l'IPA ──
           mkdir -p IPA_work
@@ -230,28 +211,23 @@ jobs:
           fi
           echo "📂 App: $APP_PATH"
 
-          # ── 3. Trouver le binaire principal ──
-          # Méthode 1: même nom que le .app (cas standard)
+          # ── 3. Trouver le binaire principal (3 méthodes en cascade) ──
           APP_NAME=$(basename "$APP_PATH" .app)
           BINARY="$APP_PATH/$APP_NAME"
 
-          # Méthode 2: lire Info.plist si méthode 1 échoue
           if [ ! -f "$BINARY" ]; then
             EXEC_NAME=$(/usr/libexec/PlistBuddy -c "Print CFBundleExecutable" \
               "$APP_PATH/Info.plist" 2>/dev/null || true)
-            if [ -n "$EXEC_NAME" ]; then
-              BINARY="$APP_PATH/$EXEC_NAME"
-            fi
+            [ -n "$EXEC_NAME" ] && BINARY="$APP_PATH/$EXEC_NAME"
           fi
 
-          # Méthode 3: premier Mach-O dans le .app
           if [ ! -f "$BINARY" ]; then
-            BINARY=$(find "$APP_PATH" -maxdepth 1 -type f | \
-              xargs -I{} sh -c 'file "{}" | grep -q "Mach-O" && echo "{}"' 2>/dev/null | head -1)
+            BINARY=$(find "$APP_PATH" -maxdepth 1 -type f \
+              -exec sh -c 'file "$1" | grep -q "Mach-O" && echo "$1"' _ {} \; | head -1)
           fi
 
           if [ -z "$BINARY" ] || [ ! -f "$BINARY" ]; then
-            echo "❌ Binaire principal introuvable"
+            echo "❌ Binaire principal introuvable dans $APP_PATH"
             ls "$APP_PATH" | head -20
             exit 1
           fi
@@ -262,27 +238,48 @@ jobs:
           cp "$DYLIB_PATH" "$APP_PATH/TwitchSevenTV.dylib"
           echo "✅ .dylib copié"
 
-          # ── 5. Vérifier si le .dylib est déjà injecté (évite doublons) ──
-          ALREADY=$(otool -L "$BINARY" 2>/dev/null | grep "TwitchSevenTV" || true)
-          if [ -n "$ALREADY" ]; then
-            echo "⚠️  TwitchSevenTV.dylib déjà présent dans le binaire — on skip insert_dylib"
-          else
-            insert_dylib \
-              --strip-codesig \
-              --inplace \
-              "@executable_path/TwitchSevenTV.dylib" \
-              "$BINARY"
-            echo "✅ insert_dylib OK"
-          fi
+          # ── 5. Injecter la dépendance via Python lief ──
+          # lief est fiable, portable, pas de compilation requise
+          python3 << PYEOF
+          import lief, sys, os
+
+          binary_path = "$BINARY"
+          dylib_ref   = "@executable_path/TwitchSevenTV.dylib"
+
+          fat = lief.MachO.parse(binary_path)
+          if fat is None:
+              print("❌ lief: impossible de parser le binaire")
+              sys.exit(1)
+
+          injected = False
+          for macho in fat:
+              # Vérifier si déjà injecté
+              already = any(dylib_ref in str(cmd.name)
+                            for cmd in macho.commands
+                            if hasattr(cmd, 'name'))
+              if already:
+                  print(f"⚠️  Déjà injecté dans cette slice — skip")
+                  continue
+
+              macho.add_library(dylib_ref)
+              injected = True
+              print(f"✅ Injecté dans slice arch={macho.header.cpu_type}")
+
+          if not injected:
+              print("⚠️  Toutes les slices étaient déjà patchées")
+
+          # Écrire le binaire modifié
+          fat.write(binary_path)
+          print(f"✅ Binaire écrit: {binary_path}")
+          PYEOF
 
           # ── 6. Re-signer .dylib ET binaire avec ldid ──
           ldid -S "$APP_PATH/TwitchSevenTV.dylib"
           ldid -S "$BINARY"
           echo "✅ Re-signature ldid OK"
 
-          # ── 7. Recréer l'IPA proprement (sans fichiers parasites macOS) ──
+          # ── 7. Recréer l'IPA proprement ──
           cd IPA_work
-          # Supprimer les fichiers macOS qui corrompent l'IPA
           find . -name ".DS_Store" -delete 2>/dev/null || true
           find . -name "__MACOSX" -exec rm -rf {} + 2>/dev/null || true
 
@@ -319,6 +316,8 @@ jobs:
           echo "Onglet Actions → Artifacts → TwitchSevenTV-Patched-IPA"
           echo "Installe via SideStore"
           echo ""
-          echo "⚠️  RAPPEL: Si l'IPA Filebin est expirée, re-upload"
-          echo "   l'IPA et mets à jour le secret TWITCH_IPA_URL"
+          echo "⚠️  Si l'IPA Filebin est expirée:"
+          echo "   1. Re-upload l'IPA sur filebin.net ou wetransfer.com"
+          echo "   2. Settings → Secrets → TWITCH_IPA_URL → Update"
+          echo "   3. Relancer le workflow"
           echo "========================================"
