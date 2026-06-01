@@ -397,14 +397,14 @@ jobs:
         if: env.DEB_PATH != ''
         uses: actions/upload-artifact@v4
         with:
-          name: TwitchSevenTV-deb
+          name: TwitchSevenTV-v${{ github.run_number }}-deb
           path: ${{ env.DEB_PATH }}
           retention-days: 30
 
       - name: 📤 Sauvegarder la .dylib seule
         uses: actions/upload-artifact@v4
         with:
-          name: TwitchSevenTV-dylib
+          name: TwitchSevenTV-v${{ github.run_number }}-dylib
           path: ${{ env.DYLIB_PATH }}
           retention-days: 30
 
