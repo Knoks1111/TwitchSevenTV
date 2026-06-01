@@ -165,17 +165,49 @@ jobs:
 
           # ── Bundler CydiaSubstrate dans l'IPA ──
           # Sans ça, l'app crashe au lancement sur un iPhone non jailbreaké
-          echo "📦 Bundling CydiaSubstrate dans l'IPA..."
-          mkdir -p "$APP_DIR/Frameworks/CydiaSubstrate.framework"
-          
-          # Theos fournit libsubstrate.dylib — on le copie dans le bundle
-          SUBSTRATE_SRC=$(find /opt/theos -name "libsubstrate.dylib" | head -1)
+          echo "🔍 Recherche de CydiaSubstrate..."
+
+          # Méthode 1: chercher dans Theos (plusieurs noms possibles)
+          SUBSTRATE_SRC=$(find /opt/theos -type f \
+            \( -name "libsubstrate.dylib" -o -name "CydiaSubstrate" \) \
+            ! -name "*.h" ! -name "*.tbd" 2>/dev/null | head -1)
+
+          # Méthode 2: forcer la mise à jour des submodules Theos
           if [ -z "$SUBSTRATE_SRC" ]; then
-            echo "❌ libsubstrate.dylib non trouvé dans Theos"
-            find /opt/theos -name "*.dylib" | head -20
+            echo "⬇️ Mise à jour submodules Theos..."
+            cd /opt/theos
+            sudo git submodule update --init --recursive 2>/dev/null || true
+            cd "$GITHUB_WORKSPACE/IPA_work"
+            SUBSTRATE_SRC=$(find /opt/theos -type f \
+              \( -name "libsubstrate.dylib" -o -name "CydiaSubstrate" \) \
+              ! -name "*.h" ! -name "*.tbd" 2>/dev/null | head -1)
+          fi
+
+          # Méthode 3: télécharger depuis Procursus (repo officiel rootless)
+          if [ -z "$SUBSTRATE_SRC" ]; then
+            echo "⬇️ Téléchargement CydiaSubstrate depuis Procursus..."
+            curl -fsSL \
+              "https://apt.procurs.us/pool/main/mobilesubstrate_0.9.7063_iphoneos-arm64.deb" \
+              -o /tmp/sub.deb
+            mkdir -p /tmp/sub_root && cd /tmp/sub_root
+            ar -x /tmp/sub.deb 2>/dev/null || true
+            for f in data.tar.*; do [ -f "$f" ] && tar xf "$f" 2>/dev/null; done
+            cd "$GITHUB_WORKSPACE/IPA_work"
+            SUBSTRATE_SRC=$(find /tmp/sub_root -type f \
+              \( -name "CydiaSubstrate" -o -name "libsubstrate.dylib" \) \
+              2>/dev/null | head -1)
+          fi
+
+          # Échec total → debug et arrêt
+          if [ -z "$SUBSTRATE_SRC" ]; then
+            echo "❌ CydiaSubstrate introuvable partout"
+            echo "Fichiers .dylib dans Theos:"
+            find /opt/theos -name "*.dylib" | head -30
             exit 1
           fi
+
           echo "✅ Substrate trouvé: $SUBSTRATE_SRC"
+          mkdir -p "$APP_DIR/Frameworks/CydiaSubstrate.framework"
           cp "$SUBSTRATE_SRC" "$APP_DIR/Frameworks/CydiaSubstrate.framework/CydiaSubstrate"
 
           # Corriger la référence dans notre .dylib
