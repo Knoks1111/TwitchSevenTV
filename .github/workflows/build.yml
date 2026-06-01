@@ -272,6 +272,31 @@ jobs:
           cp "$DYLIB_PATH" "$APP_PATH/TwitchSevenTV.dylib"
           echo "✅ .dylib copié"
 
+          # ── 4b. Embarquer CydiaSubstrate (requis sans jailbreak) ──
+          # Sans jailbreak, /Library/Frameworks/CydiaSubstrate n'existe pas → crash
+          # On copie la lib depuis Theos et on corrige le chemin dans notre dylib
+          SUBSTRATE_SRC=$(find "$THEOS" \( -name "libsubstrate.dylib" -o -name "CydiaSubstrate" \) \
+            -not -type d 2>/dev/null | head -1)
+
+          if [ -n "$SUBSTRATE_SRC" ]; then
+            echo "📦 Substrate trouvé: $SUBSTRATE_SRC"
+            mkdir -p "$APP_PATH/Frameworks/CydiaSubstrate.framework"
+            cp "$SUBSTRATE_SRC" "$APP_PATH/Frameworks/CydiaSubstrate.framework/CydiaSubstrate"
+            echo "✅ CydiaSubstrate copié dans Frameworks/"
+
+            # Corriger le chemin dans notre .dylib pour pointer vers la copie embarquée
+            install_name_tool \
+              -change "/Library/Frameworks/CydiaSubstrate.framework/CydiaSubstrate" \
+              "@executable_path/Frameworks/CydiaSubstrate.framework/CydiaSubstrate" \
+              "$APP_PATH/TwitchSevenTV.dylib" \
+              && echo "✅ Chemin Substrate corrigé dans TwitchSevenTV.dylib" \
+              || echo "⚠️  install_name_tool non-bloquant (lib peut-être déjà absente des dépendances)"
+          else
+            echo "⚠️  libsubstrate.dylib introuvable dans Theos — libs disponibles:"
+            find "$THEOS" -name "*.dylib" 2>/dev/null | head -10
+            echo "   Tentative de compilation sans Substrate embarqué..."
+          fi
+
           # ── 5. Injecter la dépendance via Python lief ──
           python3 << PYEOF
           import lief, sys
@@ -313,6 +338,13 @@ jobs:
           # Le .dylib : obligatoire
           ldid -S "$APP_PATH/TwitchSevenTV.dylib"
           echo "✅ ldid .dylib OK"
+
+          # Le Substrate embarqué : obligatoire aussi
+          if [ -f "$APP_PATH/Frameworks/CydiaSubstrate.framework/CydiaSubstrate" ]; then
+            ldid -S "$APP_PATH/Frameworks/CydiaSubstrate.framework/CydiaSubstrate" \
+              && echo "✅ ldid CydiaSubstrate OK" \
+              || echo "⚠️  ldid Substrate non-critique"
+          fi
 
           # Le binaire principal : non-bloquant (peut échouer sur gros binaires)
           ldid -S "$BINARY" 2>/dev/null && echo "✅ ldid binaire OK" \
