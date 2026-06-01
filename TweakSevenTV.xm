@@ -72,7 +72,7 @@
 - (void)receiveMessageWithCompletionHandler:
     (void (^)(NSURLSessionWebSocketMessage *, NSError *))completionHandler {
 
-    %orig(^(NSURLSessionWebSocketMessage *message, NSError *error) {
+    %orig((void (^)(NSURLSessionWebSocketMessage *, NSError *))^(NSURLSessionWebSocketMessage *message, NSError *error) {
 
         // On ne traite que les messages texte sans erreur
         if (!error && message && message.type == NSURLSessionWebSocketMessageTypeString) {
