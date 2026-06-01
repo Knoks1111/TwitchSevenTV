@@ -1,0 +1,40 @@
+name: Build TwitchSevenTV IPA
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
+
+      - name: Install Theos
+        run: |
+          bash -c "$(curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos)"
+
+      - name: Download Twitch IPA
+        run: |
+          curl -L "${{ secrets.TWITCH_IPA_URL }}" -o Twitch.ipa
+
+      - name: Extract IPA
+        run: |
+          mkdir -p Payload
+          unzip Twitch.ipa -d extracted
+
+      - name: Build Tweak
+        run: |
+          export THEOS=~/theos
+          make package
+
+      - name: Inject Tweak into IPA
+        run: |
+          bash inject.sh
+
+      - name: Upload patched IPA
+        uses: actions/upload-artifact@v3
+        with:
+          name: TwitchSevenTV-patched
+          path: TwitchSevenTV-patched.ipa
