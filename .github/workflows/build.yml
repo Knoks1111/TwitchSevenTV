@@ -38,7 +38,7 @@ jobs:
           echo "📦 Clonage de Theos..."
           git clone --recursive https://github.com/theos/theos.git "$THEOS"
 
-          # Écrire le script Python dans un fichier pour éviter les problèmes YAML
+          # Script Python dans un fichier pour éviter les problèmes de guillemets dans YAML
           cat > /tmp/find_sdk.py << 'PYEOF'
           import sys, json
           try:
@@ -56,7 +56,7 @@ jobs:
           print('')
           PYEOF
 
-          echo "🔍 Recherche du SDK via API GitHub..."
+          echo "🔍 Recherche SDK via API GitHub..."
           API_URL=$(curl --fail --silent \
             "https://api.github.com/repos/theos/sdks/releases/latest" \
             | python3 /tmp/find_sdk.py 2>/dev/null || true)
@@ -79,11 +79,11 @@ jobs:
               FILE_TYPE=$(file --brief "$SDK_FILE" 2>/dev/null || echo "unknown")
               echo "   Type: $FILE_TYPE"
               if echo "$FILE_TYPE" | grep -qiE "XZ compressed|compressed data"; then
-                echo "✅ SDK valide téléchargé"
+                echo "✅ SDK valide"
                 SDK_OK=true
                 break
               else
-                echo "⚠️  Pas du XZ, on continue..."
+                echo "⚠️  Pas du XZ, suivant..."
                 rm -f "$SDK_FILE"
               fi
             else
@@ -97,10 +97,10 @@ jobs:
             exit 1
           fi
 
-          echo "📂 Extraction du SDK..."
+          echo "📂 Extraction SDK..."
           tar -xJf "$SDK_FILE" -C "$THEOS/sdks/"
           rm -f "$SDK_FILE"
-          echo "📋 SDKs disponibles:"; ls "$THEOS/sdks/"
+          echo "📋 SDKs:"; ls "$THEOS/sdks/"
           echo "✅ Theos + SDK prêts"
 
       - name: 🔑 Installer ldid
@@ -113,7 +113,7 @@ jobs:
 
           SDK_NAME=$(ls "$THEOS/sdks/" | grep -E 'iPhoneOS[0-9.]+\.sdk' | sort -V | tail -1)
           if [ -z "$SDK_NAME" ]; then
-            echo "❌ Aucun SDK dans $THEOS/sdks/"; ls "$THEOS/sdks/"; exit 1
+            echo "❌ Aucun SDK dans $THEOS/sdks/"; exit 1
           fi
 
           SDK_VER=$(echo "$SDK_NAME" | grep -oE '[0-9]+\.[0-9]+')
@@ -126,18 +126,25 @@ jobs:
 
           make -j$(sysctl -n hw.ncpu) package FINALPACKAGE=1 $MAKE_EXTRA
 
+          # Utiliser le .deb produit par make → Azule l'accepte nativement
+          # (passer le .deb évite le bug ldid sur le .dylib brut non signé)
+          DEB_PATH=$(find packages -name "*.deb" 2>/dev/null | head -1)
+          if [ -z "$DEB_PATH" ]; then
+            echo "❌ Aucun .deb dans packages/"
+            ls packages/ 2>/dev/null || echo "(vide)"
+            exit 1
+          fi
+
+          # Garder aussi le .dylib pour l'artifact séparé
           DYLIB_PATH=$(find .theos/obj -name "TwitchSevenTV.dylib" 2>/dev/null | head -1)
           if [ -z "$DYLIB_PATH" ]; then
             DYLIB_PATH=$(find .theos -name "TwitchSevenTV.dylib" 2>/dev/null | head -1)
           fi
-          if [ -z "$DYLIB_PATH" ]; then
-            echo "❌ TwitchSevenTV.dylib introuvable"
-            find .theos -name "*.dylib" 2>/dev/null || true
-            exit 1
-          fi
 
-          echo "✅ dylib: $DYLIB_PATH ($(du -sh "$DYLIB_PATH" | cut -f1))"
-          echo "DYLIB_PATH=$DYLIB_PATH" >> $GITHUB_ENV
+          echo "✅ .deb: $DEB_PATH ($(du -sh "$DEB_PATH" | cut -f1))"
+          echo "✅ .dylib: ${DYLIB_PATH:-(non trouvé)}"
+          echo "DEB_PATH=$DEB_PATH" >> $GITHUB_ENV
+          echo "DYLIB_PATH=${DYLIB_PATH:-}" >> $GITHUB_ENV
 
       - name: 📲 Télécharger l'IPA Twitch
         run: |
@@ -148,7 +155,7 @@ jobs:
             IPA_URL="${{ secrets.TWITCH_IPA_URL }}"
           fi
           if [ -z "$IPA_URL" ]; then
-            echo "❌ Pas d'URL IPA — configure le secret TWITCH_IPA_URL"
+            echo "❌ Pas d'URL IPA — configure TWITCH_IPA_URL dans Settings → Secrets"
             exit 1
           fi
 
@@ -161,7 +168,7 @@ jobs:
           FILE_TYPE=$(file --brief Twitch.ipa)
           echo "Type: $FILE_TYPE"
           if ! echo "$FILE_TYPE" | grep -qiE "zip|archive"; then
-            echo "❌ Pas une IPA valide (pas un ZIP) — lien expiré?"
+            echo "❌ Pas une IPA valide — lien Filebin expiré ?"
             exit 1
           fi
 
@@ -177,12 +184,14 @@ jobs:
       - name: 💉 Injecter 7TV dans l'IPA Twitch
         run: |
           set -euo pipefail
-          DYLIB_PATH="${{ env.DYLIB_PATH }}"
+          DEB_PATH="${{ env.DEB_PATH }}"
 
           echo "📱 IPA: $(du -sh Twitch.ipa | cut -f1)"
-          echo "🔧 dylib: $DYLIB_PATH"
+          echo "📦 .deb: $DEB_PATH ($(du -sh "$DEB_PATH" | cut -f1))"
 
-          azule -i Twitch.ipa -o . -f "$DYLIB_PATH"
+          # On passe le .deb à Azule, pas le .dylib brut.
+          # Azule extrait le dylib du .deb et gère la signature — évite le crash ldid.
+          azule -i Twitch.ipa -o . -f "$DEB_PATH"
 
           PATCHED=$(find . -maxdepth 1 -name "*.ipa" ! -name "Twitch.ipa" | head -1)
           if [ -z "$PATCHED" ]; then
@@ -201,11 +210,11 @@ jobs:
           path: TwitchSevenTV_patched.ipa
           retention-days: 30
 
-      - name: 📤 Sauvegarder le .dylib seul
+      - name: 📤 Sauvegarder le .deb (optionnel)
         uses: actions/upload-artifact@v4
         with:
-          name: TwitchSevenTV-dylib-only
-          path: ${{ env.DYLIB_PATH }}
+          name: TwitchSevenTV-deb
+          path: ${{ env.DEB_PATH }}
           retention-days: 30
 
       - name: ✅ Résumé
