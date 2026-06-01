@@ -1,12 +1,37 @@
+# ============================================================
+# .github/workflows/build.yml
+#
+# Ce fichier automatise TOUT le processus de compilation et injection:
+# 1. Configure un Mac virtuel gratuit sur GitHub
+# 2. Installe Theos (outil de compilation de tweaks iOS)
+# 3. Compile le tweak → produit un fichier .dylib
+# 4. Injecte le .dylib dans ton IPA Twitch existant
+# 5. Produit une nouvelle IPA prête à installer via SideStore
+#
+# COMMENT UTILISER:
+# 1. Va sur GitHub.com, crée un compte gratuit
+# 2. Crée un nouveau repository (bouton "+") → "New repository"
+# 3. Nomme-le "TwitchSevenTV" → Create repository
+# 4. Upload tous les fichiers de ce projet
+# 5. Va dans "Settings" → "Secrets and variables" → "Actions"
+# 6. Ajoute un secret "TWITCH_IPA_URL" avec l'URL de ton IPA
+#    (upload ton IPA sur WeTransfer ou Google Drive et mets le lien direct)
+# 7. Va dans l'onglet "Actions" → "Build TwitchSevenTV" → "Run workflow"
+# 8. Attends ~5 minutes → télécharge la nouvelle IPA
+# ============================================================
+
 name: Build TwitchSevenTV + Inject into IPA
 
 on:
+  # Déclenchement manuel depuis l'onglet Actions sur GitHub
   workflow_dispatch:
     inputs:
       ipa_url:
         description: 'URL directe de ton IPA Twitch modifié (Google Drive, WeTransfer...)'
         required: false
         default: ''
+
+  # Ou automatiquement quand tu modifies le code
   push:
     branches: [ main ]
     paths:
@@ -17,42 +42,51 @@ on:
 
 jobs:
   build:
+    # Utilise un Mac virtuel gratuit fourni par GitHub
     runs-on: macos-14
 
     steps:
+      # ── Étape 1: Récupérer le code ──
       - name: 📥 Récupérer le code du tweak
         uses: actions/checkout@v4
 
+      # ── Étape 2: Cache Theos (évite de le retélécharger à chaque fois) ──
       - name: 💾 Cache Theos
         uses: actions/cache@v4
         with:
           path: /opt/theos
-          key: theos-ios-${{ runner.os }}-v2
+          key: theos-ios-${{ runner.os }}-v1
 
+      # ── Étape 3: Installer Theos + ldid si pas en cache ──
       - name: 🔧 Installer Theos + ldid
         run: |
-          # Installer ldid (outil de signature iOS, requis par Theos)
-          brew install ldid
-
           if [ ! -d "/opt/theos" ]; then
             echo "Installation de Theos..."
             sudo git clone --recursive \
               https://github.com/theos/theos.git /opt/theos
-
+            
+            # Télécharger les SDKs iOS (nécessaire pour compiler)
             curl -sSL https://github.com/theos/sdks/releases/latest/download/iPhoneOS16.5.sdk.tar.xz \
               | sudo tar -xJf - -C /opt/theos/sdks/
           else
             echo "Theos déjà en cache ✅"
           fi
-
+          
+          # ldid : outil de signature (obligatoire pour sideloading)
+          brew install ldid
+          
+          # Configurer les variables d'environnement
           echo "THEOS=/opt/theos" >> $GITHUB_ENV
           echo "/opt/theos/bin" >> $GITHUB_PATH
 
+      # ── Étape 4: Compiler le tweak → produit un .dylib ──
       - name: 🔨 Compiler le tweak
         run: |
           export THEOS=/opt/theos
+          # "make" lit le Makefile et compile tout
           make -j$(sysctl -n hw.ncpu) package FINALPACKAGE=1
-
+          
+          # Trouver le .dylib compilé
           DYLIB_PATH=$(find .theos -name "*.dylib" | head -1)
           if [ -z "$DYLIB_PATH" ]; then
             echo "❌ Erreur: .dylib non trouvé après compilation"
@@ -61,76 +95,115 @@ jobs:
           echo "✅ .dylib compilé: $DYLIB_PATH"
           echo "DYLIB_PATH=$DYLIB_PATH" >> $GITHUB_ENV
 
+      # ── Étape 5: Télécharger l'IPA Twitch ──
       - name: 📲 Télécharger l'IPA Twitch
         run: |
           IPA_URL="${{ github.event.inputs.ipa_url }}"
           if [ -z "$IPA_URL" ]; then
             IPA_URL="${{ secrets.TWITCH_IPA_URL }}"
           fi
-
+          
           if [ -z "$IPA_URL" ]; then
             echo "❌ Pas d'URL IPA fournie!"
+            echo "Configure le secret TWITCH_IPA_URL dans Settings → Secrets"
+            echo "Ou fournis l'URL dans le champ lors du déclenchement manuel."
             exit 1
           fi
-
+          
           echo "📥 Téléchargement de l'IPA..."
           curl -L -o Twitch.ipa "$IPA_URL"
-
+          
           if [ ! -f "Twitch.ipa" ]; then
             echo "❌ Téléchargement échoué"
             exit 1
           fi
-
+          
           IPA_SIZE=$(du -sh Twitch.ipa | cut -f1)
           echo "✅ IPA téléchargée: $IPA_SIZE"
 
-      - name: 🛠️ Installer insert_dylib
+      # ── Étape 6: Installer les outils d'injection ──
+      - name: 🛠️ Installer insert_dylib (outil d'injection)
         run: |
-          git clone https://github.com/Tyilo/insert_dylib.git /tmp/insert_dylib
-          cd /tmp/insert_dylib
-          xcodebuild -project insert_dylib.xcodeproj \
-                     -scheme insert_dylib \
-                     -configuration Release \
-                     SYMROOT=/tmp/insert_dylib_build 2>/dev/null
-          sudo cp /tmp/insert_dylib_build/Release/insert_dylib /usr/local/bin/
+          # insert_dylib est l'outil standard pour injecter des .dylib dans des IPA
+          if ! command -v insert_dylib &> /dev/null; then
+            echo "Installation de insert_dylib..."
+            git clone https://github.com/Tyilo/insert_dylib.git /tmp/insert_dylib
+            cd /tmp/insert_dylib
+            xcodebuild -project insert_dylib.xcodeproj \
+                       -scheme insert_dylib \
+                       -configuration Release \
+                       SYMROOT=/tmp/insert_dylib_build
+            sudo cp /tmp/insert_dylib_build/Release/insert_dylib /usr/local/bin/
+          fi
           echo "✅ insert_dylib disponible"
 
+      # ── Étape 7: Injecter le .dylib dans l'IPA ──
       - name: 💉 Injecter 7TV dans l'IPA Twitch
         run: |
           echo "📦 Extraction de l'IPA..."
           mkdir -p IPA_work
           cd IPA_work
           unzip -q ../Twitch.ipa
-
+          
+          # Trouver le binaire principal de Twitch
           APP_DIR=$(find Payload -name "*.app" -maxdepth 1 -type d | head -1)
           if [ -z "$APP_DIR" ]; then
             echo "❌ Impossible de trouver le bundle .app dans l'IPA"
             exit 1
           fi
-
+          
           APP_NAME=$(basename "$APP_DIR" .app)
           BINARY_PATH="$APP_DIR/$APP_NAME"
           echo "📱 App trouvée: $APP_DIR"
-
+          echo "🔧 Binaire: $BINARY_PATH"
+          
+          # Copier le .dylib dans le bundle de l'app
           mkdir -p "$APP_DIR/Frameworks"
           DYLIB_NAME="TwitchSevenTV.dylib"
           cp "$GITHUB_WORKSPACE/${{ env.DYLIB_PATH }}" "$APP_DIR/Frameworks/$DYLIB_NAME"
           echo "✅ .dylib copié dans Frameworks/"
 
+          # ── Bundler CydiaSubstrate dans l'IPA ──
+          # Sans ça, l'app crashe au lancement sur un iPhone non jailbreaké
+          echo "📦 Bundling CydiaSubstrate dans l'IPA..."
+          mkdir -p "$APP_DIR/Frameworks/CydiaSubstrate.framework"
+          
+          # Theos fournit libsubstrate.dylib — on le copie dans le bundle
+          SUBSTRATE_SRC=$(find /opt/theos -name "libsubstrate.dylib" | head -1)
+          if [ -z "$SUBSTRATE_SRC" ]; then
+            echo "❌ libsubstrate.dylib non trouvé dans Theos"
+            find /opt/theos -name "*.dylib" | head -20
+            exit 1
+          fi
+          echo "✅ Substrate trouvé: $SUBSTRATE_SRC"
+          cp "$SUBSTRATE_SRC" "$APP_DIR/Frameworks/CydiaSubstrate.framework/CydiaSubstrate"
+
+          # Corriger la référence dans notre .dylib
+          # (lui dire de chercher Substrate dans @rpath au lieu de /Library/Frameworks/)
+          install_name_tool \
+            -change /Library/Frameworks/CydiaSubstrate.framework/CydiaSubstrate \
+            @rpath/CydiaSubstrate.framework/CydiaSubstrate \
+            "$APP_DIR/Frameworks/$DYLIB_NAME"
+          echo "✅ Référence CydiaSubstrate corrigée dans le dylib"
+
+          # Injecter le .dylib dans le binaire (lui dire de le charger au lancement)
           insert_dylib \
             --strip-codesig \
             --inplace \
             "@executable_path/Frameworks/$DYLIB_NAME" \
             "$BINARY_PATH"
           echo "✅ .dylib injecté dans le binaire"
-
+          
+          # Recréer l'IPA (c'est juste un zip renommé)
           echo "📦 Repackaging en IPA..."
           zip -qr ../TwitchSevenTV_patched.ipa Payload/
           cd ..
-
+          
           IPA_SIZE=$(du -sh TwitchSevenTV_patched.ipa | cut -f1)
           echo "✅ Nouvelle IPA créée: $IPA_SIZE"
 
+      # ── Étape 8: Sauvegarder les fichiers produits ──
+      # (ils restent disponibles 30 jours dans l'onglet Actions)
       - name: 📤 Sauvegarder l'IPA patchée
         uses: actions/upload-artifact@v4
         with:
@@ -138,18 +211,25 @@ jobs:
           path: TwitchSevenTV_patched.ipa
           retention-days: 30
 
-      - name: 📤 Sauvegarder le .dylib seul
+      - name: 📤 Sauvegarder le .dylib seul (optionnel)
         uses: actions/upload-artifact@v4
         with:
           name: TwitchSevenTV-dylib-only
           path: ${{ env.DYLIB_PATH }}
           retention-days: 30
 
+      # ── Étape 9: Résumé ──
       - name: ✅ Résumé
         run: |
           echo "========================================"
           echo "  TwitchSevenTV - Build terminé! 🎉"
           echo "========================================"
-          echo "📥 Télécharge l'IPA dans l'onglet Artifacts"
-          echo "📱 Installe via SideStore"
+          echo ""
+          echo "📥 Pour télécharger ta nouvelle IPA:"
+          echo "   Onglet 'Actions' → ce workflow → 'Artifacts'"
+          echo "   Télécharge 'TwitchSevenTV-Patched-IPA'"
+          echo ""
+          echo "📱 Installation:"
+          echo "   Installe la nouvelle IPA via SideStore"
+          echo "   (remplace l'ancienne IPA Twitch)"
           echo "========================================"
