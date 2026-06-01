@@ -317,7 +317,7 @@
         NSDictionary *dict = obj;
 
         // Clés courantes dans les réponses GQL de Twitch
-        NSArray *idKeys = @[@"id", @"userID", @"channelID", @"broadcasterID"];
+        __unused NSArray *idKeys = @[@"id", @"userID", @"channelID", @"broadcasterID"];
 
         // Chercher dans les sous-objets courants qui ressemblent à des canaux
         NSArray *channelKeys = @[@"channel", @"broadcaster", @"user", @"streamer", @"owner"];
