@@ -28,7 +28,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/theos
-          key: theos-ios-${{ runner.os }}-v4
+          key: theos-ios-${{ runner.os }}-v5
 
       - name: 🔧 Installer Theos + SDK iOS
         if: steps.cache-theos.outputs.cache-hit != 'true'
@@ -38,7 +38,6 @@ jobs:
           echo "📦 Clonage de Theos..."
           git clone --recursive https://github.com/theos/theos.git "$THEOS"
 
-          # Script Python dans un fichier pour éviter les problèmes de guillemets dans YAML
           cat > /tmp/find_sdk.py << 'PYEOF'
           import sys, json
           try:
@@ -103,8 +102,15 @@ jobs:
           echo "📋 SDKs:"; ls "$THEOS/sdks/"
           echo "✅ Theos + SDK prêts"
 
-      - name: 🔑 Installer ldid
-        run: brew install ldid
+      - name: 🔑 Installer ldid + insert_dylib
+        run: |
+          brew install ldid
+          # Compiler insert_dylib depuis les sources
+          git clone --depth=1 https://github.com/Tyilo/insert_dylib /tmp/insert_dylib
+          cd /tmp/insert_dylib
+          clang++ -std=c++11 -o /usr/local/bin/insert_dylib insert_dylib/main.cpp
+          chmod +x /usr/local/bin/insert_dylib
+          echo "✅ ldid + insert_dylib prêts"
 
       - name: 🔨 Compiler le tweak
         run: |
@@ -126,8 +132,22 @@ jobs:
 
           make -j$(sysctl -n hw.ncpu) package FINALPACKAGE=1 $MAKE_EXTRA
 
-          # Utiliser le .deb produit par make → Azule l'accepte nativement
-          # (passer le .deb évite le bug ldid sur le .dylib brut non signé)
+          # Trouver le .dylib compilé
+          DYLIB_PATH=$(find .theos/obj -name "TwitchSevenTV.dylib" 2>/dev/null | head -1)
+          if [ -z "$DYLIB_PATH" ]; then
+            DYLIB_PATH=$(find .theos -name "TwitchSevenTV.dylib" 2>/dev/null | head -1)
+          fi
+          if [ -z "$DYLIB_PATH" ]; then
+            echo "❌ TwitchSevenTV.dylib introuvable après make"
+            find . -name "*.dylib" 2>/dev/null || true
+            exit 1
+          fi
+
+          # Signer le .dylib avec ldid AVANT toute injection
+          echo "🔑 Signature ldid: $DYLIB_PATH"
+          ldid -S "$DYLIB_PATH"
+          echo "✅ Signature OK"
+
           DEB_PATH=$(find packages -name "*.deb" 2>/dev/null | head -1)
           if [ -z "$DEB_PATH" ]; then
             echo "❌ Aucun .deb dans packages/"
@@ -135,16 +155,10 @@ jobs:
             exit 1
           fi
 
-          # Garder aussi le .dylib pour l'artifact séparé
-          DYLIB_PATH=$(find .theos/obj -name "TwitchSevenTV.dylib" 2>/dev/null | head -1)
-          if [ -z "$DYLIB_PATH" ]; then
-            DYLIB_PATH=$(find .theos -name "TwitchSevenTV.dylib" 2>/dev/null | head -1)
-          fi
-
-          echo "✅ .deb: $DEB_PATH ($(du -sh "$DEB_PATH" | cut -f1))"
-          echo "✅ .dylib: ${DYLIB_PATH:-(non trouvé)}"
-          echo "DEB_PATH=$DEB_PATH" >> $GITHUB_ENV
-          echo "DYLIB_PATH=${DYLIB_PATH:-}" >> $GITHUB_ENV
+          echo "✅ .dylib: $DYLIB_PATH ($(du -sh "$DYLIB_PATH" | cut -f1))"
+          echo "✅ .deb:   $DEB_PATH ($(du -sh "$DEB_PATH" | cut -f1))"
+          echo "DYLIB_PATH=$DYLIB_PATH" >> $GITHUB_ENV
+          echo "DEB_PATH=$DEB_PATH"     >> $GITHUB_ENV
 
       - name: 📲 Télécharger l'IPA Twitch
         run: |
@@ -168,39 +182,74 @@ jobs:
           FILE_TYPE=$(file --brief Twitch.ipa)
           echo "Type: $FILE_TYPE"
           if ! echo "$FILE_TYPE" | grep -qiE "zip|archive"; then
-            echo "❌ Pas une IPA valide — lien Filebin expiré ?"
+            echo "❌ Pas une IPA valide — lien expiré ?"
             exit 1
           fi
 
           echo "✅ IPA: $(du -sh Twitch.ipa | cut -f1)"
 
-      - name: 🛠️ Installer Azule
-        run: |
-          git clone --depth=1 https://github.com/Al4ise/Azule /tmp/azule
-          sudo ln -sf /tmp/azule/azule /usr/local/bin/azule
-          sudo chmod +x /tmp/azule/azule
-          echo "✅ Azule prêt"
-
       - name: 💉 Injecter 7TV dans l'IPA Twitch
         run: |
           set -euo pipefail
-          DEB_PATH="${{ env.DEB_PATH }}"
+          DYLIB_PATH="${{ env.DYLIB_PATH }}"
 
-          echo "📱 IPA: $(du -sh Twitch.ipa | cut -f1)"
-          echo "📦 .deb: $DEB_PATH ($(du -sh "$DEB_PATH" | cut -f1))"
+          echo "📱 IPA source:  $(du -sh Twitch.ipa | cut -f1)"
+          echo "🔧 .dylib:      $DYLIB_PATH ($(du -sh "$DYLIB_PATH" | cut -f1))"
 
-          # On passe le .deb à Azule, pas le .dylib brut.
-          # Azule extrait le dylib du .deb et gère la signature — évite le crash ldid.
-          azule -i Twitch.ipa -o . -f "$DEB_PATH"
+          # ── 1. Extraire l'IPA ──
+          mkdir -p IPA_work
+          unzip -q Twitch.ipa -d IPA_work
 
-          PATCHED=$(find . -maxdepth 1 -name "*.ipa" ! -name "Twitch.ipa" | head -1)
-          if [ -z "$PATCHED" ]; then
-            echo "❌ Azule n'a produit aucune IPA"
-            ls -la *.ipa 2>/dev/null || true
+          # ── 2. Trouver le bundle .app ──
+          APP_PATH=$(find IPA_work/Payload -maxdepth 1 -name "*.app" -type d | head -1)
+          if [ -z "$APP_PATH" ]; then
+            echo "❌ Aucun .app trouvé dans Payload/"
+            ls IPA_work/Payload/ || true
+            exit 1
+          fi
+          echo "📂 App: $APP_PATH"
+
+          # ── 3. Trouver le binaire principal (même nom que le .app) ──
+          APP_NAME=$(basename "$APP_PATH" .app)
+          BINARY="$APP_PATH/$APP_NAME"
+          if [ ! -f "$BINARY" ]; then
+            # Fallback: premier exécutable dans le .app
+            BINARY=$(find "$APP_PATH" -maxdepth 1 -type f -perm +111 | head -1)
+          fi
+          if [ -z "$BINARY" ] || [ ! -f "$BINARY" ]; then
+            echo "❌ Binaire principal introuvable dans $APP_PATH"
+            ls "$APP_PATH" | head -20
+            exit 1
+          fi
+          echo "⚙️  Binaire: $BINARY"
+
+          # ── 4. Copier le .dylib dans le bundle ──
+          cp "$DYLIB_PATH" "$APP_PATH/TwitchSevenTV.dylib"
+          echo "✅ .dylib copié dans le bundle"
+
+          # ── 5. Injecter la dépendance dans le binaire Twitch ──
+          insert_dylib \
+            --strip-codesig \
+            --inplace \
+            "@executable_path/TwitchSevenTV.dylib" \
+            "$BINARY"
+          echo "✅ Injection insert_dylib OK"
+
+          # ── 6. Re-signer le binaire et le .dylib avec ldid ──
+          ldid -S "$APP_PATH/TwitchSevenTV.dylib"
+          ldid -S "$BINARY"
+          echo "✅ ldid re-signature OK"
+
+          # ── 7. Recréer l'IPA ──
+          cd IPA_work
+          zip -qr ../TwitchSevenTV_patched.ipa Payload
+          cd ..
+
+          if [ ! -s "TwitchSevenTV_patched.ipa" ]; then
+            echo "❌ IPA patchée vide ou absente"
             exit 1
           fi
 
-          mv "$PATCHED" TwitchSevenTV_patched.ipa
           echo "✅ IPA patchée: $(du -sh TwitchSevenTV_patched.ipa | cut -f1)"
 
       - name: 📤 Sauvegarder l'IPA patchée
@@ -224,5 +273,4 @@ jobs:
           echo "========================================"
           echo "Onglet Actions → Artifacts → TwitchSevenTV-Patched-IPA"
           echo "Installe via SideStore"
-          echo "⚠️  Lien Filebin expire le 8 juin 2026"
           echo "========================================"
