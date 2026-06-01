@@ -32,11 +32,15 @@ static NSString *const kActionCell = @"ActionCell";
 // MARK: - Initialisation
 // ============================================================
 
+- (instancetype)init {
+    self = [super initWithStyle:UITableViewStyleInsetGrouped];
+    return self;
+}
+
 - (void)viewDidLoad {
     [super viewDidLoad];
 
     self.title = @"Paramètres 7TV";
-    self.tableView.style = UITableViewStyleInsetGrouped;
 
     // Bouton "Fermer"
     UIBarButtonItem *closeBtn = [[UIBarButtonItem alloc]
