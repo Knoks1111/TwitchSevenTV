@@ -357,6 +357,13 @@ jobs:
           path: ${{ env.DEB_PATH }}
           retention-days: 30
 
+      - name: 📤 Sauvegarder la .dylib seule
+        uses: actions/upload-artifact@v4
+        with:
+          name: TwitchSevenTV-dylib
+          path: ${{ env.DYLIB_PATH }}
+          retention-days: 30
+
       - name: ✅ Résumé
         run: |
           echo "========================================"
@@ -364,6 +371,10 @@ jobs:
           echo "========================================"
           echo "Onglet Actions → Artifacts → TwitchSevenTV-Patched-IPA"
           echo "Installe via SideStore"
+          echo ""
+          echo "💡 Pour tester rapidement sans resideload :"
+          echo "   Télécharge TwitchSevenTV-dylib → glisse dans"
+          echo "   LiveContainer → Tweaks de Twitch → relance"
           echo ""
           echo "⚠️  Si l'IPA est expirée (lien Filebin/WeTransfer mort):"
           echo "   1. Re-upload l'IPA"
