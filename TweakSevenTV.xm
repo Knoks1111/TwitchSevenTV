@@ -136,15 +136,15 @@
     // On ne touche qu'aux requêtes vers l'API GraphQL de Twitch
     if ([host isEqualToString:@"gql.twitch.tv"] && completionHandler) {
 
-        return %orig(request, ^(NSData *data, NSURLResponse *response, NSError *error) {
-
+        void (^wrappedGQLHandler)(NSData *, NSURLResponse *, NSError *) =
+            ^(NSData *data, NSURLResponse *response, NSError *error) {
             if (data && !error) {
-                // Extrait le broadcaster ID de la réponse JSON
                 [[SevenTVManager sharedManager]
                     extractAndLoadEmotesFromGQLResponse:data];
             }
             completionHandler(data, response, error);
-        });
+        };
+        return %orig(request, wrappedGQLHandler);
     }
 
     return %orig; // Pour tout le reste, comportement normal
