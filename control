@@ -1,0 +1,11 @@
+Package: com.tonnom.twitchseventv
+Name: TwitchSevenTV
+Depends: mobilesubstrate | substitute | libhooker
+Version: 1.0.0
+Architecture: iphoneos-arm64
+Description: 7TV emotes support for Twitch iOS
+ Injects 7TV emotes into the Twitch iOS chat.
+ Compatible with existing adblocker modifications.
+Maintainer: TonNom
+Author: TonNom
+Section: Tweaks
