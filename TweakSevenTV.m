@@ -141,11 +141,30 @@ static void TwitchSevenTVInit(void) {
     NSLog(@"[7TV] 🔌 Chargement TwitchSevenTV (substrate-free)...");
 
     // ── Swizzle NSURLSession ──
-    s7tv_swizzle(
-        [NSURLSession class],
-        @selector(dataTaskWithRequest:completionHandler:),
-        @selector(s7tv_dataTaskWithRequest:completionHandler:)
-    );
+    // NSURLSession est un class cluster : [NSURLSession class] retourne la classe
+    // abstraite, mais les instances sont de type __NSURLSessionLocal (ou similaire).
+    // On crée une instance probe pour obtenir la vraie classe concrète, puis on
+    // copie notre méthode swizzlée dans cette classe avant d'échanger.
+    {
+        NSURLSession *probe = [NSURLSession sessionWithConfiguration:
+                               [NSURLSessionConfiguration defaultSessionConfiguration]];
+        Class realSessionClass = object_getClass(probe);
+
+        SEL swizzledSel = @selector(s7tv_dataTaskWithRequest:completionHandler:);
+        // La méthode swizzlée est définie dans la catégorie sur NSURLSession.
+        // On la copie dans la classe concrète pour que l'échange soit bien local.
+        Method swizzledMethod = class_getInstanceMethod([NSURLSession class], swizzledSel);
+        if (swizzledMethod) {
+            class_addMethod(realSessionClass,
+                            swizzledSel,
+                            method_getImplementation(swizzledMethod),
+                            method_getTypeEncoding(swizzledMethod));
+        }
+
+        s7tv_swizzle(realSessionClass,
+                     @selector(dataTaskWithRequest:completionHandler:),
+                     swizzledSel);
+    }
 
     // ── Swizzle NSURLSessionWebSocketTask ──
     Class wsClass = NSClassFromString(@"NSURLSessionWebSocketTask");

@@ -299,10 +299,31 @@
         for (NSDictionary *response in responses) {
             if (![response isKindOfClass:[NSDictionary class]]) continue;
 
-            // Chercher de manière récursive un ID de broadcaster
-            NSString *broadcasterID = [self findBroadcasterIDInObject:response];
-            if (broadcasterID && ![broadcasterID isEqualToString:self.currentChannelTwitchID]) {
-                [self log:@"📡 Broadcaster ID trouvé via GQL: %@", broadcasterID];
+            // Chercher de manière récursive un ID de broadcaster ET son login
+            NSString *channelLogin = nil;
+            NSString *broadcasterID = [self findBroadcasterIDInObject:response
+                                                         channelLogin:&channelLogin];
+
+            if (!broadcasterID) continue;
+
+            // Mettre à jour le channel name dès qu'on le trouve (meme si ID identique)
+            if (channelLogin.length > 0) {
+                self.currentChannelName = channelLogin;
+                [self log:@"📡 Channel name extrait GQL: %@", channelLogin];
+            }
+
+            // Si l'ID a change -> nouveau channel -> reset + reload
+            if (![broadcasterID isEqualToString:self.currentChannelTwitchID]) {
+                [self log:@"📡 Nouveau broadcaster ID via GQL: %@ (ancien: %@)",
+                 broadcasterID, self.currentChannelTwitchID ?: @"aucun"];
+
+                // Reset des emotes du channel precedent (fix bug cache)
+                NSString *oldID = self.currentChannelTwitchID;
+                dispatch_barrier_async(self.emoteQueue, ^{
+                    self.channelEmotes = @{};
+                    if (oldID) [self.loadedChannelIDs removeObject:oldID];
+                });
+
                 self.currentChannelTwitchID = broadcasterID;
                 [self loadEmotesForChannelTwitchID:broadcasterID];
                 break;
@@ -311,32 +332,39 @@
     });
 }
 
-// Cherche récursivement un broadcaster ID dans un objet JSON
-- (NSString *)findBroadcasterIDInObject:(id)obj {
+// Cherche récursivement un broadcaster ID dans un objet JSON.
+// Si outLogin != NULL, remplit aussi le login/nom du channel quand disponible.
+- (NSString *)findBroadcasterIDInObject:(id)obj
+                           channelLogin:(NSString **)outLogin {
     if ([obj isKindOfClass:[NSDictionary class]]) {
         NSDictionary *dict = obj;
 
-        // Clés courantes dans les réponses GQL de Twitch
-        __unused NSArray *idKeys = @[@"id", @"userID", @"channelID", @"broadcasterID"];
-
-        // Chercher dans les sous-objets courants qui ressemblent à des canaux
+        // Clés courantes dans les réponses GQL de Twitch pour identifier un canal
         NSArray *channelKeys = @[@"channel", @"broadcaster", @"user", @"streamer", @"owner"];
         for (NSString *key in channelKeys) {
             id value = dict[key];
             if ([value isKindOfClass:[NSDictionary class]]) {
-                // Un ID Twitch est numérique et généralement > 6 chiffres
+                // Un ID Twitch est numérique et généralement > 4 chiffres
                 NSString *foundID = value[@"id"];
                 if ([self isTwitchUserID:foundID]) {
+                    // Extraire aussi le login si disponible
+                    if (outLogin) {
+                        NSString *login = value[@"login"] ?: value[@"name"];
+                        if ([login isKindOfClass:[NSString class]] && login.length > 0) {
+                            *outLogin = login;
+                        }
+                    }
                     return foundID;
                 }
             }
         }
 
-        // Chercher "broadcastUser" ou patterns similaires
+        // Chercher "broadcastUser" ou patterns similaires en récursion
         for (NSString *key in dict) {
             if ([key.lowercaseString containsString:@"broadcast"] ||
                 [key.lowercaseString containsString:@"channel"]) {
-                NSString *result = [self findBroadcasterIDInObject:dict[key]];
+                NSString *result = [self findBroadcasterIDInObject:dict[key]
+                                                      channelLogin:outLogin];
                 if (result) return result;
             }
         }
@@ -344,7 +372,8 @@
 
     if ([obj isKindOfClass:[NSArray class]]) {
         for (id item in (NSArray *)obj) {
-            NSString *result = [self findBroadcasterIDInObject:item];
+            NSString *result = [self findBroadcasterIDInObject:item
+                                                  channelLogin:outLogin];
             if (result) return result;
         }
     }
