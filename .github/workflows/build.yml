@@ -28,7 +28,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/theos
-          key: theos-ios-${{ runner.os }}-v5
+          key: theos-ios-${{ runner.os }}-v6
 
       - name: 🔧 Installer Theos + SDK iOS
         if: steps.cache-theos.outputs.cache-hit != 'true'
@@ -104,13 +104,35 @@ jobs:
 
       - name: 🔑 Installer ldid + insert_dylib
         run: |
+          set -euo pipefail
+
+          # ── ldid via brew ──
           brew install ldid
-          # Compiler insert_dylib depuis les sources
-          git clone --depth=1 https://github.com/Tyilo/insert_dylib /tmp/insert_dylib
-          cd /tmp/insert_dylib
-          clang++ -std=c++11 -o /usr/local/bin/insert_dylib insert_dylib/main.cpp
-          chmod +x /usr/local/bin/insert_dylib
-          echo "✅ ldid + insert_dylib prêts"
+          echo "✅ ldid: $(ldid 2>&1 | head -1 || true)"
+
+          # ── insert_dylib: essai brew d'abord, puis compilation manuelle ──
+          if brew install insert_dylib 2>/dev/null; then
+            echo "✅ insert_dylib installé via brew"
+          else
+            echo "⚠️  brew install insert_dylib échoué — compilation depuis source..."
+            git clone --depth=1 https://github.com/Tyilo/insert_dylib /tmp/insert_dylib_src
+
+            # Le fichier source peut être à la racine OU dans un sous-dossier
+            CPP_FILE=$(find /tmp/insert_dylib_src -name "main.cpp" | head -1)
+            if [ -z "$CPP_FILE" ]; then
+              echo "❌ main.cpp introuvable dans le repo insert_dylib"
+              find /tmp/insert_dylib_src -type f | head -30
+              exit 1
+            fi
+            echo "📄 Source trouvée: $CPP_FILE"
+
+            clang++ -std=c++11 -o /usr/local/bin/insert_dylib "$CPP_FILE"
+            chmod +x /usr/local/bin/insert_dylib
+            echo "✅ insert_dylib compilé depuis: $CPP_FILE"
+          fi
+
+          # Vérification finale
+          which insert_dylib && echo "✅ insert_dylib prêt: $(which insert_dylib)"
 
       - name: 🔨 Compiler le tweak
         run: |
@@ -132,22 +154,20 @@ jobs:
 
           make -j$(sysctl -n hw.ncpu) package FINALPACKAGE=1 $MAKE_EXTRA
 
-          # Trouver le .dylib compilé
-          DYLIB_PATH=$(find .theos/obj -name "TwitchSevenTV.dylib" 2>/dev/null | head -1)
-          if [ -z "$DYLIB_PATH" ]; then
-            DYLIB_PATH=$(find .theos -name "TwitchSevenTV.dylib" 2>/dev/null | head -1)
-          fi
+          # ── Trouver le .dylib ──
+          DYLIB_PATH=$(find .theos -name "TwitchSevenTV.dylib" 2>/dev/null | head -1)
           if [ -z "$DYLIB_PATH" ]; then
             echo "❌ TwitchSevenTV.dylib introuvable après make"
             find . -name "*.dylib" 2>/dev/null || true
             exit 1
           fi
 
-          # Signer le .dylib avec ldid AVANT toute injection
+          # ── Signer le .dylib MAINTENANT avant toute injection ──
           echo "🔑 Signature ldid: $DYLIB_PATH"
           ldid -S "$DYLIB_PATH"
-          echo "✅ Signature OK"
+          echo "✅ ldid OK — type: $(file "$DYLIB_PATH")"
 
+          # ── Trouver le .deb ──
           DEB_PATH=$(find packages -name "*.deb" 2>/dev/null | head -1)
           if [ -z "$DEB_PATH" ]; then
             echo "❌ Aucun .deb dans packages/"
@@ -156,7 +176,7 @@ jobs:
           fi
 
           echo "✅ .dylib: $DYLIB_PATH ($(du -sh "$DYLIB_PATH" | cut -f1))"
-          echo "✅ .deb:   $DEB_PATH ($(du -sh "$DEB_PATH" | cut -f1))"
+          echo "✅ .deb:   $DEB_PATH   ($(du -sh "$DEB_PATH"   | cut -f1))"
           echo "DYLIB_PATH=$DYLIB_PATH" >> $GITHUB_ENV
           echo "DEB_PATH=$DEB_PATH"     >> $GITHUB_ENV
 
@@ -183,6 +203,7 @@ jobs:
           echo "Type: $FILE_TYPE"
           if ! echo "$FILE_TYPE" | grep -qiE "zip|archive"; then
             echo "❌ Pas une IPA valide — lien expiré ?"
+            echo "   Re-upload l'IPA et mets à jour le secret TWITCH_IPA_URL"
             exit 1
           fi
 
@@ -194,62 +215,86 @@ jobs:
           DYLIB_PATH="${{ env.DYLIB_PATH }}"
 
           echo "📱 IPA source:  $(du -sh Twitch.ipa | cut -f1)"
-          echo "🔧 .dylib:      $DYLIB_PATH ($(du -sh "$DYLIB_PATH" | cut -f1))"
+          echo "🔧 .dylib:      $DYLIB_PATH"
 
           # ── 1. Extraire l'IPA ──
           mkdir -p IPA_work
           unzip -q Twitch.ipa -d IPA_work
 
-          # ── 2. Trouver le bundle .app ──
+          # ── 2. Trouver le .app ──
           APP_PATH=$(find IPA_work/Payload -maxdepth 1 -name "*.app" -type d | head -1)
           if [ -z "$APP_PATH" ]; then
-            echo "❌ Aucun .app trouvé dans Payload/"
+            echo "❌ Aucun .app dans Payload/"
             ls IPA_work/Payload/ || true
             exit 1
           fi
           echo "📂 App: $APP_PATH"
 
-          # ── 3. Trouver le binaire principal (même nom que le .app) ──
+          # ── 3. Trouver le binaire principal ──
+          # Méthode 1: même nom que le .app (cas standard)
           APP_NAME=$(basename "$APP_PATH" .app)
           BINARY="$APP_PATH/$APP_NAME"
+
+          # Méthode 2: lire Info.plist si méthode 1 échoue
           if [ ! -f "$BINARY" ]; then
-            # Fallback: premier exécutable dans le .app
-            BINARY=$(find "$APP_PATH" -maxdepth 1 -type f -perm +111 | head -1)
+            EXEC_NAME=$(/usr/libexec/PlistBuddy -c "Print CFBundleExecutable" \
+              "$APP_PATH/Info.plist" 2>/dev/null || true)
+            if [ -n "$EXEC_NAME" ]; then
+              BINARY="$APP_PATH/$EXEC_NAME"
+            fi
           fi
+
+          # Méthode 3: premier Mach-O dans le .app
+          if [ ! -f "$BINARY" ]; then
+            BINARY=$(find "$APP_PATH" -maxdepth 1 -type f | \
+              xargs -I{} sh -c 'file "{}" | grep -q "Mach-O" && echo "{}"' 2>/dev/null | head -1)
+          fi
+
           if [ -z "$BINARY" ] || [ ! -f "$BINARY" ]; then
-            echo "❌ Binaire principal introuvable dans $APP_PATH"
+            echo "❌ Binaire principal introuvable"
             ls "$APP_PATH" | head -20
             exit 1
           fi
           echo "⚙️  Binaire: $BINARY"
+          echo "   Type: $(file "$BINARY")"
 
-          # ── 4. Copier le .dylib dans le bundle ──
+          # ── 4. Copier le .dylib signé dans le bundle ──
           cp "$DYLIB_PATH" "$APP_PATH/TwitchSevenTV.dylib"
-          echo "✅ .dylib copié dans le bundle"
+          echo "✅ .dylib copié"
 
-          # ── 5. Injecter la dépendance dans le binaire Twitch ──
-          insert_dylib \
-            --strip-codesig \
-            --inplace \
-            "@executable_path/TwitchSevenTV.dylib" \
-            "$BINARY"
-          echo "✅ Injection insert_dylib OK"
+          # ── 5. Vérifier si le .dylib est déjà injecté (évite doublons) ──
+          ALREADY=$(otool -L "$BINARY" 2>/dev/null | grep "TwitchSevenTV" || true)
+          if [ -n "$ALREADY" ]; then
+            echo "⚠️  TwitchSevenTV.dylib déjà présent dans le binaire — on skip insert_dylib"
+          else
+            insert_dylib \
+              --strip-codesig \
+              --inplace \
+              "@executable_path/TwitchSevenTV.dylib" \
+              "$BINARY"
+            echo "✅ insert_dylib OK"
+          fi
 
-          # ── 6. Re-signer le binaire et le .dylib avec ldid ──
+          # ── 6. Re-signer .dylib ET binaire avec ldid ──
           ldid -S "$APP_PATH/TwitchSevenTV.dylib"
           ldid -S "$BINARY"
-          echo "✅ ldid re-signature OK"
+          echo "✅ Re-signature ldid OK"
 
-          # ── 7. Recréer l'IPA ──
+          # ── 7. Recréer l'IPA proprement (sans fichiers parasites macOS) ──
           cd IPA_work
-          zip -qr ../TwitchSevenTV_patched.ipa Payload
+          # Supprimer les fichiers macOS qui corrompent l'IPA
+          find . -name ".DS_Store" -delete 2>/dev/null || true
+          find . -name "__MACOSX" -exec rm -rf {} + 2>/dev/null || true
+
+          zip -qr ../TwitchSevenTV_patched.ipa Payload \
+            --exclude "*.DS_Store" \
+            --exclude "__MACOSX/*"
           cd ..
 
           if [ ! -s "TwitchSevenTV_patched.ipa" ]; then
-            echo "❌ IPA patchée vide ou absente"
+            echo "❌ IPA patchée vide"
             exit 1
           fi
-
           echo "✅ IPA patchée: $(du -sh TwitchSevenTV_patched.ipa | cut -f1)"
 
       - name: 📤 Sauvegarder l'IPA patchée
@@ -273,4 +318,7 @@ jobs:
           echo "========================================"
           echo "Onglet Actions → Artifacts → TwitchSevenTV-Patched-IPA"
           echo "Installe via SideStore"
+          echo ""
+          echo "⚠️  RAPPEL: Si l'IPA Filebin est expirée, re-upload"
+          echo "   l'IPA et mets à jour le secret TWITCH_IPA_URL"
           echo "========================================"
