@@ -186,6 +186,13 @@ jobs:
             "$APP_DIR/Frameworks/$DYLIB_NAME"
           echo "✅ Référence CydiaSubstrate corrigée dans le dylib"
 
+          # Ajouter @rpath au dylib pour qu'il sache où chercher ses dépendances
+          # (pointe vers le dossier Frameworks/ de l'app)
+          install_name_tool \
+            -add_rpath @executable_path/Frameworks \
+            "$APP_DIR/Frameworks/$DYLIB_NAME"
+          echo "✅ @rpath ajouté au dylib"
+
           # Injecter le .dylib dans le binaire (lui dire de le charger au lancement)
           insert_dylib \
             --strip-codesig \
