@@ -25,7 +25,7 @@ TwitchSevenTV_FILES = \
 
 # ── Options de compilation ──
 # -fobjc-arc : Active la gestion automatique de la mémoire (ARC)
-TwitchSevenTV_CFLAGS = -fobjc-arc -I$(THEOS_PROJECT_DIR)
+TwitchSevenTV_CFLAGS = -fobjc-arc -I$(THEOS_PROJECT_DIR) -Wno-unused-variable -Wno-unused-function
 
 # ── Frameworks Apple utilisés ──
 TwitchSevenTV_FRAMEWORKS = UIKit Foundation
