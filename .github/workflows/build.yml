@@ -113,7 +113,7 @@ jobs:
 
           # lief via pip — injecte les dépendances dylib dans les Mach-O
           # Remplace insert_dylib (projet Xcode non compilable en CI)
-          pip3 install lief --quiet
+          pip3 install lief --quiet --break-system-packages
           python3 -c "import lief; print('✅ lief', lief.__version__)"
 
       - name: 🔨 Compiler le tweak
