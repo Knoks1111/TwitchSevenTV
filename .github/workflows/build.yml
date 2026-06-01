@@ -121,125 +121,39 @@ jobs:
           IPA_SIZE=$(du -sh Twitch.ipa | cut -f1)
           echo "✅ IPA téléchargée: $IPA_SIZE"
 
-      # ── Étape 6: Installer les outils d'injection ──
-      - name: 🛠️ Installer insert_dylib (outil d'injection)
+      # ── Étape 6: Installer Azule (outil d'injection standard pour sideloading) ──
+      # Azule est utilisé par uYouPlus, Watusi et tous les grands projets de sideloading.
+      # Il gère automatiquement: injection dylib, bundling Substrate, fix rpath, repackage IPA.
+      - name: 🛠️ Installer Azule
         run: |
-          # insert_dylib est l'outil standard pour injecter des .dylib dans des IPA
-          if ! command -v insert_dylib &> /dev/null; then
-            echo "Installation de insert_dylib..."
-            git clone https://github.com/Tyilo/insert_dylib.git /tmp/insert_dylib
-            cd /tmp/insert_dylib
-            xcodebuild -project insert_dylib.xcodeproj \
-                       -scheme insert_dylib \
-                       -configuration Release \
-                       SYMROOT=/tmp/insert_dylib_build
-            sudo cp /tmp/insert_dylib_build/Release/insert_dylib /usr/local/bin/
-          fi
-          echo "✅ insert_dylib disponible"
+          git clone https://github.com/Al4ise/Azule /tmp/azule
+          sudo ln -sf /tmp/azule/azule /usr/local/bin/azule
+          sudo chmod +x /tmp/azule/azule
+          echo "✅ Azule installé: $(azule -v 2>/dev/null || echo 'ok')"
 
       # ── Étape 7: Injecter le .dylib dans l'IPA ──
       - name: 💉 Injecter 7TV dans l'IPA Twitch
         run: |
-          echo "📦 Extraction de l'IPA..."
-          mkdir -p IPA_work
-          cd IPA_work
-          unzip -q ../Twitch.ipa
-          
-          # Trouver le binaire principal de Twitch
-          APP_DIR=$(find Payload -name "*.app" -maxdepth 1 -type d | head -1)
-          if [ -z "$APP_DIR" ]; then
-            echo "❌ Impossible de trouver le bundle .app dans l'IPA"
-            exit 1
-          fi
-          
-          APP_NAME=$(basename "$APP_DIR" .app)
-          BINARY_PATH="$APP_DIR/$APP_NAME"
-          echo "📱 App trouvée: $APP_DIR"
-          echo "🔧 Binaire: $BINARY_PATH"
-          
-          # Copier le .dylib dans le bundle de l'app
-          mkdir -p "$APP_DIR/Frameworks"
-          DYLIB_NAME="TwitchSevenTV.dylib"
-          cp "$GITHUB_WORKSPACE/${{ env.DYLIB_PATH }}" "$APP_DIR/Frameworks/$DYLIB_NAME"
-          echo "✅ .dylib copié dans Frameworks/"
+          DYLIB_PATH="${{ env.DYLIB_PATH }}"
+          echo "📱 IPA: $(du -sh Twitch.ipa | cut -f1)"
+          echo "🔧 dylib: $DYLIB_PATH"
 
-          # ── Bundler CydiaSubstrate dans l'IPA ──
-          # Sans ça, l'app crashe au lancement sur un iPhone non jailbreaké
-          echo "🔍 Recherche de CydiaSubstrate..."
+          # Azule injecte le dylib ET bundle automatiquement CydiaSubstrate
+          azule \
+            -i Twitch.ipa \
+            -o . \
+            -f "$DYLIB_PATH"
 
-          # Méthode 1: chercher dans Theos (plusieurs noms possibles)
-          SUBSTRATE_SRC=$(find /opt/theos -type f \
-            \( -name "libsubstrate.dylib" -o -name "CydiaSubstrate" \) \
-            ! -name "*.h" ! -name "*.tbd" 2>/dev/null | head -1)
-
-          # Méthode 2: forcer la mise à jour des submodules Theos
-          if [ -z "$SUBSTRATE_SRC" ]; then
-            echo "⬇️ Mise à jour submodules Theos..."
-            cd /opt/theos
-            sudo git submodule update --init --recursive 2>/dev/null || true
-            cd "$GITHUB_WORKSPACE/IPA_work"
-            SUBSTRATE_SRC=$(find /opt/theos -type f \
-              \( -name "libsubstrate.dylib" -o -name "CydiaSubstrate" \) \
-              ! -name "*.h" ! -name "*.tbd" 2>/dev/null | head -1)
-          fi
-
-          # Méthode 3: télécharger depuis Procursus (repo officiel rootless)
-          if [ -z "$SUBSTRATE_SRC" ]; then
-            echo "⬇️ Téléchargement CydiaSubstrate depuis Procursus..."
-            curl -fsSL \
-              "https://apt.procurs.us/pool/main/mobilesubstrate_0.9.7063_iphoneos-arm64.deb" \
-              -o /tmp/sub.deb
-            mkdir -p /tmp/sub_root && cd /tmp/sub_root
-            ar -x /tmp/sub.deb 2>/dev/null || true
-            for f in data.tar.*; do [ -f "$f" ] && tar xf "$f" 2>/dev/null; done
-            cd "$GITHUB_WORKSPACE/IPA_work"
-            SUBSTRATE_SRC=$(find /tmp/sub_root -type f \
-              \( -name "CydiaSubstrate" -o -name "libsubstrate.dylib" \) \
-              2>/dev/null | head -1)
-          fi
-
-          # Échec total → debug et arrêt
-          if [ -z "$SUBSTRATE_SRC" ]; then
-            echo "❌ CydiaSubstrate introuvable partout"
-            echo "Fichiers .dylib dans Theos:"
-            find /opt/theos -name "*.dylib" | head -30
+          # Azule nomme le fichier de sortie automatiquement → on le renomme
+          PATCHED=$(find . -maxdepth 1 -name "*.ipa" ! -name "Twitch.ipa" | head -1)
+          if [ -z "$PATCHED" ]; then
+            echo "❌ Azule n'a produit aucune IPA"
+            ls -la *.ipa 2>/dev/null || echo "Aucun fichier .ipa trouvé"
             exit 1
           fi
 
-          echo "✅ Substrate trouvé: $SUBSTRATE_SRC"
-          mkdir -p "$APP_DIR/Frameworks/CydiaSubstrate.framework"
-          cp "$SUBSTRATE_SRC" "$APP_DIR/Frameworks/CydiaSubstrate.framework/CydiaSubstrate"
-
-          # Corriger la référence dans notre .dylib
-          # (lui dire de chercher Substrate dans @rpath au lieu de /Library/Frameworks/)
-          install_name_tool \
-            -change /Library/Frameworks/CydiaSubstrate.framework/CydiaSubstrate \
-            @rpath/CydiaSubstrate.framework/CydiaSubstrate \
-            "$APP_DIR/Frameworks/$DYLIB_NAME"
-          echo "✅ Référence CydiaSubstrate corrigée dans le dylib"
-
-          # Ajouter @rpath au dylib pour qu'il sache où chercher ses dépendances
-          # (pointe vers le dossier Frameworks/ de l'app)
-          install_name_tool \
-            -add_rpath @executable_path/Frameworks \
-            "$APP_DIR/Frameworks/$DYLIB_NAME"
-          echo "✅ @rpath ajouté au dylib"
-
-          # Injecter le .dylib dans le binaire (lui dire de le charger au lancement)
-          insert_dylib \
-            --strip-codesig \
-            --inplace \
-            "@executable_path/Frameworks/$DYLIB_NAME" \
-            "$BINARY_PATH"
-          echo "✅ .dylib injecté dans le binaire"
-          
-          # Recréer l'IPA (c'est juste un zip renommé)
-          echo "📦 Repackaging en IPA..."
-          zip -qr ../TwitchSevenTV_patched.ipa Payload/
-          cd ..
-          
-          IPA_SIZE=$(du -sh TwitchSevenTV_patched.ipa | cut -f1)
-          echo "✅ Nouvelle IPA créée: $IPA_SIZE"
+          mv "$PATCHED" TwitchSevenTV_patched.ipa
+          echo "✅ IPA patchée: $(du -sh TwitchSevenTV_patched.ipa | cut -f1)"
 
       # ── Étape 8: Sauvegarder les fichiers produits ──
       # (ils restent disponibles 30 jours dans l'onglet Actions)
