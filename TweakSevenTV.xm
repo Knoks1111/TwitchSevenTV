@@ -72,7 +72,8 @@
 - (void)receiveMessageWithCompletionHandler:
     (void (^)(NSURLSessionWebSocketMessage *, NSError *))completionHandler {
 
-    %orig((void (^)(NSURLSessionWebSocketMessage *, NSError *))^(NSURLSessionWebSocketMessage *message, NSError *error) {
+    void (^wrappedHandler)(NSURLSessionWebSocketMessage *, NSError *) =
+        ^(NSURLSessionWebSocketMessage *message, NSError *error) {
 
         // On ne traite que les messages texte sans erreur
         if (!error && message && message.type == NSURLSessionWebSocketMessageTypeString) {
@@ -91,7 +92,8 @@
             }
         }
         completionHandler(message, error);
-    });
+    };
+    %orig(wrappedHandler);
 }
 
 // --- Messages SORTANTS (ce qu'on envoie au serveur) ---
