@@ -5,33 +5,20 @@
 # 1. Configure un Mac virtuel gratuit sur GitHub
 # 2. Installe Theos (outil de compilation de tweaks iOS)
 # 3. Compile le tweak → produit un fichier .dylib
-# 4. Injecte le .dylib dans ton IPA Twitch existant
+# 4. Injecte le .dylib dans ton IPA Twitch existant via Azule
 # 5. Produit une nouvelle IPA prête à installer via SideStore
-#
-# COMMENT UTILISER:
-# 1. Va sur GitHub.com, crée un compte gratuit
-# 2. Crée un nouveau repository (bouton "+") → "New repository"
-# 3. Nomme-le "TwitchSevenTV" → Create repository
-# 4. Upload tous les fichiers de ce projet
-# 5. Va dans "Settings" → "Secrets and variables" → "Actions"
-# 6. Ajoute un secret "TWITCH_IPA_URL" avec l'URL de ton IPA
-#    (upload ton IPA sur WeTransfer ou Google Drive et mets le lien direct)
-# 7. Va dans l'onglet "Actions" → "Build TwitchSevenTV" → "Run workflow"
-# 8. Attends ~5 minutes → télécharge la nouvelle IPA
 # ============================================================
 
 name: Build TwitchSevenTV + Inject into IPA
 
 on:
-  # Déclenchement manuel depuis l'onglet Actions sur GitHub
   workflow_dispatch:
     inputs:
       ipa_url:
-        description: 'URL directe de ton IPA Twitch modifié (Google Drive, WeTransfer...)'
+        description: 'URL directe de ton IPA Twitch modifiée (optionnel si secret configuré)'
         required: false
         default: ''
 
-  # Ou automatiquement quand tu modifies le code
   push:
     branches: [ main ]
     paths:
@@ -42,7 +29,6 @@ on:
 
 jobs:
   build:
-    # Utilise un Mac virtuel gratuit fourni par GitHub
     runs-on: macos-14
 
     steps:
@@ -50,31 +36,39 @@ jobs:
       - name: 📥 Récupérer le code du tweak
         uses: actions/checkout@v4
 
-      # ── Étape 2: Cache Theos (évite de le retélécharger à chaque fois) ──
+      # ── Étape 2: Cache Theos ──
       - name: 💾 Cache Theos
         uses: actions/cache@v4
         with:
           path: /opt/theos
-          key: theos-ios-${{ runner.os }}-v1
+          key: theos-ios-${{ runner.os }}-v2
 
-      # ── Étape 3: Installer Theos + ldid si pas en cache ──
+      # ── Étape 3: Installer Theos + SDK + ldid ──
       - name: 🔧 Installer Theos + ldid
         run: |
           if [ ! -d "/opt/theos" ]; then
             echo "Installation de Theos..."
             sudo git clone --recursive \
               https://github.com/theos/theos.git /opt/theos
-            
-            # Télécharger les SDKs iOS (nécessaire pour compiler)
-            curl -sSL https://github.com/theos/sdks/releases/latest/download/iPhoneOS16.5.sdk.tar.xz \
-              | sudo tar -xJf - -C /opt/theos/sdks/
+
+            # Télécharger le SDK iOS 16.5 (tag fixe pour éviter les 404)
+            echo "Téléchargement du SDK iOS 16.5..."
+            curl -sSL \
+              "https://github.com/theos/sdks/releases/download/1668536885/iPhoneOS16.5.sdk.tar.xz" \
+              | sudo tar -xJf - -C /opt/theos/sdks/ \
+              || {
+                echo "⚠️ Premier miroir échoué, tentative miroir alternatif..."
+                curl -sSL \
+                  "https://github.com/xybp888/iOS-SDKs/releases/download/v16.5/iPhoneOS16.5.sdk.tar.xz" \
+                  | sudo tar -xJf - -C /opt/theos/sdks/
+              }
           else
             echo "Theos déjà en cache ✅"
           fi
-          
+
           # ldid : outil de signature (obligatoire pour sideloading)
           brew install ldid
-          
+
           # Configurer les variables d'environnement
           echo "THEOS=/opt/theos" >> $GITHUB_ENV
           echo "/opt/theos/bin" >> $GITHUB_PATH
@@ -83,15 +77,24 @@ jobs:
       - name: 🔨 Compiler le tweak
         run: |
           export THEOS=/opt/theos
-          # "make" lit le Makefile et compile tout
+
+          # Vérifier que le SDK est bien là
+          ls /opt/theos/sdks/ || { echo "❌ Aucun SDK trouvé dans /opt/theos/sdks/"; exit 1; }
+
+          # Compiler
           make -j$(sysctl -n hw.ncpu) package FINALPACKAGE=1
-          
-          # Trouver le .dylib compilé
-          DYLIB_PATH=$(find .theos -name "*.dylib" | head -1)
+
+          # Chercher le .dylib du tweak (nom exact en priorité)
+          DYLIB_PATH=$(find .theos/obj -name "TwitchSevenTV.dylib" 2>/dev/null | head -1)
           if [ -z "$DYLIB_PATH" ]; then
-            echo "❌ Erreur: .dylib non trouvé après compilation"
+            DYLIB_PATH=$(find .theos -name "TwitchSevenTV.dylib" 2>/dev/null | head -1)
+          fi
+          if [ -z "$DYLIB_PATH" ]; then
+            echo "❌ TwitchSevenTV.dylib introuvable. Contenu de .theos/obj :"
+            find .theos/obj -type f 2>/dev/null || echo "(vide)"
             exit 1
           fi
+
           echo "✅ .dylib compilé: $DYLIB_PATH"
           echo "DYLIB_PATH=$DYLIB_PATH" >> $GITHUB_ENV
 
@@ -102,41 +105,40 @@ jobs:
           if [ -z "$IPA_URL" ]; then
             IPA_URL="${{ secrets.TWITCH_IPA_URL }}"
           fi
-          
+
           if [ -z "$IPA_URL" ]; then
             echo "❌ Pas d'URL IPA fournie!"
             echo "Configure le secret TWITCH_IPA_URL dans Settings → Secrets"
-            echo "Ou fournis l'URL dans le champ lors du déclenchement manuel."
             exit 1
           fi
-          
+
           echo "📥 Téléchargement de l'IPA..."
           curl -L -o Twitch.ipa "$IPA_URL"
-          
-          if [ ! -f "Twitch.ipa" ]; then
-            echo "❌ Téléchargement échoué"
+
+          if [ ! -f "Twitch.ipa" ] || [ ! -s "Twitch.ipa" ]; then
+            echo "❌ Téléchargement échoué ou fichier vide"
             exit 1
           fi
-          
+
           IPA_SIZE=$(du -sh Twitch.ipa | cut -f1)
           echo "✅ IPA téléchargée: $IPA_SIZE"
 
-      # ── Étape 6: Installer Azule (outil d'injection standard pour sideloading) ──
-      # Azule est utilisé par uYouPlus, Watusi et tous les grands projets de sideloading.
-      # Il gère automatiquement: injection dylib, bundling Substrate, fix rpath, repackage IPA.
+      # ── Étape 6: Installer Azule ──
+      # Azule est l'outil standard utilisé par uYouPlus, Watusi, etc.
+      # Il gère: injection dylib + bundling CydiaSubstrate + fix rpath + repackage IPA.
       - name: 🛠️ Installer Azule
         run: |
-          git clone https://github.com/Al4ise/Azule /tmp/azule
+          git clone --depth=1 https://github.com/Al4ise/Azule /tmp/azule
           sudo ln -sf /tmp/azule/azule /usr/local/bin/azule
           sudo chmod +x /tmp/azule/azule
-          echo "✅ Azule installé: $(azule -v 2>/dev/null || echo 'ok')"
+          echo "✅ Azule installé"
 
       # ── Étape 7: Injecter le .dylib dans l'IPA ──
       - name: 💉 Injecter 7TV dans l'IPA Twitch
         run: |
           DYLIB_PATH="${{ env.DYLIB_PATH }}"
-          echo "📱 IPA: $(du -sh Twitch.ipa | cut -f1)"
-          echo "🔧 dylib: $DYLIB_PATH"
+          echo "📱 IPA source : $(du -sh Twitch.ipa | cut -f1)"
+          echo "🔧 dylib      : $DYLIB_PATH ($(du -sh "$DYLIB_PATH" | cut -f1))"
 
           # Azule injecte le dylib ET bundle automatiquement CydiaSubstrate
           azule \
@@ -147,16 +149,16 @@ jobs:
           # Azule nomme le fichier de sortie automatiquement → on le renomme
           PATCHED=$(find . -maxdepth 1 -name "*.ipa" ! -name "Twitch.ipa" | head -1)
           if [ -z "$PATCHED" ]; then
-            echo "❌ Azule n'a produit aucune IPA"
-            ls -la *.ipa 2>/dev/null || echo "Aucun fichier .ipa trouvé"
+            echo "❌ Azule n'a produit aucune IPA patched"
+            echo "Fichiers .ipa présents :"
+            ls -la *.ipa 2>/dev/null || echo "(aucun)"
             exit 1
           fi
 
           mv "$PATCHED" TwitchSevenTV_patched.ipa
-          echo "✅ IPA patchée: $(du -sh TwitchSevenTV_patched.ipa | cut -f1)"
+          echo "✅ IPA patchée : $(du -sh TwitchSevenTV_patched.ipa | cut -f1)"
 
-      # ── Étape 8: Sauvegarder les fichiers produits ──
-      # (ils restent disponibles 30 jours dans l'onglet Actions)
+      # ── Étape 8: Sauvegarder les artifacts ──
       - name: 📤 Sauvegarder l'IPA patchée
         uses: actions/upload-artifact@v4
         with:
@@ -178,11 +180,10 @@ jobs:
           echo "  TwitchSevenTV - Build terminé! 🎉"
           echo "========================================"
           echo ""
-          echo "📥 Pour télécharger ta nouvelle IPA:"
-          echo "   Onglet 'Actions' → ce workflow → 'Artifacts'"
-          echo "   Télécharge 'TwitchSevenTV-Patched-IPA'"
+          echo "📥 Télécharge l'IPA depuis:"
+          echo "   Onglet 'Actions' → ce workflow → section 'Artifacts'"
+          echo "   → 'TwitchSevenTV-Patched-IPA'"
           echo ""
           echo "📱 Installation:"
-          echo "   Installe la nouvelle IPA via SideStore"
-          echo "   (remplace l'ancienne IPA Twitch)"
+          echo "   Installe via SideStore (remplace l'ancienne IPA Twitch)"
           echo "========================================"
