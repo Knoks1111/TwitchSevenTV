@@ -7,11 +7,18 @@
  * - La mise en cache des emotes (pour ne pas re-télécharger à chaque fois)
  * - L'injection des emotes dans les messages IRC de Twitch
  * - La détection du broadcaster ID via les réponses GQL
+ * - Le buffer de logs in-app (visible dans SevenTVLogsController)
  */
 
 #import "SevenTVManager.h"
 #import "SevenTVSettingsController.h"
 #import <objc/runtime.h>
+
+// ============================================================
+// Constante de notification (définie ici, déclarée dans .h)
+// ============================================================
+NSString *const S7TVLogsDidUpdateNotification = @"S7TVLogsDidUpdateNotification";
+
 
 // ============================================================
 // Implémentation de SevenTVEmote
@@ -30,6 +37,13 @@
 @property (nonatomic, strong) dispatch_queue_t emoteQueue;
 // Bouton flottant des paramètres
 @property (nonatomic, weak) UIButton *settingsButton;
+
+// ── Buffer de logs in-app ──────────────────────────────────
+// Accès protégé par _logLock (NSLock simple, suffisant ici).
+// On évite volontairement dispatch_queue pour ne pas risquer
+// un deadlock si log: est appelé depuis l'emoteQueue.
+@property (nonatomic, strong) NSMutableArray<NSString *> *logBuffer;
+@property (nonatomic, strong) NSLock *logLock;
 @end
 
 
@@ -59,6 +73,10 @@
         _loadedChannelIDs = [NSMutableSet set];
         _emoteQueue = dispatch_queue_create("tv.s7tv.emote-queue",
                                             DISPATCH_QUEUE_CONCURRENT);
+
+        // Buffer de logs
+        _logBuffer = [NSMutableArray arrayWithCapacity:256];
+        _logLock   = [[NSLock alloc] init];
 
         // Charger les préférences sauvegardées
         [self loadPreferences];
@@ -657,18 +675,72 @@
 
 
 // ============================================================
-// MARK: - Logging
+// MARK: - Logging (buffer in-app + console optionnelle)
+//
+// IMPORTANT: log: enregistre TOUJOURS dans le buffer in-app,
+// même si debugLogging == NO. Ça permet de diagnostiquer les
+// problèmes sans avoir un Mac branché.
+// NSLog (visible dans Console.app) est lui conditionné à debugLogging.
 // ============================================================
 
 - (void)log:(NSString *)format, ... {
-    if (!self.debugLogging) return;
-
     va_list args;
     va_start(args, format);
     NSString *msg = [[NSString alloc] initWithFormat:format arguments:args];
     va_end(args);
 
-    NSLog(@"[TwitchSevenTV] %@", msg);
+    // Horodatage compact: HH:mm:ss.SSS
+    NSDateFormatter *fmt = [[NSDateFormatter alloc] init];
+    fmt.dateFormat = @"HH:mm:ss.SSS";
+    NSString *timestamp = [fmt stringFromDate:[NSDate date]];
+
+    NSString *line = [NSString stringWithFormat:@"[%@] %@", timestamp, msg];
+
+    // ── Ajout au buffer (thread-safe) ──
+    [self.logLock lock];
+    [self.logBuffer addObject:line];
+    // Écrêtage: on supprime les lignes les plus anciennes si besoin
+    if (self.logBuffer.count > S7TV_LOG_BUFFER_MAX) {
+        NSUInteger excess = self.logBuffer.count - S7TV_LOG_BUFFER_MAX;
+        [self.logBuffer removeObjectsInRange:NSMakeRange(0, excess)];
+    }
+    [self.logLock unlock];
+
+    // ── NSLog console (seulement si debugLogging activé) ──
+    if (self.debugLogging) {
+        NSLog(@"[TwitchSevenTV] %@", msg);
+    }
+
+    // ── Notification (toujours, pour que SevenTVLogsController se rafraîchisse) ──
+    // Postée sur le main thread pour que les observers UI puissent agir directement.
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [[NSNotificationCenter defaultCenter]
+            postNotificationName:S7TVLogsDidUpdateNotification
+                          object:self
+                        userInfo:@{@"line": line}];
+    });
+}
+
+// Retourne une copie snapshot du buffer (thread-safe)
+- (NSArray<NSString *> *)allLogs {
+    [self.logLock lock];
+    NSArray *copy = [self.logBuffer copy];
+    [self.logLock unlock];
+    return copy;
+}
+
+// Vide le buffer
+- (void)clearLogs {
+    [self.logLock lock];
+    [self.logBuffer removeAllObjects];
+    [self.logLock unlock];
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [[NSNotificationCenter defaultCenter]
+            postNotificationName:S7TVLogsDidUpdateNotification
+                          object:self
+                        userInfo:@{@"cleared": @YES}];
+    });
 }
 
 @end

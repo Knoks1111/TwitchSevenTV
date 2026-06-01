@@ -23,6 +23,14 @@
 #define S7TV_API_BASE        @"https://7tv.io/v3"
 #define S7TV_CDN_BASE        @"https://cdn.7tv.app/emote"
 
+// Nombre maximum de lignes conservées dans le buffer de logs in-app
+#define S7TV_LOG_BUFFER_MAX  1000
+
+// Nom de la notification postée quand une nouvelle ligne est ajoutée au buffer
+// SevenTVLogsController écoute cette notification pour se rafraîchir.
+extern NSString *const S7TVLogsDidUpdateNotification;
+
+
 // ============================================================
 // Structure d'une emote 7TV
 // ============================================================
@@ -44,7 +52,7 @@
 // --- Configuration ---
 @property (nonatomic, assign) BOOL isEnabled;       // 7TV activé/désactivé
 @property (nonatomic, assign) BOOL showAnimated;    // Afficher les emotes animées
-@property (nonatomic, assign) BOOL debugLogging;    // Logs activés
+@property (nonatomic, assign) BOOL debugLogging;    // NSLog console activé
 
 // --- Données des emotes ---
 // Dictionnaire: @{ "KEKW": SevenTVEmote*, "Pog": SevenTVEmote*, ... }
@@ -80,6 +88,14 @@
 - (void)addSettingsButton;
 
 // --- Logs ---
+// log: est TOUJOURS enregistré dans le buffer in-app (indépendamment de debugLogging).
+// Si debugLogging == YES, la ligne est aussi envoyée à NSLog / Console.
 - (void)log:(NSString *)format, ...;
+
+// Retourne une copie de toutes les lignes du buffer (thread-safe)
+- (NSArray<NSString *> *)allLogs;
+
+// Vide le buffer de logs
+- (void)clearLogs;
 
 @end

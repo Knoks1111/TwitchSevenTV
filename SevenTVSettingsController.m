@@ -8,12 +8,13 @@
  *   1. Activation générale de 7TV
  *   2. Options d'affichage (emotes animées)
  *   3. Informations (version, channel actuel, nb d'emotes)
- *   4. Débogage (logs)
+ *   4. Débogage (logs console, voir logs in-app, recharger)
  *   5. À propos
  */
 
 #import "SevenTVSettingsController.h"
 #import "SevenTVManager.h"
+#import "SevenTVLogsController.h"
 
 // Identifiants des cellules
 static NSString *const kSwitchCell = @"SwitchCell";
@@ -97,7 +98,8 @@ static NSString *const kActionCell = @"ActionCell";
     switch (section) {
         case 0: return @"Désactiver 7TV ne supprime pas les emotes déjà affichées.";
         case 1: return @"Les emotes animées (GIF) consomment un peu plus de batterie.";
-        case 3: return @"Activez les logs uniquement pour déboguer. Désactivez-les en utilisation normale.";
+        case 3: return @"Le buffer conserve les 1000 dernières lignes. "
+                       @"Activer \"Logs console\" pour voir aussi dans Console.app (Mac requis).";
         default: return nil;
     }
 }
@@ -107,8 +109,8 @@ static NSString *const kActionCell = @"ActionCell";
         case 0: return 1; // Activer 7TV
         case 1: return 1; // Emotes animées
         case 2: return 4; // Stats: channel, global, channel emotes, total
-        case 3: return 2; // Logs + Recharger emotes
-        case 4: return 2; // Version + Info
+        case 3: return 3; // Logs console + Voir les logs + Recharger emotes
+        case 4: return 2; // Version + Info API
         default: return 0;
     }
 }
@@ -174,20 +176,49 @@ static NSString *const kActionCell = @"ActionCell";
 
         // ── Section 3: Debug ──
         case 3: {
-            if (indexPath.row == 0) {
-                UITableViewCell *cell = [self switchCellWithTitle:@"Logs de débogage"
-                                                             icon:@"🐞"
-                                                           isOn:mgr.debugLogging
-                                                           action:@selector(toggleDebug:)];
-                return cell;
-            } else {
-                UITableViewCell *cell = [[UITableViewCell alloc]
-                    initWithStyle:UITableViewCellStyleDefault
-                   reuseIdentifier:kActionCell];
-                cell.textLabel.text      = @"🔄  Recharger les emotes";
-                cell.textLabel.textColor = self.view.tintColor;
-                cell.accessoryType       = UITableViewCellAccessoryNone;
-                return cell;
+            switch (indexPath.row) {
+
+                // Ligne 0: toggle logs console (NSLog / Console.app)
+                case 0: {
+                    UITableViewCell *cell = [self switchCellWithTitle:@"Logs console (NSLog)"
+                                                                 icon:@"🖥️"
+                                                               isOn:mgr.debugLogging
+                                                               action:@selector(toggleDebug:)];
+                    return cell;
+                }
+
+                // Ligne 1: ouvrir le viewer de logs in-app ← NOUVEAU
+                case 1: {
+                    UITableViewCell *cell = [[UITableViewCell alloc]
+                        initWithStyle:UITableViewCellStyleValue1
+                       reuseIdentifier:kInfoCell];
+
+                    cell.textLabel.text      = @"🪵  Voir les logs";
+                    cell.textLabel.textColor = self.view.tintColor;
+
+                    // Badge avec le nombre de lignes dans le buffer
+                    NSUInteger logCount = [[SevenTVManager sharedManager] allLogs].count;
+                    cell.detailTextLabel.text = logCount > 0
+                        ? [NSString stringWithFormat:@"%lu lignes", (unsigned long)logCount]
+                        : @"";
+
+                    cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+                    return cell;
+                }
+
+                // Ligne 2: recharger les emotes
+                case 2: {
+                    UITableViewCell *cell = [[UITableViewCell alloc]
+                        initWithStyle:UITableViewCellStyleDefault
+                       reuseIdentifier:kActionCell];
+                    cell.textLabel.text      = @"🔄  Recharger les emotes";
+                    cell.textLabel.textColor = self.view.tintColor;
+                    cell.accessoryType       = UITableViewCellAccessoryNone;
+                    return cell;
+                }
+
+                default:
+                    return [[UITableViewCell alloc] init];
             }
         }
 
@@ -221,10 +252,22 @@ static NSString *const kActionCell = @"ActionCell";
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
 
-    // Section 3, ligne 1 = "Recharger les emotes"
-    if (indexPath.section == 3 && indexPath.row == 1) {
-        [self reloadEmotes];
+    if (indexPath.section == 3) {
+        switch (indexPath.row) {
+            case 1: // "Voir les logs"
+                [self openLogsViewer];
+                break;
+            case 2: // "Recharger les emotes"
+                [self reloadEmotes];
+                break;
+        }
     }
+}
+
+// Ouvre SevenTVLogsController en push dans la navigation courante
+- (void)openLogsViewer {
+    SevenTVLogsController *logsVC = [[SevenTVLogsController alloc] init];
+    [self.navigationController pushViewController:logsVC animated:YES];
 }
 
 - (void)reloadEmotes {
