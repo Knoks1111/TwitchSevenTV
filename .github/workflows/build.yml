@@ -9,7 +9,7 @@ on:
         default: ''
   push:
     branches: [ main ]
-    paths: ['**.xm', '**.m', '**.h', 'Makefile']
+    paths: ['**.m', '**.h', 'Makefile']
 
 env:
   THEOS: ${{ github.workspace }}/theos
@@ -164,8 +164,12 @@ jobs:
 
           make -j$(sysctl -n hw.ncpu) package FINALPACKAGE=1 $MAKE_EXTRA
 
-          # Trouver le .dylib compilé
+          # Trouver le .dylib compilé (library.mk le place dans .theos/obj/)
           DYLIB_PATH=$(find .theos -name "TwitchSevenTV.dylib" 2>/dev/null | head -1)
+          if [ -z "$DYLIB_PATH" ]; then
+            # Fallback: chercher dans tout le dossier
+            DYLIB_PATH=$(find . -name "TwitchSevenTV.dylib" 2>/dev/null | head -1)
+          fi
           if [ -z "$DYLIB_PATH" ]; then
             echo "❌ TwitchSevenTV.dylib introuvable après make"
             find . -name "*.dylib" 2>/dev/null || true
@@ -178,16 +182,15 @@ jobs:
           echo "✅ ldid OK"
           echo "   Archi: $(lipo -archs "$DYLIB_PATH" 2>/dev/null || file "$DYLIB_PATH")"
 
-          # Trouver le .deb
+          # Trouver le .deb (optionnel avec library.mk)
           DEB_PATH=$(find packages -name "*.deb" 2>/dev/null | head -1)
           if [ -z "$DEB_PATH" ]; then
-            echo "❌ Aucun .deb dans packages/"
-            ls packages/ 2>/dev/null || echo "(vide)"
-            exit 1
+            echo "⚠️  Aucun .deb dans packages/ (normal avec library.mk)"
+            DEB_PATH=""
           fi
 
           echo "✅ .dylib: $DYLIB_PATH ($(du -sh "$DYLIB_PATH" | cut -f1))"
-          echo "✅ .deb:   $DEB_PATH   ($(du -sh "$DEB_PATH"   | cut -f1))"
+          [ -n "$DEB_PATH" ] && echo "✅ .deb:   $DEB_PATH   ($(du -sh "$DEB_PATH" | cut -f1))"
           echo "DYLIB_PATH=$DYLIB_PATH" >> $GITHUB_ENV
           echo "DEB_PATH=$DEB_PATH"     >> $GITHUB_ENV
 
@@ -270,32 +273,7 @@ jobs:
 
           # ── 4. Copier le .dylib signé dans le bundle ──
           cp "$DYLIB_PATH" "$APP_PATH/TwitchSevenTV.dylib"
-          echo "✅ .dylib copié"
-
-          # ── 4b. Embarquer CydiaSubstrate (requis sans jailbreak) ──
-          # Sans jailbreak, /Library/Frameworks/CydiaSubstrate n'existe pas → crash
-          # On copie la lib depuis Theos et on corrige le chemin dans notre dylib
-          SUBSTRATE_SRC=$(find "$THEOS" \( -name "libsubstrate.dylib" -o -name "CydiaSubstrate" \) \
-            -not -type d 2>/dev/null | head -1)
-
-          if [ -n "$SUBSTRATE_SRC" ]; then
-            echo "📦 Substrate trouvé: $SUBSTRATE_SRC"
-            mkdir -p "$APP_PATH/Frameworks/CydiaSubstrate.framework"
-            cp "$SUBSTRATE_SRC" "$APP_PATH/Frameworks/CydiaSubstrate.framework/CydiaSubstrate"
-            echo "✅ CydiaSubstrate copié dans Frameworks/"
-
-            # Corriger le chemin dans notre .dylib pour pointer vers la copie embarquée
-            install_name_tool \
-              -change "/Library/Frameworks/CydiaSubstrate.framework/CydiaSubstrate" \
-              "@executable_path/Frameworks/CydiaSubstrate.framework/CydiaSubstrate" \
-              "$APP_PATH/TwitchSevenTV.dylib" \
-              && echo "✅ Chemin Substrate corrigé dans TwitchSevenTV.dylib" \
-              || echo "⚠️  install_name_tool non-bloquant (lib peut-être déjà absente des dépendances)"
-          else
-            echo "⚠️  libsubstrate.dylib introuvable dans Theos — libs disponibles:"
-            find "$THEOS" -name "*.dylib" 2>/dev/null | head -10
-            echo "   Tentative de compilation sans Substrate embarqué..."
-          fi
+          echo "✅ .dylib copié (substrate-free, aucun Frameworks/ nécessaire)"
 
           # ── 5. Injecter la dépendance via Python lief ──
           python3 << PYEOF
@@ -335,18 +313,10 @@ jobs:
           echo "✅ Injection confirmée"
 
           # ── 7. Re-signer avec ldid ──
-          # Le .dylib : obligatoire
           ldid -S "$APP_PATH/TwitchSevenTV.dylib"
           echo "✅ ldid .dylib OK"
 
-          # Le Substrate embarqué : obligatoire aussi
-          if [ -f "$APP_PATH/Frameworks/CydiaSubstrate.framework/CydiaSubstrate" ]; then
-            ldid -S "$APP_PATH/Frameworks/CydiaSubstrate.framework/CydiaSubstrate" \
-              && echo "✅ ldid CydiaSubstrate OK" \
-              || echo "⚠️  ldid Substrate non-critique"
-          fi
-
-          # Le binaire principal : non-bloquant (peut échouer sur gros binaires)
+          # Le binaire principal : non-bloquant
           ldid -S "$BINARY" 2>/dev/null && echo "✅ ldid binaire OK" \
             || echo "⚠️  ldid binaire non-critique — SideStore re-signe au sideload"
 
@@ -364,16 +334,23 @@ jobs:
             echo "❌ IPA patchée vide"
             exit 1
           fi
-          echo "✅ IPA patchée: $(du -sh TwitchSevenTV_patched.ipa | cut -f1)"
+
+          # Renommer avec numéro de build + date pour toujours avoir un nom unique
+          BUILD_DATE=$(date +"%Y%m%d-%H%M")
+          IPA_NAME="TwitchSevenTV_v${{ github.run_number }}_${BUILD_DATE}.ipa"
+          mv TwitchSevenTV_patched.ipa "$IPA_NAME"
+          echo "✅ IPA finale: $IPA_NAME ($(du -sh "$IPA_NAME" | cut -f1))"
+          echo "IPA_NAME=$IPA_NAME" >> $GITHUB_ENV
 
       - name: 📤 Sauvegarder l'IPA patchée
         uses: actions/upload-artifact@v4
         with:
-          name: TwitchSevenTV-Patched-IPA
-          path: TwitchSevenTV_patched.ipa
+          name: TwitchSevenTV-v${{ github.run_number }}-Patched-IPA
+          path: ${{ env.IPA_NAME }}
           retention-days: 30
 
       - name: 📤 Sauvegarder le .deb
+        if: env.DEB_PATH != ''
         uses: actions/upload-artifact@v4
         with:
           name: TwitchSevenTV-deb
