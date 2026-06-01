@@ -13,14 +13,31 @@ LIBRARY_NAME = TwitchSevenTV
 
 # ── Fichiers source ──
 # TweakSevenTV.m remplace TweakSevenTV.xm (plus de Logos/Substrate)
+# ⚠️  RÈGLE: tout nouveau fichier .m DOIT être ajouté ici, sinon
+#    le linker échoue avec "Undefined symbol: __OBJC_CLASS_$_NomDeLaClasse"
 TwitchSevenTV_FILES = \
     TweakSevenTV.m \
     SevenTVManager.m \
     SevenTVURLProtocol.m \
-    SevenTVSettingsController.m
+    SevenTVSettingsController.m \
+    SevenTVLogsController.m
 
 # ── Options de compilation ──
-TwitchSevenTV_CFLAGS = -fobjc-arc -I$(THEOS_PROJECT_DIR) -Wno-unused-variable -Wno-unused-function
+TwitchSevenTV_CFLAGS = \
+    -fobjc-arc \
+    -I$(THEOS_PROJECT_DIR) \
+    -Wno-unused-variable \
+    -Wno-unused-function
+
+# ── Options linker ──
+# -Wl,-no_warn_inits  → supprime "static initializer found" causé par
+#                        __attribute__((constructor)) dans TweakSevenTV.m.
+#                        C'est normal pour un dylib injecté, pas une erreur.
+# -Wl,-w             → supprime les warnings linker obsolètes comme
+#                        "-multiply_defined is obsolete" (vieux flag Theos).
+TwitchSevenTV_LDFLAGS = \
+    -Wl,-no_warn_inits \
+    -Wl,-w
 
 # ── Frameworks Apple ──
 TwitchSevenTV_FRAMEWORKS = UIKit Foundation
