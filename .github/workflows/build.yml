@@ -207,21 +207,56 @@ jobs:
             exit 1
           fi
 
-          HTTP_CODE=$(curl --silent --location --output Twitch.ipa \
-            --write-out "%{http_code}" "$IPA_URL" 2>/dev/null || echo "000")
-          echo "HTTP: $HTTP_CODE — Taille: $(du -sh Twitch.ipa 2>/dev/null | cut -f1)"
+          # ── Google Drive : contournement page de confirmation (fichiers >100MB) ──
+          if echo "$IPA_URL" | grep -q "drive.google.com"; then
+            FILE_ID=$(echo "$IPA_URL" | grep -oE '[-\w]{25,}' | head -1)
+            echo "📎 Google Drive détecté, ID: $FILE_ID"
 
-          if [ "$HTTP_CODE" != "200" ] || [ ! -s "Twitch.ipa" ]; then
-            echo "❌ Téléchargement IPA échoué (HTTP $HTTP_CODE)"
-            echo "   Le lien est peut-être expiré. Re-upload l'IPA et mets à jour TWITCH_IPA_URL"
+            # Premier appel pour récupérer les cookies + éventuel token de confirmation
+            curl --silent --location \
+              --cookie-jar /tmp/gdrive_cookies.txt \
+              "https://drive.google.com/uc?export=download&id=${FILE_ID}" \
+              -o /tmp/gdrive_check.html
+
+            CONFIRM=$(grep -o 'confirm=[^&"]*' /tmp/gdrive_check.html | head -1 | cut -d= -f2)
+
+            if [ -n "$CONFIRM" ]; then
+              echo "🔑 Token confirmation trouvé: $CONFIRM"
+              curl --silent --location \
+                --cookie /tmp/gdrive_cookies.txt \
+                "https://drive.google.com/uc?export=download&confirm=${CONFIRM}&id=${FILE_ID}" \
+                -o Twitch.ipa
+            else
+              echo "ℹ️  Pas de confirmation nécessaire"
+              curl --silent --location \
+                --cookie /tmp/gdrive_cookies.txt \
+                "https://drive.google.com/uc?export=download&id=${FILE_ID}" \
+                -o Twitch.ipa
+            fi
+
+          # ── Lien direct classique (Filebin, WeTransfer, etc.) ──
+          else
+            HTTP_CODE=$(curl --silent --location --output Twitch.ipa \
+              --write-out "%{http_code}" "$IPA_URL" 2>/dev/null || echo "000")
+            echo "HTTP: $HTTP_CODE"
+            if [ "$HTTP_CODE" != "200" ] || [ ! -s "Twitch.ipa" ]; then
+              echo "❌ Téléchargement IPA échoué (HTTP $HTTP_CODE)"
+              echo "   Le lien est peut-être expiré. Re-upload l'IPA et mets à jour TWITCH_IPA_URL"
+              exit 1
+            fi
+          fi
+
+          echo "Taille: $(du -sh Twitch.ipa | cut -f1)"
+
+          if [ ! -s "Twitch.ipa" ]; then
+            echo "❌ Fichier vide après téléchargement"
             exit 1
           fi
 
           FILE_TYPE=$(file --brief Twitch.ipa)
           echo "Type: $FILE_TYPE"
           if ! echo "$FILE_TYPE" | grep -qiE "zip|archive"; then
-            echo "❌ Pas une IPA valide (pas un ZIP)"
-            echo "   Le lien a retourné du HTML — lien Filebin expiré ?"
+            echo "❌ Pas une IPA valide — page de confirmation GDrive non contournée ?"
             exit 1
           fi
 
