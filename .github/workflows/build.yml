@@ -141,7 +141,7 @@ jobs:
           echo "✅ ldid: $(which ldid)"
 
           # lief épinglé à une version stable connue (évite les breaking changes d'API)
-          pip3 install "lief==0.14.1" --quiet --break-system-packages
+          pip3 install "lief==0.17.6" --quiet --break-system-packages
           python3 -c "import lief; print('✅ lief', lief.__version__)"
 
       - name: 🔨 Compiler le tweak
@@ -295,9 +295,7 @@ jobs:
               arch = str(macho.header.cpu_type).split('.')[-1]
               print(f"✅ Injecté dans slice {arch}")
 
-          # Écrire avec le builder lief (plus fiable que write() direct)
-          builder = lief.MachO.Builder(fat)
-          builder.build()
+          # fat.write() gère le build automatiquement en lief 0.13+
           fat.write(binary_path)
           print(f"✅ Binaire écrit: {binary_path}")
           PYEOF
