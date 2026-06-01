@@ -1,8 +1,3 @@
-# ============================================================
-# .github/workflows/build.yml — TwitchSevenTV
-# Compile le tweak + injecte dans l'IPA Twitch via Azule
-# ============================================================
-
 name: Build TwitchSevenTV + Inject into IPA
 
 on:
@@ -16,7 +11,6 @@ on:
     branches: [ main ]
     paths: ['**.xm', '**.m', '**.h', 'Makefile']
 
-# THEOS disponible comme variable d'environnement dans tous les steps
 env:
   THEOS: ${{ github.workspace }}/theos
 
@@ -26,184 +20,125 @@ jobs:
 
     steps:
 
-      # ──────────────────────────────────────────────────
-      # 1. Checkout du code
-      # ──────────────────────────────────────────────────
       - name: 📥 Récupérer le code du tweak
         uses: actions/checkout@v4
 
-      # ──────────────────────────────────────────────────
-      # 2. Cache Theos (clé v3 pour invalider les anciens caches cassés)
-      # On cache le dossier workspace/theos (pas /opt, pas besoin de sudo)
-      # ──────────────────────────────────────────────────
       - name: 💾 Cache Theos
         id: cache-theos
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/theos
-          key: theos-ios-${{ runner.os }}-v3
+          key: theos-ios-${{ runner.os }}-v4
 
-      # ──────────────────────────────────────────────────
-      # 3. Installer Theos + SDK (seulement si pas en cache)
-      #
-      # FIXES vs versions précédentes:
-      #  - Pas de sudo → clone dans workspace, aucun problème de permissions
-      #  - curl --fail → plante si HTTP 4xx/5xx au lieu de télécharger du HTML
-      #  - Téléchargement dans un fichier temporaire → validation avant extraction
-      #  - API GitHub → découverte dynamique de l'URL réelle du SDK
-      #  - Plusieurs fallbacks statiques connus
-      #  - Vérification `file` que c'est bien du XZ avant `tar`
-      # ──────────────────────────────────────────────────
       - name: 🔧 Installer Theos + SDK iOS
         if: steps.cache-theos.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
 
-          # ── Clone Theos ──
           echo "📦 Clonage de Theos..."
           git clone --recursive https://github.com/theos/theos.git "$THEOS"
 
-          # ── Téléchargement du SDK ──
-          # Stratégie: API GitHub d'abord (URL dynamique réelle), puis fallbacks statiques
-          SDK_FILE="/tmp/iphone_sdk.tar.xz"
-          SDK_OK=false
+          # Écrire le script Python dans un fichier pour éviter les problèmes YAML
+          cat > /tmp/find_sdk.py << 'PYEOF'
+          import sys, json
+          try:
+              data = json.load(sys.stdin)
+              assets = data.get('assets', [])
+              prefs = ['iPhoneOS16.5', 'iPhoneOS17', 'iPhoneOS16', 'iPhone']
+              for pref in prefs:
+                  for a in assets:
+                      name = a.get('name', '')
+                      if pref in name and name.endswith('.tar.xz'):
+                          print(a['browser_download_url'])
+                          sys.exit(0)
+          except Exception:
+              pass
+          print('')
+          PYEOF
 
-          echo "🔍 Recherche du SDK via l'API GitHub..."
+          echo "🔍 Recherche du SDK via API GitHub..."
           API_URL=$(curl --fail --silent \
             "https://api.github.com/repos/theos/sdks/releases/latest" \
-            | python3 -c "
-import sys, json
-try:
-    data = json.load(sys.stdin)
-    assets = data.get('assets', [])
-    # Préférence: 16.5 > 17.x > 16.x > tout SDK iPhone
-    prefs = ['iPhoneOS16.5', 'iPhoneOS17', 'iPhoneOS16', 'iPhone']
-    for pref in prefs:
-        for a in assets:
-            name = a.get('name', '')
-            if pref in name and name.endswith('.tar.xz'):
-                print(a['browser_download_url'])
-                sys.exit(0)
-except Exception as e:
-    pass
-print('')
-" 2>/dev/null || true)
+            | python3 /tmp/find_sdk.py 2>/dev/null || true)
 
-          # Construire la liste des URLs à essayer (API en premier)
-          SDK_URLS=()
-          [ -n "$API_URL" ] && SDK_URLS+=("$API_URL")
-          SDK_URLS+=(
+          SDK_URLS=(
             "https://github.com/theos/sdks/releases/download/1668536885/iPhoneOS16.5.sdk.tar.xz"
             "https://github.com/theos/sdks/releases/download/1682607494/iPhoneOS16.5.sdk.tar.xz"
             "https://github.com/theos/sdks/releases/download/1668536885/iPhoneOS15.5.sdk.tar.xz"
           )
+          if [ -n "$API_URL" ]; then
+            SDK_URLS=("$API_URL" "${SDK_URLS[@]}")
+          fi
+
+          SDK_FILE="/tmp/iphone_sdk.tar.xz"
+          SDK_OK=false
 
           for URL in "${SDK_URLS[@]}"; do
             echo "⬇️  Tentative: $URL"
-            # --fail : erreur si HTTP 4xx/5xx (ne télécharge pas de HTML)
-            # --location : suit les redirections
             if curl --fail --silent --location --output "$SDK_FILE" "$URL"; then
-              # Vérifier que c'est bien un archive XZ (pas une page HTML)
               FILE_TYPE=$(file --brief "$SDK_FILE" 2>/dev/null || echo "unknown")
-              echo "   Type détecté: $FILE_TYPE"
+              echo "   Type: $FILE_TYPE"
               if echo "$FILE_TYPE" | grep -qiE "XZ compressed|compressed data"; then
-                echo "✅ SDK téléchargé depuis: $URL"
+                echo "✅ SDK valide téléchargé"
                 SDK_OK=true
                 break
               else
-                echo "⚠️  Fichier invalide (pas du XZ), on essaie le suivant..."
+                echo "⚠️  Pas du XZ, on continue..."
                 rm -f "$SDK_FILE"
               fi
             else
-              echo "⚠️  curl --fail: URL inaccessible ou erreur HTTP"
+              echo "⚠️  Échec HTTP"
               rm -f "$SDK_FILE" 2>/dev/null || true
             fi
           done
 
           if [ "$SDK_OK" != "true" ]; then
             echo "❌ Impossible de télécharger un SDK iOS valide"
-            echo "   Essaie de relancer le workflow dans quelques minutes."
             exit 1
           fi
 
-          # ── Extraction du SDK ──
           echo "📂 Extraction du SDK..."
           tar -xJf "$SDK_FILE" -C "$THEOS/sdks/"
           rm -f "$SDK_FILE"
+          echo "📋 SDKs disponibles:"; ls "$THEOS/sdks/"
+          echo "✅ Theos + SDK prêts"
 
-          # ── Vérification ──
-          echo "📋 SDKs disponibles:"
-          ls "$THEOS/sdks/"
-          echo "✅ Theos + SDK installés"
-
-      # ──────────────────────────────────────────────────
-      # 4. ldid (signature — toujours installé, pas caché)
-      # ──────────────────────────────────────────────────
       - name: 🔑 Installer ldid
-        run: |
-          brew install ldid
-          echo "✅ ldid: $(ldid 2>&1 | head -1 || echo 'installé')"
+        run: brew install ldid
 
-      # ──────────────────────────────────────────────────
-      # 5. Compilation du tweak
-      #
-      # FIX: Si le SDK dispo n'est pas exactement 16.5, on overrides TARGET
-      # pour que make trouve le SDK présent (même déployement iOS 14.0)
-      # ──────────────────────────────────────────────────
       - name: 🔨 Compiler le tweak
         run: |
           set -euo pipefail
-
-          export THEOS="${{ github.workspace }}/theos"
           export PATH="$THEOS/bin:$PATH"
 
-          # Détecter le SDK disponible
           SDK_NAME=$(ls "$THEOS/sdks/" | grep -E 'iPhoneOS[0-9.]+\.sdk' | sort -V | tail -1)
           if [ -z "$SDK_NAME" ]; then
-            echo "❌ Aucun SDK trouvé dans $THEOS/sdks/"
-            ls "$THEOS/sdks/"
-            exit 1
+            echo "❌ Aucun SDK dans $THEOS/sdks/"; ls "$THEOS/sdks/"; exit 1
           fi
 
           SDK_VER=$(echo "$SDK_NAME" | grep -oE '[0-9]+\.[0-9]+')
-          echo "📱 SDK utilisé: $SDK_NAME (version $SDK_VER)"
+          echo "📱 SDK: $SDK_NAME"
 
-          # Si le SDK n'est pas exactement 16.5, overrider TARGET dans make
-          MAKE_TARGET_OVERRIDE=""
+          MAKE_EXTRA=""
           if [ "$SDK_VER" != "16.5" ]; then
-            echo "ℹ️  SDK $SDK_VER != 16.5 → override TARGET pour make"
-            MAKE_TARGET_OVERRIDE="TARGET=iphone:clang:${SDK_VER}:14.0"
+            MAKE_EXTRA="TARGET=iphone:clang:${SDK_VER}:14.0"
           fi
 
-          # Compilation
-          echo "🔨 Compilation en cours..."
-          make -j$(sysctl -n hw.ncpu) package FINALPACKAGE=1 $MAKE_TARGET_OVERRIDE
+          make -j$(sysctl -n hw.ncpu) package FINALPACKAGE=1 $MAKE_EXTRA
 
-          # Chercher le .dylib exact du tweak (pas n'importe quel .dylib)
           DYLIB_PATH=$(find .theos/obj -name "TwitchSevenTV.dylib" 2>/dev/null | head -1)
           if [ -z "$DYLIB_PATH" ]; then
-            # Fallback: cherche dans tout .theos
             DYLIB_PATH=$(find .theos -name "TwitchSevenTV.dylib" 2>/dev/null | head -1)
           fi
-
           if [ -z "$DYLIB_PATH" ]; then
-            echo "❌ TwitchSevenTV.dylib introuvable après compilation"
-            echo "   Fichiers .dylib présents:"
-            find .theos -name "*.dylib" 2>/dev/null || echo "   (aucun)"
-            echo "   Contenu de .theos/obj:"
-            ls -laR .theos/obj 2>/dev/null || echo "   (vide)"
+            echo "❌ TwitchSevenTV.dylib introuvable"
+            find .theos -name "*.dylib" 2>/dev/null || true
             exit 1
           fi
 
-          echo "✅ dylib compilé: $DYLIB_PATH ($(du -sh "$DYLIB_PATH" | cut -f1))"
+          echo "✅ dylib: $DYLIB_PATH ($(du -sh "$DYLIB_PATH" | cut -f1))"
           echo "DYLIB_PATH=$DYLIB_PATH" >> $GITHUB_ENV
 
-      # ──────────────────────────────────────────────────
-      # 6. Téléchargement de l'IPA Twitch
-      #
-      # FIX: curl --fail pour détecter les erreurs HTTP
-      # FIX: validation que c'est bien un ZIP/IPA (pas du HTML)
-      # ──────────────────────────────────────────────────
       - name: 📲 Télécharger l'IPA Twitch
         run: |
           set -euo pipefail
@@ -213,72 +148,52 @@ print('')
             IPA_URL="${{ secrets.TWITCH_IPA_URL }}"
           fi
           if [ -z "$IPA_URL" ]; then
-            echo "❌ Pas d'URL IPA fournie!"
-            echo "   → Configure le secret TWITCH_IPA_URL dans Settings → Secrets"
-            echo "   → Ou fournis l'URL lors du déclenchement manuel (champ ipa_url)"
+            echo "❌ Pas d'URL IPA — configure le secret TWITCH_IPA_URL"
             exit 1
           fi
 
-          echo "📥 Téléchargement de l'IPA..."
           curl --fail --location --output Twitch.ipa "$IPA_URL"
 
-          # Vérifier taille
           if [ ! -s "Twitch.ipa" ]; then
-            echo "❌ IPA vide ou absent"
-            exit 1
+            echo "❌ IPA vide ou absente"; exit 1
           fi
 
-          # Vérifier que c'est bien un ZIP (les IPA sont des archives ZIP)
           FILE_TYPE=$(file --brief Twitch.ipa)
-          echo "   Type détecté: $FILE_TYPE"
+          echo "Type: $FILE_TYPE"
           if ! echo "$FILE_TYPE" | grep -qiE "zip|archive"; then
-            echo "❌ Le fichier téléchargé n'est pas une IPA valide (pas un ZIP)"
-            echo "   Vérifie que l'URL Filebin est directe et non expirée."
+            echo "❌ Pas une IPA valide (pas un ZIP) — lien expiré?"
             exit 1
           fi
 
-          echo "✅ IPA valide: $(du -sh Twitch.ipa | cut -f1)"
+          echo "✅ IPA: $(du -sh Twitch.ipa | cut -f1)"
 
-      # ──────────────────────────────────────────────────
-      # 7. Installation d'Azule
-      # ──────────────────────────────────────────────────
       - name: 🛠️ Installer Azule
         run: |
           git clone --depth=1 https://github.com/Al4ise/Azule /tmp/azule
           sudo ln -sf /tmp/azule/azule /usr/local/bin/azule
           sudo chmod +x /tmp/azule/azule
-          echo "✅ Azule installé"
+          echo "✅ Azule prêt"
 
-      # ──────────────────────────────────────────────────
-      # 8. Injection du .dylib dans l'IPA
-      # Azule gère: injection + CydiaSubstrate bundlé + fix rpath
-      # ──────────────────────────────────────────────────
       - name: 💉 Injecter 7TV dans l'IPA Twitch
         run: |
           set -euo pipefail
-
           DYLIB_PATH="${{ env.DYLIB_PATH }}"
-          echo "📱 IPA source : $(du -sh Twitch.ipa | cut -f1)"
-          echo "🔧 dylib      : $DYLIB_PATH ($(du -sh "$DYLIB_PATH" | cut -f1))"
 
-          # Injection via Azule
+          echo "📱 IPA: $(du -sh Twitch.ipa | cut -f1)"
+          echo "🔧 dylib: $DYLIB_PATH"
+
           azule -i Twitch.ipa -o . -f "$DYLIB_PATH"
 
-          # Trouver l'IPA produite par Azule (tout .ipa sauf l'original)
           PATCHED=$(find . -maxdepth 1 -name "*.ipa" ! -name "Twitch.ipa" | head -1)
           if [ -z "$PATCHED" ]; then
-            echo "❌ Azule n'a produit aucune IPA patchée"
-            echo "   Fichiers .ipa présents:"
-            ls -la *.ipa 2>/dev/null || echo "   (aucun)"
+            echo "❌ Azule n'a produit aucune IPA"
+            ls -la *.ipa 2>/dev/null || true
             exit 1
           fi
 
           mv "$PATCHED" TwitchSevenTV_patched.ipa
           echo "✅ IPA patchée: $(du -sh TwitchSevenTV_patched.ipa | cut -f1)"
 
-      # ──────────────────────────────────────────────────
-      # 9. Upload des artifacts (disponibles 30 jours)
-      # ──────────────────────────────────────────────────
       - name: 📤 Sauvegarder l'IPA patchée
         uses: actions/upload-artifact@v4
         with:
@@ -286,29 +201,19 @@ print('')
           path: TwitchSevenTV_patched.ipa
           retention-days: 30
 
-      - name: 📤 Sauvegarder le .dylib seul (optionnel)
+      - name: 📤 Sauvegarder le .dylib seul
         uses: actions/upload-artifact@v4
         with:
           name: TwitchSevenTV-dylib-only
           path: ${{ env.DYLIB_PATH }}
           retention-days: 30
 
-      # ──────────────────────────────────────────────────
-      # 10. Résumé
-      # ──────────────────────────────────────────────────
       - name: ✅ Résumé
         run: |
           echo "========================================"
           echo "  TwitchSevenTV — Build terminé! 🎉"
           echo "========================================"
-          echo ""
-          echo "📥 Télécharge ton IPA:"
-          echo "   Onglet 'Actions' → ce workflow"
-          echo "   → section 'Artifacts' → 'TwitchSevenTV-Patched-IPA'"
-          echo ""
-          echo "📱 Installe via SideStore"
-          echo "   (remplace l'ancienne IPA Twitch)"
-          echo ""
+          echo "Onglet Actions → Artifacts → TwitchSevenTV-Patched-IPA"
+          echo "Installe via SideStore"
           echo "⚠️  Lien Filebin expire le 8 juin 2026"
-          echo "   Re-uploader l'IPA si besoin après cette date."
           echo "========================================"
