@@ -207,32 +207,12 @@ jobs:
             exit 1
           fi
 
-          # ── Google Drive : contournement page de confirmation (fichiers >100MB) ──
+          # ── Google Drive : gdown gère nativement les gros fichiers ──
           if echo "$IPA_URL" | grep -q "drive.google.com"; then
             FILE_ID=$(echo "$IPA_URL" | grep -oE '[-\w]{25,}' | head -1)
             echo "📎 Google Drive détecté, ID: $FILE_ID"
-
-            # Premier appel pour récupérer les cookies + éventuel token de confirmation
-            curl --silent --location \
-              --cookie-jar /tmp/gdrive_cookies.txt \
-              "https://drive.google.com/uc?export=download&id=${FILE_ID}" \
-              -o /tmp/gdrive_check.html
-
-            CONFIRM=$(grep -o 'confirm=[^&"]*' /tmp/gdrive_check.html | head -1 | cut -d= -f2)
-
-            if [ -n "$CONFIRM" ]; then
-              echo "🔑 Token confirmation trouvé: $CONFIRM"
-              curl --silent --location \
-                --cookie /tmp/gdrive_cookies.txt \
-                "https://drive.google.com/uc?export=download&confirm=${CONFIRM}&id=${FILE_ID}" \
-                -o Twitch.ipa
-            else
-              echo "ℹ️  Pas de confirmation nécessaire"
-              curl --silent --location \
-                --cookie /tmp/gdrive_cookies.txt \
-                "https://drive.google.com/uc?export=download&id=${FILE_ID}" \
-                -o Twitch.ipa
-            fi
+            pip3 install gdown --quiet --break-system-packages
+            gdown --id "$FILE_ID" -O Twitch.ipa --fuzzy
 
           # ── Lien direct classique (Filebin, WeTransfer, etc.) ──
           else
@@ -256,7 +236,7 @@ jobs:
           FILE_TYPE=$(file --brief Twitch.ipa)
           echo "Type: $FILE_TYPE"
           if ! echo "$FILE_TYPE" | grep -qiE "zip|archive"; then
-            echo "❌ Pas une IPA valide — page de confirmation GDrive non contournée ?"
+            echo "❌ Pas une IPA valide — problème téléchargement GDrive ?"
             exit 1
           fi
 
