@@ -195,29 +195,58 @@ jobs:
           echo "DEB_PATH=$DEB_PATH"     >> $GITHUB_ENV
 
       - name: 📲 Télécharger l'IPA Twitch
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
-          IPA_URL="${{ github.event.inputs.ipa_url }}"
-          if [ -z "$IPA_URL" ]; then
-            IPA_URL="${{ secrets.TWITCH_IPA_URL }}"
+          IPA_SOURCE="${{ github.event.inputs.ipa_url }}"
+          if [ -z "$IPA_SOURCE" ]; then
+            IPA_SOURCE="${{ secrets.TWITCH_IPA_URL }}"
           fi
-          if [ -z "$IPA_URL" ]; then
+          if [ -z "$IPA_SOURCE" ]; then
             echo "❌ Pas d'URL IPA — configure TWITCH_IPA_URL dans Settings → Secrets"
             exit 1
           fi
 
-          # ── Google Drive : gdown gère nativement les gros fichiers ──
-          if echo "$IPA_URL" | grep -q "drive.google.com"; then
-            FILE_ID=$(echo "$IPA_URL" | grep -oE '[-\w]{25,}' | head -1)
+          # ── 1. GitHub Release (tag ou URL github.com/*/releases) — recommandé ──
+          if echo "$IPA_SOURCE" | grep -qE "^(ipa-|v[0-9]|releases/tag)" || \
+             echo "$IPA_SOURCE" | grep -q "github.com.*releases"; then
+
+            # Extraire le tag si c'est une URL complète
+            if echo "$IPA_SOURCE" | grep -q "github.com"; then
+              RELEASE_TAG=$(echo "$IPA_SOURCE" | grep -oE 'tag/[^/]+' | cut -d/ -f2)
+            else
+              RELEASE_TAG="$IPA_SOURCE"
+            fi
+
+            echo "📦 GitHub Release détecté, tag: $RELEASE_TAG"
+            gh release download "$RELEASE_TAG" \
+              --repo "${{ github.repository }}" \
+              --pattern "*.ipa" \
+              --output Twitch.ipa
+            echo "✅ Téléchargé depuis GitHub Release"
+
+          # ── 2. Google Drive ──
+          elif echo "$IPA_SOURCE" | grep -q "drive.google.com"; then
+            FILE_ID=$(echo "$IPA_SOURCE" | grep -oE '[-\w]{25,}' | head -1)
             echo "📎 Google Drive détecté, ID: $FILE_ID"
             pip3 install gdown --quiet --break-system-packages
-            gdown --id "$FILE_ID" -O Twitch.ipa --fuzzy
 
-          # ── Lien direct classique (Filebin, WeTransfer, etc.) ──
+            # Essai 1 : gdown avec URL complète
+            gdown "https://drive.google.com/uc?id=${FILE_ID}" -O Twitch.ipa || \
+            # Essai 2 : gdown avec --fuzzy
+            gdown --fuzzy "$IPA_SOURCE" -O Twitch.ipa || {
+              echo "❌ gdown échoué — Google bloque le téléchargement"
+              echo "   → Migre vers GitHub Releases pour un lien permanent fiable"
+              exit 1
+            }
+
+          # ── 3. Lien direct classique (Filebin, WeTransfer, etc.) ──
           else
+            echo "🔗 Lien direct détecté"
             HTTP_CODE=$(curl --silent --location --output Twitch.ipa \
-              --write-out "%{http_code}" "$IPA_URL" 2>/dev/null || echo "000")
+              --write-out "%{http_code}" "$IPA_SOURCE" 2>/dev/null || echo "000")
             echo "HTTP: $HTTP_CODE"
             if [ "$HTTP_CODE" != "200" ] || [ ! -s "Twitch.ipa" ]; then
               echo "❌ Téléchargement IPA échoué (HTTP $HTTP_CODE)"
@@ -236,7 +265,7 @@ jobs:
           FILE_TYPE=$(file --brief Twitch.ipa)
           echo "Type: $FILE_TYPE"
           if ! echo "$FILE_TYPE" | grep -qiE "zip|archive"; then
-            echo "❌ Pas une IPA valide — problème téléchargement GDrive ?"
+            echo "❌ Pas une IPA valide (reçu: $FILE_TYPE)"
             exit 1
           fi
 
