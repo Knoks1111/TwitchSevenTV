@@ -12,6 +12,12 @@
  *
  * Résultat: Twitch affiche l'image 7TV dans son UI native, sans rien changer
  * au moteur de rendu du chat.
+ *
+ * FIX "cellule vide" (v1.1):
+ * Quand une image finit de se télécharger, on force Twitch à re-render ses
+ * cellules visibles via reloadVisibleRows/reloadVisibleItems. Twitch relit
+ * ses cellules → relance les requêtes images → cache chaud → instantané.
+ * Uniquement déclenché à la fin d'un PREMIER téléchargement (pas en boucle).
  */
 
 #import "SevenTVURLProtocol.h"
@@ -21,8 +27,6 @@ static NSString *const kSevenTVEmoteIDPrefix = @"7tv_";
 static NSString *const kHandledKey = @"SevenTVURLProtocolHandled";
 
 // ── Session CDN partagée (niveau fichier) ────────────────────────────────────
-// Partagée entre +prewarmCDNConnection et -startLoading.
-// Une seule session = cache HTTP NSURLCache persistant entre appels.
 static NSURLSession *s_cdnSession = nil;
 static dispatch_once_t s_cdnSessionOnce;
 
@@ -41,6 +45,99 @@ static NSURLSession *SevenTVGetCDNSession(void) {
     return s_cdnSession;
 }
 
+
+// ── Parcours récursif de la hiérarchie de vues ───────────────────────────────
+//
+// Collecte tous les UITableView et UICollectionView dans la hiérarchie.
+// On cherche en profondeur depuis la fenêtre principale — Twitch imbrique
+// son chat dans plusieurs niveaux de conteneurs.
+//
+// Paramètre `out`: tableau mutable passé par référence dans lequel on ajoute
+// les vues trouvées. Pas de valeur de retour pour éviter des allocs répétées.
+
+static void SevenTVCollectScrollViews(UIView *root,
+                                      NSMutableArray<UIScrollView *> *out) {
+    if (!root) return;
+    if ([root isKindOfClass:[UITableView class]] ||
+        [root isKindOfClass:[UICollectionView class]]) {
+        [out addObject:(UIScrollView *)root];
+    }
+    for (UIView *child in root.subviews) {
+        SevenTVCollectScrollViews(child, out);
+    }
+}
+
+
+// ── Reload des cellules visibles ─────────────────────────────────────────────
+//
+// Appelée sur le main thread après qu'une image a fini de se télécharger.
+//
+// Stratégie:
+//   • UITableView  → reloadRowsAtIndexPaths:withRowAnimation:None
+//     (reloadVisibleRows n'existe pas directement — on recharge les
+//      indexPaths des cellules visibles, ce qui ne scroll pas)
+//   • UICollectionView → reloadItemsAtIndexPaths: sur les items visibles
+//
+// On filtre sur les vues qui ressemblent au chat (contentSize haute,
+// beaucoup de cellules) pour ne pas reloader des tableViews parasites
+// (menus, overlays, etc.) qui n'ont rien à voir.
+
+static void SevenTVReloadVisibleChatCells(void) {
+    NSAssert([NSThread isMainThread], @"SevenTVReloadVisibleChatCells must run on main thread");
+
+    UIWindow *keyWindow = nil;
+    // iOS 13+ : chercher la première scène connectée en foreground
+    if (@available(iOS 13.0, *)) {
+        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+            if (scene.activationState == UISceneActivationStateForegroundActive &&
+                [scene isKindOfClass:[UIWindowScene class]]) {
+                keyWindow = ((UIWindowScene *)scene).windows.firstObject;
+                break;
+            }
+        }
+    }
+    // Fallback iOS 12 ou si aucune scène trouvée
+    if (!keyWindow) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        keyWindow = [UIApplication sharedApplication].keyWindow;
+#pragma clang diagnostic pop
+    }
+    if (!keyWindow) return;
+
+    NSMutableArray<UIScrollView *> *scrollViews = [NSMutableArray array];
+    SevenTVCollectScrollViews(keyWindow, scrollViews);
+
+    for (UIScrollView *sv in scrollViews) {
+
+        // ── Heuristique "vue de chat" ────────────────────────────────────────
+        // Le chat Twitch est une liste longue (contentSize.height > 500pt)
+        // avec au moins quelques cellules (évite les tableViews à 0-1 ligne).
+        // On exclut aussi les vues trop étroites (overlays) et celles dont
+        // la hauteur content est inférieure à la hauteur frame (liste courte).
+        if (sv.contentSize.height < 500.0) continue;
+
+        if ([sv isKindOfClass:[UITableView class]]) {
+            UITableView *tv = (UITableView *)sv;
+            NSArray<NSIndexPath *> *visible = tv.indexPathsForVisibleRows;
+            if (visible.count == 0) continue;
+
+            [tv reloadRowsAtIndexPaths:visible
+                      withRowAnimation:UITableViewRowAnimationNone];
+
+        } else if ([sv isKindOfClass:[UICollectionView class]]) {
+            UICollectionView *cv = (UICollectionView *)sv;
+            NSArray<NSIndexPath *> *visible = [cv indexPathsForVisibleItems];
+            if (visible.count == 0) continue;
+
+            [cv reloadItemsAtIndexPaths:visible];
+        }
+    }
+}
+
+
+// ────────────────────────────────────────────────────────────────────────────
+
 @interface SevenTVURLProtocol ()
 @property (nonatomic, strong) NSURLSessionDataTask *activeTask;
 @end
@@ -53,14 +150,10 @@ static NSURLSession *SevenTVGetCDNSession(void) {
 // On gère UNIQUEMENT les URLs qui contiennent notre préfixe "7tv_"
 // ============================================================
 + (BOOL)canInitWithRequest:(NSURLRequest *)request {
-    // Éviter les boucles infinies (ne pas traiter les requêtes qu'on a déjà modifiées)
     if ([NSURLProtocol propertyForKey:kHandledKey inRequest:request]) {
         return NO;
     }
-
     NSString *urlString = request.URL.absoluteString ?: @"";
-
-    // On cherche notre préfixe dans l'URL (dans le chemin de l'emote ID)
     return [urlString containsString:kSevenTVEmoteIDPrefix];
 }
 
@@ -74,14 +167,6 @@ static NSURLSession *SevenTVGetCDNSession(void) {
 
 // ============================================================
 // Préchauffage de la connexion TCP/TLS vers cdn.7tv.app
-//
-// Pourquoi: la 1ère requête CDN doit créer la NSURLSession (dispatch_once),
-// résoudre le DNS, faire le TCP handshake + TLS handshake → ~4-5s à froid.
-// On déclenche tout ça dès que les emotes sont chargées, avant le 1er
-// message, en faisant une requête HEAD no-op vers le CDN.
-// La session statique s_cdnSession est ainsi déjà initialisée et la
-// connexion keep-alive est ouverte → les vraies requêtes d'images
-// partent sans aucun délai.
 // ============================================================
 + (void)prewarmCDNConnection {
     NSURL *warmURL = [NSURL URLWithString:@"https://cdn.7tv.app/emote/01F6MSP3NV00001B6E/1x.webp"];
@@ -105,9 +190,6 @@ static NSURLSession *SevenTVGetCDNSession(void) {
 - (void)startLoading {
     NSString *urlString = self.request.URL.absoluteString;
 
-    // Extraire l'emote ID depuis notre faux ID
-    // Exemple d'URL: https://static-cdn.jtvnw.net/emoticons/v2/7tv_63071bb9464de28875c52531/default/dark/3.0
-    // On cherche "7tv_" et on prend ce qui suit jusqu'au prochain "/"
     NSRange prefixRange = [urlString rangeOfString:kSevenTVEmoteIDPrefix];
     if (prefixRange.location == NSNotFound) {
         [self.client URLProtocol:self
@@ -117,10 +199,10 @@ static NSURLSession *SevenTVGetCDNSession(void) {
         return;
     }
 
-    NSString *afterPrefix = [urlString substringFromIndex:prefixRange.location + kSevenTVEmoteIDPrefix.length];
-    // L'ID 7TV est jusqu'au prochain "/" ou à la fin de la chaîne
-    NSArray *parts  = [afterPrefix componentsSeparatedByString:@"/"];
-    NSString *emoteID = parts.firstObject;
+    NSString *afterPrefix = [urlString substringFromIndex:prefixRange.location
+                                                         + kSevenTVEmoteIDPrefix.length];
+    NSArray  *parts       = [afterPrefix componentsSeparatedByString:@"/"];
+    NSString *emoteID     = parts.firstObject;
 
     if (!emoteID || emoteID.length == 0) {
         [self.client URLProtocol:self
@@ -130,20 +212,25 @@ static NSURLSession *SevenTVGetCDNSession(void) {
         return;
     }
 
+    // ── Détecter si la réponse est déjà en cache ─────────────────────────────
+    // Si elle l'est, URLProtocol appellera immédiatement didReceiveResponse +
+    // didLoadData + didFinishLoading → Twitch met à jour l'imageView sans délai.
+    // On n'a PAS besoin de reloadVisibleRows dans ce cas — la cellule était
+    // déjà à l'écran et Twitch sait déjà dessiner l'image.
+    // On marque donc ce flag pour éviter le reload inutile.
+    NSString *cdnURLCheck = [NSString stringWithFormat:@"https://cdn.7tv.app/emote/%@/4x.webp", emoteID];
+    NSURL    *cdnURLObj   = [NSURL URLWithString:cdnURLCheck];
+    NSMutableURLRequest *cacheCheckReq = [NSMutableURLRequest requestWithURL:cdnURLObj];
+    cacheCheckReq.cachePolicy = NSURLRequestReturnCacheDataDontLoad;
+    BOOL alreadyCached = ([SevenTVGetCDNSession().configuration.URLCache
+                           cachedResponseForRequest:cacheCheckReq] != nil);
+
     // ── Session CDN partagée ─────────────────────────────────────────────────
     NSURLSession *session = SevenTVGetCDNSession();
 
-    // ── Construire l'URL 7TV CDN ─────────────────────────────────────────────
-    // WebP animé est 2-3x plus léger qu'un GIF équivalent et supporté
-    // nativement par CGImageSource depuis iOS 14 via CGImageSourceCreateWithData.
-    // On utilise TOUJOURS WebP (animé ou statique) — plus de GIF.
-    //
-    // Taille: Twitch demande ses emotes en "3.0" (haute résolution Retina).
-    // On demande 4x au CDN 7TV pour correspondre à la taille visuelle
-    // des emotes Twitch natives dans le chat.
+    // ── Chercher si l'emote est animée ───────────────────────────────────────
     SevenTVManager *mgr = [SevenTVManager sharedManager];
 
-    // Chercher si l'emote est animée — lecture thread-safe via emoteQueue
     __block BOOL isAnimated = NO;
     dispatch_sync(mgr.emoteQueue, ^{
         SevenTVEmote *found = mgr.channelEmotes[emoteID] ?: mgr.globalEmotes[emoteID];
@@ -160,17 +247,17 @@ static NSURLSession *SevenTVGetCDNSession(void) {
         isAnimated = found ? found.isAnimated : NO;
     });
 
-    // Toujours WebP — animé ou statique.
-    // WebP animé = même qualité qu'un GIF mais 2-3x plus petit → charge en 1-2s au lieu de 5-10s.
-    // CGImageSource sur iOS 14+ décode nativement les WebP animés frame par frame.
     BOOL useAnimated = isAnimated && mgr.showAnimated;
-    NSString *extension = @"4x.webp";  // WebP dans tous les cas
+    NSString *extension = @"4x.webp";
 
     NSString *cdnURL = [NSString stringWithFormat:@"https://cdn.7tv.app/emote/%@/%@",
                         emoteID, extension];
 
-    [mgr log:@"🌐 URLProtocol intercept → emote:%@ animé:%@ url:%@",
-     emoteID, useAnimated ? @"oui" : @"non", cdnURL];
+    [mgr log:@"🌐 URLProtocol intercept → emote:%@ animé:%@ cached:%@ url:%@",
+     emoteID,
+     useAnimated    ? @"oui" : @"non",
+     alreadyCached  ? @"oui" : @"non",
+     cdnURL];
 
     NSURL *targetURL = [NSURL URLWithString:cdnURL];
     if (!targetURL) {
@@ -181,16 +268,16 @@ static NSURLSession *SevenTVGetCDNSession(void) {
         return;
     }
 
-    // Créer une nouvelle requête vers 7TV (marquée pour éviter les boucles)
     NSMutableURLRequest *newRequest = [NSMutableURLRequest requestWithURL:targetURL];
     [NSURLProtocol setProperty:@YES forKey:kHandledKey inRequest:newRequest];
     newRequest.cachePolicy = NSURLRequestReturnCacheDataElseLoad;
 
     __weak typeof(self) weakSelf = self;
-    self.activeTask = [SevenTVGetCDNSession() dataTaskWithRequest:newRequest
-                               completionHandler:^(NSData *data,
-                                                    NSURLResponse *response,
-                                                    NSError *error) {
+
+    self.activeTask = [session dataTaskWithRequest:newRequest
+                               completionHandler:^(NSData      *data,
+                                                   NSURLResponse *response,
+                                                   NSError       *error) {
         __strong typeof(weakSelf) strongSelf = weakSelf;
         if (!strongSelf) return;
 
@@ -201,7 +288,6 @@ static NSURLSession *SevenTVGetCDNSession(void) {
 
         if (data && response) {
             NSHTTPURLResponse *httpResponse = (NSHTTPURLResponse *)response;
-            // Toujours WebP (animé ou statique)
             NSHTTPURLResponse *spoofedResponse = [[NSHTTPURLResponse alloc]
                 initWithURL:strongSelf.request.URL
                 statusCode:httpResponse.statusCode
@@ -213,6 +299,36 @@ static NSURLSession *SevenTVGetCDNSession(void) {
                         cacheStoragePolicy:NSURLCacheStorageAllowed];
             [strongSelf.client URLProtocol:strongSelf didLoadData:data];
             [strongSelf.client URLProtocolDidFinishLoading:strongSelf];
+
+            // ── Fix "cellule vide" ───────────────────────────────────────────
+            //
+            // Contexte: Twitch a affiché le message IRC AVANT que l'image soit
+            // disponible. La cellule contient un UIImageView vide en attente.
+            // NSURLCache vient d'être rempli (cache froid → chaud).
+            //
+            // Problème: Twitch ne sait pas que l'image est maintenant dispo.
+            // Il ne re-render pas la cellule → la case vide reste vide.
+            //
+            // Solution: on force Twitch à relire ses cellules visibles.
+            // Twitch re-demande l'image pour chaque cellule → NSURLCache répond
+            // immédiatement (cache chaud) → UIImageView affiche l'emote.
+            //
+            // On ne le fait PAS si l'image était déjà en cache car dans ce cas
+            // Twitch avait accès à l'image dès le premier rendu — pas de case
+            // vide à corriger, et un reload inutile peut faire flasher l'UI.
+            //
+            // On ne le fait PAS non plus si la requête a échoué (géré au-dessus).
+            if (!alreadyCached) {
+                [[SevenTVManager sharedManager] log:@"♻️ Premier téléchargement de %@ → reloadVisibleRows", emoteID];
+
+                // Toujours sur le main thread — UIKit n'est pas thread-safe.
+                // On utilise async et non sync pour ne pas bloquer le thread
+                // de la NSURLSession (qui est un thread interne d'Apple).
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    SevenTVReloadVisibleChatCells();
+                });
+            }
+
         } else {
             [strongSelf.client URLProtocol:strongSelf
                           didFailWithError:[NSError errorWithDomain:NSURLErrorDomain
