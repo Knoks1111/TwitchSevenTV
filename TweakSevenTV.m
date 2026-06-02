@@ -15,8 +15,97 @@
 #import <objc/runtime.h>
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
+#import <ImageIO/ImageIO.h>
 #import "SevenTVManager.h"
 #import "SevenTVURLProtocol.h"
+
+
+// ────────────────────────────────────────────────────────────
+// MARK: - Fix animations GIF
+//
+// `UIImage imageWithData:` retourne un UIImage statique (1ère frame) même
+// pour un GIF multi-frames. On swizzle cette méthode pour décoder toutes les
+// frames via CGImageSource et retourner un UIImage animé.
+// On swizzle aussi UIImageView.setImage: pour démarrer l'animation quand
+// l'image a des frames (UIImage.animationImages non-vide).
+// ────────────────────────────────────────────────────────────
+
+@interface UIImage (SevenTVGIF)
++ (UIImage *)s7tv_imageWithData:(NSData *)data;
+@end
+
+@implementation UIImage (SevenTVGIF)
+
++ (UIImage *)s7tv_imageWithData:(NSData *)data {
+    // Vérifier si c'est un GIF (magic bytes: 47 49 46 38 = "GIF8")
+    if (data.length >= 4) {
+        const uint8_t *b = (const uint8_t *)data.bytes;
+        if (b[0] == 0x47 && b[1] == 0x49 && b[2] == 0x46 && b[3] == 0x38) {
+            CGImageSourceRef src =
+                CGImageSourceCreateWithData((__bridge CFDataRef)data, NULL);
+            if (src) {
+                size_t count = CGImageSourceGetCount(src);
+                if (count > 1) {
+                    NSMutableArray<UIImage *> *frames = [NSMutableArray arrayWithCapacity:count];
+                    NSTimeInterval totalDuration = 0;
+
+                    for (size_t i = 0; i < count; i++) {
+                        CGImageRef cgImg =
+                            CGImageSourceCreateImageAtIndex(src, i, NULL);
+                        if (cgImg) {
+                            [frames addObject:[UIImage imageWithCGImage:cgImg]];
+                            CFRelease(cgImg);
+                        }
+
+                        // Durée de la frame (kCGImagePropertyGIFDictionary)
+                        NSDictionary *props = (__bridge_transfer NSDictionary *)
+                            CGImageSourceCopyPropertiesAtIndex(src, i, NULL);
+                        NSDictionary *gif  = props[(__bridge NSString *)
+                                                   kCGImagePropertyGIFDictionary];
+                        NSNumber *delay =
+                            gif[(__bridge NSString *)kCGImagePropertyGIFUnclampedDelayTime]
+                            ?: gif[(__bridge NSString *)kCGImagePropertyGIFDelayTime];
+                        // Minimum 10ms pour éviter les GIFs trop rapides
+                        totalDuration += MAX(delay.doubleValue, 0.01);
+                    }
+                    CFRelease(src);
+
+                    if (frames.count > 1) {
+                        return [UIImage animatedImageWithImages:frames
+                                                      duration:totalDuration];
+                    }
+                    if (frames.count == 1) return frames[0];
+                }
+                if (src) CFRelease(src);
+            }
+        }
+    }
+    // Fallback: appel de l'original (swizzlé → s7tv_ appelle l'original)
+    return [self s7tv_imageWithData:data];
+}
+
+@end
+
+
+@interface UIImageView (SevenTVAnimation)
+- (void)s7tv_setImage:(UIImage *)image;
+@end
+
+@implementation UIImageView (SevenTVAnimation)
+
+- (void)s7tv_setImage:(UIImage *)image {
+    [self s7tv_setImage:image]; // appelle l'original (swizzlé)
+
+    // Si l'image a des frames animées, démarrer l'animation
+    if (image.images.count > 1) {
+        self.animationImages   = image.images;
+        self.animationDuration = image.duration > 0 ? image.duration : 1.0;
+        self.animationRepeatCount = 0; // infini
+        [self startAnimating];
+    }
+}
+
+@end
 
 
 // ────────────────────────────────────────────────────────────
@@ -372,7 +461,19 @@ static void s7tv_swizzle_websocket(void) {
 __attribute__((constructor))
 static void TwitchSevenTVInit(void) {
     SevenTVManager *mgr = [SevenTVManager sharedManager];
-    [mgr log:@"🔌 Chargement TwitchSevenTV v1.2 (substrate-free)..."];
+    [mgr log:@"🔌 Chargement TwitchSevenTV v1.3 (substrate-free)..."];
+
+    // ── Swizzle UIImage imageWithData: pour décoder les GIFs animés ──
+    s7tv_swizzle(object_getClass([UIImage class]),   // meta-classe (méthode de classe)
+                 object_getClass([UIImage class]),
+                 @selector(imageWithData:),
+                 @selector(s7tv_imageWithData:));
+
+    // ── Swizzle UIImageView setImage: pour démarrer l'animation ──
+    s7tv_swizzle([UIImageView class],
+                 [UIImageView class],
+                 @selector(setImage:),
+                 @selector(s7tv_setImage:));
 
     // ── Fix B: protocolClasses swizzle (avant la création de sessions) ──
     s7tv_swizzle_protocol_classes();

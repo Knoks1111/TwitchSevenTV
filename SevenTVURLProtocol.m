@@ -82,30 +82,60 @@ static NSString *const kHandledKey = @"SevenTVURLProtocolHandled";
         return;
     }
 
-    // Construire l'URL 7TV CDN
-    // - Emote animée + animations activées → GIF (UIKit supporte GIF nativement,
-    //   contrairement au WebP animé non rendu par la plupart des libs iOS)
+    // ── Session CDN partagée (statique) ─────────────────────────────────────────
+    // UNE seule session pour toutes les requêtes CDN → le cache HTTP NSURLCache
+    // persiste entre les appels, donc une emote déjà chargée est servie
+    // instantanément depuis le disque sans aucune requête réseau.
+    static NSURLSession *s_cdnSession = nil;
+    static dispatch_once_t s_cdnSessionOnce;
+    dispatch_once(&s_cdnSessionOnce, ^{
+        NSURLSessionConfiguration *cfg =
+            [NSURLSessionConfiguration defaultSessionConfiguration];
+
+        // Cache disque dédié de 200 MB pour les images d'emotes
+        NSURLCache *emoteCache = [[NSURLCache alloc]
+            initWithMemoryCapacity:  30 * 1024 * 1024   // 30 MB RAM
+                      diskCapacity: 200 * 1024 * 1024   // 200 MB disque
+                          diskPath: @"s7tv_cdn_cache"];
+        cfg.URLCache = emoteCache;
+        cfg.requestCachePolicy = NSURLRequestReturnCacheDataElseLoad;
+
+        s_cdnSession = [NSURLSession sessionWithConfiguration:cfg];
+    });
+
+    // ── Construire l'URL 7TV CDN ─────────────────────────────────────────────
+    // - Emote animée + animations activées → GIF
+    //   (UIKit supporte GIF via UIImage.animationImages; WebP animé pas supporté
+    //    nativement par la plupart des libs iOS sans flag de compilation spécial)
     // - Emote statique ou animations désactivées → WebP (plus léger)
     SevenTVManager *mgr = [SevenTVManager sharedManager];
 
-    // Chercher si l'emote est animée dans les dictionnaires du manager
-    BOOL isAnimated = NO;
-    NSDictionary *globals  = mgr.globalEmotes;
-    NSDictionary *channels = mgr.channelEmotes;
-    for (SevenTVEmote *e in globals.allValues) {
-        if ([e.emoteID isEqualToString:emoteID]) { isAnimated = e.isAnimated; break; }
-    }
-    if (!isAnimated) {
-        for (SevenTVEmote *e in channels.allValues) {
-            if ([e.emoteID isEqualToString:emoteID]) { isAnimated = e.isAnimated; break; }
+    // Chercher si l'emote est animée — lecture thread-safe via emoteQueue
+    __block BOOL isAnimated = NO;
+    dispatch_sync(mgr.emoteQueue, ^{
+        SevenTVEmote *found = mgr.channelEmotes[emoteID] ?: mgr.globalEmotes[emoteID];
+        if (!found) {
+            // Fallback: chercher par emoteID dans les valeurs
+            for (SevenTVEmote *e in mgr.channelEmotes.allValues) {
+                if ([e.emoteID isEqualToString:emoteID]) { found = e; break; }
+            }
         }
-    }
+        if (!found) {
+            for (SevenTVEmote *e in mgr.globalEmotes.allValues) {
+                if ([e.emoteID isEqualToString:emoteID]) { found = e; break; }
+            }
+        }
+        isAnimated = found ? found.isAnimated : NO;
+    });
 
     BOOL useGif = isAnimated && mgr.showAnimated;
     NSString *extension = useGif ? @"4x.gif" : @"4x.webp";
 
     NSString *cdnURL = [NSString stringWithFormat:@"https://cdn.7tv.app/emote/%@/%@",
                         emoteID, extension];
+
+    [mgr log:@"🌐 URLProtocol intercept → emote:%@ animé:%@ url:%@",
+     emoteID, isAnimated ? @"oui" : @"non", cdnURL];
 
     NSURL *targetURL = [NSURL URLWithString:cdnURL];
     if (!targetURL) {
@@ -119,11 +149,10 @@ static NSString *const kHandledKey = @"SevenTVURLProtocolHandled";
     // Créer une nouvelle requête vers 7TV (marquée pour éviter les boucles)
     NSMutableURLRequest *newRequest = [NSMutableURLRequest requestWithURL:targetURL];
     [NSURLProtocol setProperty:@YES forKey:kHandledKey inRequest:newRequest];
-    newRequest.cachePolicy = NSURLRequestReturnCacheDataElseLoad; // Cache agressif
+    newRequest.cachePolicy = NSURLRequestReturnCacheDataElseLoad;
 
-    // Effectuer la requête vers le vrai CDN 7TV
-    NSURLSessionConfiguration *config = [NSURLSessionConfiguration defaultSessionConfiguration];
-    NSURLSession *session = [NSURLSession sessionWithConfiguration:config];
+    // Utiliser la session statique partagée (cache persistant)
+    NSURLSession *session = s_cdnSession;
 
     __weak typeof(self) weakSelf = self;
     self.activeTask = [session dataTaskWithRequest:newRequest

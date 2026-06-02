@@ -61,6 +61,11 @@ extern NSString *const S7TVLogsDidUpdateNotification;
 @property (nonatomic, strong) NSString *currentChannelName;
 @property (nonatomic, strong) NSString *currentChannelTwitchID;
 
+// File de dispatch protégeant globalEmotes/channelEmotes (concurrent).
+// Utiliser dispatch_sync(mgr.emoteQueue, ^{ ... }) pour lire,
+// dispatch_barrier_async(mgr.emoteQueue, ^{ ... }) pour écrire.
+@property (nonatomic, strong, readonly) dispatch_queue_t emoteQueue;
+
 // --- Initialisation ---
 - (void)setup;
 

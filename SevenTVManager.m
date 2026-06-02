@@ -33,8 +33,8 @@ NSString *const S7TVLogsDidUpdateNotification = @"S7TVLogsDidUpdateNotification"
 @interface SevenTVManager ()
 // Ensemble des channel IDs déjà chargés (pour éviter les doublons)
 @property (nonatomic, strong) NSMutableSet<NSString *> *loadedChannelIDs;
-// File de dispatch pour la thread-safety des données d'emotes
-@property (nonatomic, strong) dispatch_queue_t emoteQueue;
+// File de dispatch pour la thread-safety des données d'emotes (readwrite en privé)
+@property (nonatomic, strong, readwrite) dispatch_queue_t emoteQueue;
 // Bouton flottant des paramètres
 @property (nonatomic, weak) UIButton *settingsButton;
 
@@ -529,7 +529,7 @@ static NSString *const kCacheGlobal = @"s7tv_cache_global";
     if (messageText.length == 0) return rawMessage;
 
     // Diagnostic — voir exactement le texte parsé (à retirer une fois confirmé)
-    [self log:@"🔎 Texte parsé: \"%@\"", messageText];
+    // [self log:@"🔎 Texte parsé: \"%@\"", messageText];  // trop verbeux en prod
 
     // --- Obtenir la liste combinée de toutes les emotes connues ---
     __block NSDictionary *global;
@@ -580,45 +580,50 @@ static NSString *const kCacheGlobal = @"s7tv_cache_global";
     // Si aucune emote 7TV trouvée, retourner le message original
     if (emoteTags.count == 0) return rawMessage;
 
+    // Log les emotes injectées (pour diagnostic "ptn")
+    [self log:@"💉 Injection de %lu emote(s): %@",
+     (unsigned long)emoteTags.count,
+     [emoteTags componentsJoinedByString:@" | "]];
+
     // --- Modifier le tag @emotes dans l'en-tête IRC ---
     // Chercher le tag "emotes=" existant pour y ajouter nos emotes
     NSString *newEmotesStr = [emoteTags componentsJoinedByString:@","];
 
     NSRange emoteTagRange = [rawMessage rangeOfString:@"emotes="];
     if (emoteTagRange.location != NSNotFound) {
-        // Il y a déjà des emotes Twitch - on ajoute les nôtres à la suite
         NSUInteger insertPos = emoteTagRange.location + emoteTagRange.length;
-
-        // Trouver la fin du tag emotes existant (prochain ";" ou fin de tags)
         NSString *afterEmotes = [rawMessage substringFromIndex:insertPos];
-        NSRange semicolonRange = [afterEmotes rangeOfString:@";"];
 
-        NSString *prefix  = [rawMessage substringToIndex:insertPos];
-        NSString *suffix;
+        // "emotes=" peut etre suivi par ";" (autre tag), " " (debut prefix IRC),
+        // ou rien. On prend le premier delimiteur pour isoler la valeur existante.
+        NSRange sc = [afterEmotes rangeOfString:@";"];
+        NSRange sp = [afterEmotes rangeOfString:@" "];
+        NSUInteger limit = afterEmotes.length;
+        if (sc.location != NSNotFound) limit = sc.location;
+        if (sp.location != NSNotFound && sp.location < limit) limit = sp.location;
 
-        if (semicolonRange.location != NSNotFound) {
-            // Il y a d'autres tags après
-            NSString *existingEmotes = [afterEmotes substringToIndex:semicolonRange.location];
-            suffix = [afterEmotes substringFromIndex:semicolonRange.location];
+        NSString *prefix         = [rawMessage substringToIndex:insertPos];
+        NSString *existingEmotes = [afterEmotes substringToIndex:limit];
+        NSString *suffix         = [afterEmotes substringFromIndex:limit];
 
-            NSString *combined = existingEmotes.length > 0
-                ? [NSString stringWithFormat:@"%@,%@", existingEmotes, newEmotesStr]
-                : newEmotesStr;
+        NSString *combined = existingEmotes.length > 0
+            ? [NSString stringWithFormat:@"%@,%@", existingEmotes, newEmotesStr]
+            : newEmotesStr;
 
-            return [NSString stringWithFormat:@"%@%@%@", prefix, combined, suffix];
-        } else {
-            // emotes est le dernier tag
-            return [NSString stringWithFormat:@"%@%@", prefix, newEmotesStr];
-        }
+        NSString *result = [NSString stringWithFormat:@"%@%@%@", prefix, combined, suffix];
+        [self log:@"tag emotes -> %@", [result substringToIndex:MIN((NSUInteger)120, result.length)]];
+        return result;
+
     } else {
-        // Pas de tag emotes - on l'ajoute au début des tags
-        // Format: "@emotes=xxx;tags_existants ..."
+        NSString *result;
         if ([rawMessage hasPrefix:@"@"]) {
             NSString *withoutAt = [rawMessage substringFromIndex:1];
-            return [NSString stringWithFormat:@"@emotes=%@;%@", newEmotesStr, withoutAt];
+            result = [NSString stringWithFormat:@"@emotes=%@;%@", newEmotesStr, withoutAt];
         } else {
-            return [NSString stringWithFormat:@"@emotes=%@ %@", newEmotesStr, rawMessage];
+            result = [NSString stringWithFormat:@"@emotes=%@ %@", newEmotesStr, rawMessage];
         }
+        [self log:@"tag emotes -> %@", [result substringToIndex:MIN((NSUInteger)120, result.length)]];
+        return result;
     }
 }
 
