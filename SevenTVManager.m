@@ -93,20 +93,21 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
 
 
 // ============================================================
-// MARK: - SevenTVPassthroughView
+// MARK: - SevenTVFloatingWindow
 //
-// Vue racine de la fenêtre flottante. Couvre tout l'écran mais
-// ne capture les touches QUE sur ses sous-vues (le bouton 7TV).
-// Les zones transparentes laissent passer les touches vers Twitch.
+// UIWindow dont le hitTest ne capte les touches QUE si une
+// vraie sous-vue (le bouton 7TV) est touchée.
+// Si le fond transparent est touché → retourne nil → iOS
+// transmet le touch à la fenêtre Twitch en dessous.
 // ============================================================
-@interface SevenTVPassthroughView : UIView
+@interface SevenTVFloatingWindow : UIWindow
 @end
 
-@implementation SevenTVPassthroughView
+@implementation SevenTVFloatingWindow
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
     UIView *hit = [super hitTest:point withEvent:event];
-    // Si le hit c'est le fond (cette vue) → ignorer, laisser passer à l'app
-    return (hit == self) ? nil : hit;
+    if (!hit || hit == self.rootViewController.view) return nil;
+    return hit;
 }
 @end
 
@@ -902,11 +903,11 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
         // TOUTES les pages de Twitch (navigation, stream, chat, settings...).
         // Contrairement à un addSubview:keyWindow, elle n'est jamais couverte
         // par les transitions de navigation.
-        UIWindow *floatingWin;
+        SevenTVFloatingWindow *floatingWin;
         if (windowScene) {
-            floatingWin = [[UIWindow alloc] initWithWindowScene:windowScene];
+            floatingWin = [[SevenTVFloatingWindow alloc] initWithWindowScene:windowScene];
         } else {
-            floatingWin = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+            floatingWin = [[SevenTVFloatingWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
         }
         floatingWin.windowLevel     = UIWindowLevelStatusBar + 1;
         floatingWin.backgroundColor = [UIColor clearColor];
@@ -914,13 +915,10 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
 
         // rootViewController requis sous iOS 13+
         UIViewController *rootVC = [[UIViewController alloc] init];
-        SevenTVPassthroughView *passView = [[SevenTVPassthroughView alloc]
-            initWithFrame:[UIScreen mainScreen].bounds];
-        passView.backgroundColor = [UIColor clearColor];
-        rootVC.view = passView;
+        rootVC.view.backgroundColor = [UIColor clearColor];
         floatingWin.rootViewController = rootVC;
 
-        self.floatingWindow = floatingWin; // strong → fenêtre reste en vie
+        self.floatingWindow = floatingWin;
 
         // ── Créer le bouton ───────────────────────────────────────────────────
         CGRect screen = [UIScreen mainScreen].bounds;
@@ -943,7 +941,7 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
         [btn addGestureRecognizer:[[UIPanGestureRecognizer alloc]
             initWithTarget:self action:@selector(handleSettingsButtonDrag:)]];
 
-        [passView addSubview:btn];
+        [rootVC.view addSubview:btn];
         self.settingsButton = btn;
 
         [self log:@"✅ Bouton 7TV dans UIWindow flottante (level %.0f)",

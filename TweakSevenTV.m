@@ -138,38 +138,25 @@
     }
 
     // ── Fix taille emotes rectangulaires ─────────────────────────────────────
-    //
-    // Twitch iOS alloue un cadre carré pour toutes les emotes (les siennes
-    // sont toutes carrées). Les emotes 7TV peuvent être rectangulaires.
-    // On lit les vraies dimensions du WebP (image.size) et on corrige la
-    // largeur proportionnellement à la hauteur allouée par Twitch.
-    //
-    // Garde-fous:
-    //   • On ne touche qu'aux petites vues (< 80pt) → c'est la taille emote
-    //   • On ne touche qu'aux images significativement non-carrées (ratio > 1.15)
-    //   • On diffère sur main thread pour avoir le frame final après layout
-
     CGFloat imgW = image.size.width;
     CGFloat imgH = image.size.height;
     if (imgH <= 0 || imgW <= 0) return;
 
     CGFloat ratio = imgW / imgH;
-    if (ratio < 1.15) return; // carré ou portrait → pas touche
+    if (ratio < 1.15) return;
+
+    // Exclure les éléments de navigation/tab bar — leurs icônes sont aussi
+    // des WebP rectangulaires mais ne sont pas des emotes 7TV.
+    NSString *superviewClass = NSStringFromClass([self.superview class]);
+    if ([superviewClass containsString:@"TabBar"] ||
+        [superviewClass containsString:@"NavigationBar"] ||
+        [superviewClass containsString:@"ToolBar"]) return;
 
     CGFloat viewH = self.bounds.size.height > 0
         ? self.bounds.size.height
         : self.frame.size.height;
 
-    // Log diagnostic (toujours) pour voir ce que Twitch nous donne
-    [[SevenTVManager sharedManager]
-        log:@"📐 img=%.0fx%.0f ratio=%.2f viewFrame=%@ class=%@ superview=%@ constraints=%lu",
-        imgW, imgH, ratio,
-        NSStringFromCGRect(self.frame),
-        NSStringFromClass([self class]),
-        NSStringFromClass([self.superview class]),
-        (unsigned long)self.constraints.count];
-
-    if (viewH < 1 || viewH > 80.0) return; // pas une emote → on sort
+    if (viewH < 1 || viewH > 80.0) return;
 
     __weak UIImageView *weakSelf = self;
     dispatch_async(dispatch_get_main_queue(), ^{
