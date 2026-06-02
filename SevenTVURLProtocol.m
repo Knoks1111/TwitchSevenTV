@@ -20,6 +20,27 @@
 static NSString *const kSevenTVEmoteIDPrefix = @"7tv_";
 static NSString *const kHandledKey = @"SevenTVURLProtocolHandled";
 
+// ── Session CDN partagée (niveau fichier) ────────────────────────────────────
+// Partagée entre +prewarmCDNConnection et -startLoading.
+// Une seule session = cache HTTP NSURLCache persistant entre appels.
+static NSURLSession *s_cdnSession = nil;
+static dispatch_once_t s_cdnSessionOnce;
+
+static NSURLSession *SevenTVGetCDNSession(void) {
+    dispatch_once(&s_cdnSessionOnce, ^{
+        NSURLSessionConfiguration *cfg =
+            [NSURLSessionConfiguration defaultSessionConfiguration];
+        NSURLCache *emoteCache = [[NSURLCache alloc]
+            initWithMemoryCapacity:  30 * 1024 * 1024   // 30 MB RAM
+                      diskCapacity: 200 * 1024 * 1024   // 200 MB disque
+                          diskPath: @"s7tv_cdn_cache"];
+        cfg.URLCache = emoteCache;
+        cfg.requestCachePolicy = NSURLRequestReturnCacheDataElseLoad;
+        s_cdnSession = [NSURLSession sessionWithConfiguration:cfg];
+    });
+    return s_cdnSession;
+}
+
 @interface SevenTVURLProtocol ()
 @property (nonatomic, strong) NSURLSessionDataTask *activeTask;
 @end
@@ -52,6 +73,33 @@ static NSString *const kHandledKey = @"SevenTVURLProtocolHandled";
 }
 
 // ============================================================
+// Préchauffage de la connexion TCP/TLS vers cdn.7tv.app
+//
+// Pourquoi: la 1ère requête CDN doit créer la NSURLSession (dispatch_once),
+// résoudre le DNS, faire le TCP handshake + TLS handshake → ~4-5s à froid.
+// On déclenche tout ça dès que les emotes sont chargées, avant le 1er
+// message, en faisant une requête HEAD no-op vers le CDN.
+// La session statique s_cdnSession est ainsi déjà initialisée et la
+// connexion keep-alive est ouverte → les vraies requêtes d'images
+// partent sans aucun délai.
+// ============================================================
++ (void)prewarmCDNConnection {
+    NSURL *warmURL = [NSURL URLWithString:@"https://cdn.7tv.app/emote/01F6MSP3NV00001B6E/1x.webp"];
+    if (!warmURL) return;
+
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:warmURL];
+    req.HTTPMethod = @"HEAD";
+    req.timeoutInterval = 10.0;
+
+    [[SevenTVGetCDNSession() dataTaskWithRequest:req
+                              completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
+        NSLog(@"[TwitchSevenTV] 🔥 CDN prewarm: %@",
+              e ? e.localizedDescription : @"OK");
+    }] resume];
+}
+
+
+// ============================================================
 // Traitement de la requête - on redirige vers 7TV CDN
 // ============================================================
 - (void)startLoading {
@@ -82,26 +130,8 @@ static NSString *const kHandledKey = @"SevenTVURLProtocolHandled";
         return;
     }
 
-    // ── Session CDN partagée (statique) ─────────────────────────────────────────
-    // UNE seule session pour toutes les requêtes CDN → le cache HTTP NSURLCache
-    // persiste entre les appels, donc une emote déjà chargée est servie
-    // instantanément depuis le disque sans aucune requête réseau.
-    static NSURLSession *s_cdnSession = nil;
-    static dispatch_once_t s_cdnSessionOnce;
-    dispatch_once(&s_cdnSessionOnce, ^{
-        NSURLSessionConfiguration *cfg =
-            [NSURLSessionConfiguration defaultSessionConfiguration];
-
-        // Cache disque dédié de 200 MB pour les images d'emotes
-        NSURLCache *emoteCache = [[NSURLCache alloc]
-            initWithMemoryCapacity:  30 * 1024 * 1024   // 30 MB RAM
-                      diskCapacity: 200 * 1024 * 1024   // 200 MB disque
-                          diskPath: @"s7tv_cdn_cache"];
-        cfg.URLCache = emoteCache;
-        cfg.requestCachePolicy = NSURLRequestReturnCacheDataElseLoad;
-
-        s_cdnSession = [NSURLSession sessionWithConfiguration:cfg];
-    });
+    // ── Session CDN partagée ─────────────────────────────────────────────────
+    NSURLSession *session = SevenTVGetCDNSession();
 
     // ── Construire l'URL 7TV CDN ─────────────────────────────────────────────
     // - Emote animée + animations activées → GIF
@@ -151,11 +181,8 @@ static NSString *const kHandledKey = @"SevenTVURLProtocolHandled";
     [NSURLProtocol setProperty:@YES forKey:kHandledKey inRequest:newRequest];
     newRequest.cachePolicy = NSURLRequestReturnCacheDataElseLoad;
 
-    // Utiliser la session statique partagée (cache persistant)
-    NSURLSession *session = s_cdnSession;
-
     __weak typeof(self) weakSelf = self;
-    self.activeTask = [session dataTaskWithRequest:newRequest
+    self.activeTask = [SevenTVGetCDNSession() dataTaskWithRequest:newRequest
                                completionHandler:^(NSData *data,
                                                     NSURLResponse *response,
                                                     NSError *error) {

@@ -33,6 +33,7 @@
 
 #import "SevenTVManager.h"
 #import "SevenTVSettingsController.h"
+#import "SevenTVURLProtocol.h"
 #import <objc/runtime.h>
 
 // ============================================================
@@ -305,7 +306,12 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
     } else {
         [self log:@"✅ Cache global frais, pas de refresh réseau"];
     }
-}
+
+    // 3. Préchauffer la connexion TCP/TLS vers cdn.7tv.app
+    //    → élimine le délai de 4-5s sur la 1ère emote chargée.
+    //    On le fait systématiquement, cache frais ou non.
+    [SevenTVURLProtocol prewarmCDNConnection];
+    [self log:@"🔥 Préchauffage connexion CDN lancé"];
 
 
 // ============================================================
