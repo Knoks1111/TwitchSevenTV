@@ -137,16 +137,25 @@
         [self startAnimating];
     }
 
-    // ── Fix taille emotes rectangulaires ─────────────────────────────────────
+    // ── Fix taille + rendu emotes rectangulaires ──────────────────────────────
+    //
+    // Twitch rend le chat via CoreText/NSTextAttachment. Le layout texte est
+    // calculé UNE fois puis mis en cache. Quand setImage: est appelé sur
+    // l'UIImageView de l'emote, CoreText ne sait pas que l'image a changé →
+    // la cellule ne se redessine pas → emote invisible jusqu'au prochain
+    // scroll qui force un re-render complet.
+    //
+    // Fix : après avoir mis à jour contrainte/frame, appeler setNeedsDisplay
+    // sur toute la hiérarchie jusqu'à la cellule (profondeur 8 max).
+    // On fait ça SYNCHRONE et sur le main thread pour éviter que la cellule
+    // soit recyclée avant l'update (problème avec dispatch_async).
+
     CGFloat imgW = image.size.width;
     CGFloat imgH = image.size.height;
     if (imgH <= 0 || imgW <= 0) return;
 
     CGFloat ratio = imgW / imgH;
-    if (ratio < 1.15) return;
 
-    // Exclure les éléments de navigation/tab bar — leurs icônes sont aussi
-    // des WebP rectangulaires mais ne sont pas des emotes 7TV.
     NSString *superviewClass = NSStringFromClass([self.superview class]);
     if ([superviewClass containsString:@"TabBar"] ||
         [superviewClass containsString:@"NavigationBar"] ||
@@ -155,62 +164,61 @@
     CGFloat viewH = self.bounds.size.height > 0
         ? self.bounds.size.height
         : self.frame.size.height;
+    if (viewH < 10 || viewH > 80.0) return;
 
-    if (viewH < 10 || viewH > 80.0) return; // trop petite (curseur, séparateur…) ou trop grande → pas une emote
+    void (^applyFix)(void) = ^{
+        CGFloat h = self.bounds.size.height > 0
+            ? self.bounds.size.height
+            : self.frame.size.height;
+        if (h < 1) h = viewH; // fallback sur la valeur capturée
 
-    __weak UIImageView *weakSelf = self;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        UIImageView *iv = weakSelf;
-        if (!iv) return;
+        // ── Ajustement de la largeur pour emotes rectangulaires ──────────────
+        if (ratio >= 1.15) {
+            CGFloat targetW = ceilf(h * ratio);
 
-        CGFloat h = iv.bounds.size.height > 0 ? iv.bounds.size.height : iv.frame.size.height;
-        if (h < 1) return;
-        CGFloat targetW = ceilf(h * ratio);
-
-        // ① Chercher une contrainte de largeur fixe posée SUR self
-        BOOL found = NO;
-        for (NSLayoutConstraint *c in iv.constraints) {
-            if (c.firstAttribute  == NSLayoutAttributeWidth &&
-                c.secondItem      == nil) {
-                c.constant = targetW;
-                found = YES;
-                [[SevenTVManager sharedManager]
-                    log:@"📐 Contrainte self.width ajustée → %.0f", targetW];
-                break;
-            }
-        }
-
-        // ② Chercher dans le superview (contrainte externe sur notre largeur)
-        if (!found) {
-            for (NSLayoutConstraint *c in iv.superview.constraints) {
-                BOOL concernsUs = (c.firstItem == iv || c.secondItem == iv);
-                BOOL isWidth    = (c.firstAttribute  == NSLayoutAttributeWidth ||
-                                   c.secondAttribute == NSLayoutAttributeWidth);
-                BOOL isFixed    = (c.secondItem == nil ||
-                                   (c.firstItem == iv && c.secondItem == iv));
-                if (concernsUs && isWidth && isFixed) {
-                    c.constant = targetW;
-                    found = YES;
-                    [[SevenTVManager sharedManager]
-                        log:@"📐 Contrainte superview.width ajustée → %.0f", targetW];
-                    break;
+            BOOL found = NO;
+            for (NSLayoutConstraint *c in self.constraints) {
+                if (c.firstAttribute == NSLayoutAttributeWidth && c.secondItem == nil) {
+                    c.constant = targetW; found = YES; break;
                 }
             }
+            if (!found) {
+                for (NSLayoutConstraint *c in self.superview.constraints) {
+                    if ((c.firstItem == self || c.secondItem == self) &&
+                        (c.firstAttribute  == NSLayoutAttributeWidth ||
+                         c.secondAttribute == NSLayoutAttributeWidth) &&
+                        c.secondItem == nil) {
+                        c.constant = targetW; found = YES; break;
+                    }
+                }
+            }
+            if (!found) {
+                CGRect f = self.frame; f.size.width = targetW; self.frame = f;
+            }
+            self.contentMode = UIViewContentModeScaleAspectFit;
         }
 
-        // ③ Pas de contrainte Auto Layout → frame direct
-        if (!found) {
-            CGRect f      = iv.frame;
-            f.size.width  = targetW;
-            iv.frame      = f;
-            [[SevenTVManager sharedManager]
-                log:@"📐 Frame direct ajusté → %.0fx%.0f", targetW, h];
+        // ── Force re-render CoreText sur toute la hiérarchie ─────────────────
+        // Sans ça, la cellule reste figée sur son layout initial (emote vide)
+        // jusqu'au prochain scroll qui force un re-render complet.
+        UIView *v = self;
+        for (int depth = 0; depth < 8; depth++) {
+            [v setNeedsDisplay];
+            if ([v isKindOfClass:[UITableViewCell class]] ||
+                [v isKindOfClass:[UICollectionViewCell class]]) {
+                [v setNeedsLayout];
+                break; // on s'arrête à la cellule, pas besoin de remonter plus haut
+            }
+            if (!v.superview) break;
+            v = v.superview;
         }
+    };
 
-        iv.contentMode = UIViewContentModeScaleAspectFit;
-        [iv.superview setNeedsLayout];
-        [iv.superview layoutIfNeeded];
-    });
+    if ([NSThread isMainThread]) {
+        applyFix();
+    } else {
+        dispatch_async(dispatch_get_main_queue(), applyFix);
+    }
 }
 
 @end
