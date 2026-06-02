@@ -15,6 +15,17 @@
  * emotes soient dans le cache (via prefetchEmoteID:completion:).
  * Twitch reçoit le message APRÈS que les images sont prêtes → plus jamais
  * de case vide, même à la première occurrence d'une emote.
+ *
+ * FIX "cellule vide" (v1.3) — réponse synchrone sur cache hit:
+ * Même avec le prefetch v1.2, startLoading passait TOUJOURS par un dataTask
+ * asynchrone. Le callback arrivait sur un thread background APRÈS que CoreText
+ * avait déjà calculé le layout du message → attachment vide → layout figé.
+ * Workaround utilisateur : scroller manuellement pour forcer un re-render UIKit.
+ *
+ * Le fix : dans startLoading, interroger NSURLCache de façon SYNCHRONE avant
+ * de lancer le dataTask. Si l'image est en cache → répondre immédiatement,
+ * dans le même call stack → CoreText a l'image pendant le calcul → jamais
+ * de case vide, même sans le workaround scroll.
  */
 
 #import "SevenTVURLProtocol.h"
@@ -160,7 +171,37 @@ static NSURL *SevenTVCDNURLForEmoteID(NSString *emoteID) {
     }
 
     SevenTVManager *mgr = [SevenTVManager sharedManager];
-    [mgr log:@"🌐 URLProtocol intercept → emote:%@", emoteID];
+
+    // ── v1.3 FIX: vérification synchrone du cache ─────────────────────────────
+    // NSURLCache.cachedResponseForRequest: est synchrone et thread-safe.
+    // Si l'image est en cache (grâce au prefetch v1.2), on répond IMMÉDIATEMENT
+    // dans le même call stack → CoreText a l'image pendant le calcul du layout
+    // → plus jamais de case vide, plus besoin du workaround scroll.
+    NSMutableURLRequest *cacheCheckReq = [NSMutableURLRequest requestWithURL:targetURL];
+    cacheCheckReq.cachePolicy = NSURLRequestReturnCacheDataDontLoad;
+    NSCachedURLResponse *cached = [SevenTVGetSharedCache() cachedResponseForRequest:cacheCheckReq];
+
+    if (cached) {
+        [mgr log:@"⚡️ URLProtocol cache hit (sync) → emote:%@", emoteID];
+
+        NSHTTPURLResponse *spoofed = [[NSHTTPURLResponse alloc]
+            initWithURL:self.request.URL
+            statusCode:200
+           HTTPVersion:@"HTTP/1.1"
+          headerFields:@{@"Content-Type": @"image/webp"}];
+
+        [self.client URLProtocol:self
+              didReceiveResponse:spoofed
+              cacheStoragePolicy:NSURLCacheStorageAllowed];
+        [self.client URLProtocol:self didLoadData:cached.data];
+        [self.client URLProtocolDidFinishLoading:self];
+        return; // ← on sort sans jamais créer de dataTask
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // Cache miss (ne devrait arriver que si le prefetch a échoué ou expiré).
+    // On tombe en fallback asynchrone normal.
+    [mgr log:@"🌐 URLProtocol cache miss (async) → emote:%@", emoteID];
 
     // Pas de kHandledKey : SevenTVGetCDNSession a protocolClasses=@[],
     // donc SevenTVURLProtocol n'intercepte jamais ses propres requêtes.
