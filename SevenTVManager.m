@@ -29,6 +29,16 @@
  *
  *   Fix K — Écriture cache: retry automatique avec recréation du dossier si iOS
  *            a purgé Library/Caches/s7tv/ entre deux lancements.
+ *
+ * NOUVEAUTÉS v1.7 — Prefetch massif au JOIN:
+ *   Fix L — Au JOIN d'un channel (et au setup pour les globales), toutes les
+ *            images d'emotes sont téléchargées en arrière-plan dans NSURLCache
+ *            (20 downloads simultanés, DISPATCH_QUEUE_PRIORITY_HIGH).
+ *            Résultat: dès la 1ère occurrence d'une emote dans le chat,
+ *            SevenTVURLProtocol trouve l'image en cache → réponse synchrone
+ *            → CoreText a l'image pendant le calcul du layout → zéro case vide,
+ *            zéro blocage de livraison de message.
+ *            Le prefetch est idempotent: les emotes déjà en cache sont skipées.
  */
 
 #import "SevenTVManager.h"
@@ -88,6 +98,13 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
 // Timer heartbeat CDN — envoie un HEAD toutes les 20s pour garder
 // la connexion TCP/TLS keep-alive ouverte vers cdn.7tv.app.
 @property (nonatomic, strong) NSTimer *cdnHeartbeatTimer;
+
+// Prefetch massif (Fix L v1.7)
+// Télécharge toutes les images d'un dictionnaire d'emotes en arrière-plan.
+// label : libellé affiché dans les logs ("globales", "channel", etc.)
+// Idempotent : les emotes déjà en cache sont skipées sans réseau.
+- (void)_prefetchAllEmotes:(NSDictionary<NSString *, SevenTVEmote *> *)emotes
+                     label:(NSString *)label;
 
 @end
 
@@ -327,6 +344,8 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
             [self log:@"⚡️ %lu emotes globales depuis cache (âge: %.0fs)",
              (unsigned long)cachedGlobal.count, globalAge];
         }
+        // Fix L: précharger les images immédiatement depuis le cache JSON
+        [self _prefetchAllEmotes:cachedGlobal label:@"globales (cache)"];
     }
 
     // 2. Refresh API si cache absent ou périmé
@@ -405,6 +424,9 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
         // Sauvegarder en cache (async, non bloquant)
         [self saveCacheForName:@"global" withEmotes:parsed];
 
+        // Fix L: précharger toutes les images des emotes globales
+        [self _prefetchAllEmotes:parsed label:@"globales (API)"];
+
     }] resume];
 }
 
@@ -473,6 +495,84 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
 
 
 // ============================================================
+// MARK: - Prefetch massif (Fix L v1.7)
+//
+// Objectif : remplir NSURLCache avec TOUTES les images du set
+// dès que les emotes JSON sont connues — avant que le chat arrive.
+//
+// Stratégie :
+//   • 20 downloads simultanés (DISPATCH_QUEUE_PRIORITY_HIGH)
+//   • dispatch_semaphore pour brider la concurrence
+//   • isEmoteIDCached: check synchrone → skip réseau si déjà là
+//   • Log tous les 50 emotes + à la fin pour suivre la progression
+//   • Entièrement fire-and-forget : n'affecte jamais la livraison IRC
+// ============================================================
+
+- (void)_prefetchAllEmotes:(NSDictionary<NSString *, SevenTVEmote *> *)emotes
+                     label:(NSString *)label {
+    if (!emotes.count) return;
+
+    NSArray<SevenTVEmote *> *allEmotes = emotes.allValues;
+    NSUInteger total = allEmotes.count;
+
+    [self log:@"🚀 Prefetch %@ — %lu emotes", label, (unsigned long)total];
+
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
+
+        // 20 downloads en parallèle — bon compromis débit / saturation réseau.
+        // Augmenter à 30+ si le réseau est rapide, baisser à 10 sur réseau limité.
+        dispatch_semaphore_t sem = dispatch_semaphore_create(20);
+        dispatch_group_t group  = dispatch_group_create();
+
+        // Compteur thread-safe pour les logs de progression
+        __block NSUInteger done    = 0;
+        __block NSUInteger skipped = 0;
+        NSLock *counterLock = [[NSLock alloc] init];
+
+        for (SevenTVEmote *emote in allEmotes) {
+            // Skip immédiat si déjà en cache — zéro réseau
+            if ([SevenTVURLProtocol isEmoteIDCached:emote.emoteID]) {
+                [counterLock lock];
+                done++;
+                skipped++;
+                [counterLock unlock];
+                continue;
+            }
+
+            // Brider la concurrence
+            dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
+            dispatch_group_enter(group);
+
+            NSString *emoteID = emote.emoteID; // capture forte
+            [SevenTVURLProtocol prefetchEmoteID:emoteID completion:^{
+                dispatch_semaphore_signal(sem);
+                dispatch_group_leave(group);
+
+                [counterLock lock];
+                NSUInteger current = ++done;
+                [counterLock unlock];
+
+                // Log tous les 50 + au dernier
+                if (current % 50 == 0 || current == total) {
+                    [self log:@"📦 Prefetch %@ — %lu/%lu (skip:%lu)",
+                     label, (unsigned long)current,
+                     (unsigned long)total, (unsigned long)skipped];
+                }
+            }];
+        }
+
+        // Attendre la fin de tous les downloads avant le log final
+        dispatch_group_wait(group, dispatch_time(DISPATCH_TIME_NOW,
+                                                 60LL * NSEC_PER_SEC)); // timeout 60s
+        [self log:@"✅ Prefetch %@ terminé — %lu en cache, %lu déjà présents",
+         label,
+         (unsigned long)(total - skipped),
+         (unsigned long)skipped];
+    });
+}
+
+
+// ============================================================
 // MARK: - Chargement des emotes d'un channel par ID Twitch
 //
 // Stratégie cache-first (Fix F):
@@ -506,6 +606,8 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
         });
         [self log:@"⚡️ %lu emotes channel depuis cache (âge: %.0fs)",
          (unsigned long)cached.count, cacheAge];
+        // Fix L: précharger les images immédiatement — le chat arrive dans secondes
+        [self _prefetchAllEmotes:cached label:@"channel (cache)"];
     }
 
     // ── Étape 2: décider si un refresh réseau est nécessaire ──
@@ -566,6 +668,9 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
 
         // Sauvegarder en cache (async)
         [self saveCacheForName:cacheName withEmotes:parsed];
+
+        // Fix L: précharger toutes les images — elles seront prêtes pour les messages suivants
+        [self _prefetchAllEmotes:parsed label:@"channel (API)"];
 
     }] resume];
 }
