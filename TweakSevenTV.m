@@ -124,100 +124,188 @@
 
 @implementation UIImageView (SevenTVAnimation)
 
+// Clé pour le guard anti-boucle infinie (par cellule)
+static const char kS7TVReloadGuard = 0;
+
 - (void)s7tv_setImage:(UIImage *)image {
-    [self s7tv_setImage:image]; // appelle l'original (swizzlé)
+    [self s7tv_setImage:image]; // original
 
     if (!image) return;
 
-    // ── Emotes animées ────────────────────────────────────────────────────────
+    // ── Animations ───────────────────────────────────────────────────────────
     if (image.images.count > 1) {
         self.animationImages      = image.images;
         self.animationDuration    = image.duration > 0 ? image.duration : 1.0;
-        self.animationRepeatCount = 0; // infini
+        self.animationRepeatCount = 0;
         [self startAnimating];
     }
 
-    // ── Fix taille + rendu emotes rectangulaires ──────────────────────────────
-    //
-    // Twitch rend le chat via CoreText/NSTextAttachment. Le layout texte est
-    // calculé UNE fois puis mis en cache. Quand setImage: est appelé sur
-    // l'UIImageView de l'emote, CoreText ne sait pas que l'image a changé →
-    // la cellule ne se redessine pas → emote invisible jusqu'au prochain
-    // scroll qui force un re-render complet.
-    //
-    // Fix : après avoir mis à jour contrainte/frame, appeler setNeedsDisplay
-    // sur toute la hiérarchie jusqu'à la cellule (profondeur 8 max).
-    // On fait ça SYNCHRONE et sur le main thread pour éviter que la cellule
-    // soit recyclée avant l'update (problème avec dispatch_async).
-
-    CGFloat imgW = image.size.width;
-    CGFloat imgH = image.size.height;
+    // ── Filtres : ne traiter que les emotes ───────────────────────────────────
+    CGFloat imgW = image.size.width, imgH = image.size.height;
     if (imgH <= 0 || imgW <= 0) return;
 
-    CGFloat ratio = imgW / imgH;
-
     NSString *superviewClass = NSStringFromClass([self.superview class]);
-    if ([superviewClass containsString:@"TabBar"] ||
+    if ([superviewClass containsString:@"TabBar"]      ||
         [superviewClass containsString:@"NavigationBar"] ||
         [superviewClass containsString:@"ToolBar"]) return;
 
     CGFloat viewH = self.bounds.size.height > 0
-        ? self.bounds.size.height
-        : self.frame.size.height;
+        ? self.bounds.size.height : self.frame.size.height;
     if (viewH < 10 || viewH > 80.0) return;
 
-    void (^applyFix)(void) = ^{
-        CGFloat h = self.bounds.size.height > 0
-            ? self.bounds.size.height
-            : self.frame.size.height;
-        if (h < 1) h = viewH; // fallback sur la valeur capturée
+    CGFloat ratio = imgW / imgH;
 
-        // ── Ajustement de la largeur pour emotes rectangulaires ──────────────
+    // ── Capture du contexte AVANT le dispatch (la cellule peut être recyclée) ─
+    UIView  *capturedSuper = self.superview;
+    CGRect   capturedFrame = self.frame;
+    (void)capturedFrame; // utilisé si besoin
+
+    void (^doWork)(void) = ^{
+
+        // ── 1. Ajustement largeur pour emotes rectangulaires ─────────────────
         if (ratio >= 1.15) {
-            CGFloat targetW = ceilf(h * ratio);
-
-            BOOL found = NO;
-            for (NSLayoutConstraint *c in self.constraints) {
-                if (c.firstAttribute == NSLayoutAttributeWidth && c.secondItem == nil) {
-                    c.constant = targetW; found = YES; break;
-                }
-            }
-            if (!found) {
-                for (NSLayoutConstraint *c in self.superview.constraints) {
-                    if ((c.firstItem == self || c.secondItem == self) &&
-                        (c.firstAttribute  == NSLayoutAttributeWidth ||
-                         c.secondAttribute == NSLayoutAttributeWidth) &&
-                        c.secondItem == nil) {
+            CGFloat h = self.bounds.size.height > 0
+                ? self.bounds.size.height : viewH;
+            if (h > 0) {
+                CGFloat targetW = ceilf(h * ratio);
+                BOOL found = NO;
+                for (NSLayoutConstraint *c in self.constraints) {
+                    if (c.firstAttribute == NSLayoutAttributeWidth && !c.secondItem) {
                         c.constant = targetW; found = YES; break;
                     }
                 }
+                if (!found) {
+                    for (NSLayoutConstraint *c in self.superview.constraints) {
+                        if ((c.firstItem == self || c.secondItem == self) &&
+                            (c.firstAttribute == NSLayoutAttributeWidth ||
+                             c.secondAttribute == NSLayoutAttributeWidth) &&
+                            !c.secondItem) {
+                            c.constant = targetW; found = YES; break;
+                        }
+                    }
+                }
+                if (!found) {
+                    CGRect f = self.frame; f.size.width = targetW; self.frame = f;
+                }
+                self.contentMode = UIViewContentModeScaleAspectFit;
             }
-            if (!found) {
-                CGRect f = self.frame; f.size.width = targetW; self.frame = f;
-            }
-            self.contentMode = UIViewContentModeScaleAspectFit;
         }
 
-        // ── Force re-render CoreText sur toute la hiérarchie ─────────────────
-        // Sans ça, la cellule reste figée sur son layout initial (emote vide)
-        // jusqu'au prochain scroll qui force un re-render complet.
-        UIView *v = self;
-        for (int depth = 0; depth < 8; depth++) {
-            [v setNeedsDisplay];
-            if ([v isKindOfClass:[UITableViewCell class]] ||
-                [v isKindOfClass:[UICollectionViewCell class]]) {
-                [v setNeedsLayout];
-                break; // on s'arrête à la cellule, pas besoin de remonter plus haut
+        // ── 2. STRATÉGIE A : UITextView → réassigner attributedText ──────────
+        // CoreText ne se redessine que si on lui retire et remet le texte.
+        UIView *v = capturedSuper;
+        for (int d = 0; d < 12 && v; d++, v = v.superview) {
+            if ([v isKindOfClass:[UITextView class]]) {
+                UITextView *tv2 = (UITextView *)v;
+                if (objc_getAssociatedObject(tv2, &kS7TVReloadGuard)) break;
+                objc_setAssociatedObject(tv2, &kS7TVReloadGuard, @YES,
+                                         OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                NSAttributedString *saved = tv2.attributedText;
+                if (saved.length > 0) {
+                    tv2.attributedText = nil;
+                    tv2.attributedText = saved;
+                    [[SevenTVManager sharedManager] log:@"♻️ UITextView attributedText reset"];
+                }
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                               (int64_t)(0.8 * NSEC_PER_SEC)),
+                               dispatch_get_main_queue(), ^{
+                    objc_setAssociatedObject(tv2, &kS7TVReloadGuard, nil,
+                                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                });
+                return; // ← on a trouvé, stop
             }
-            if (!v.superview) break;
-            v = v.superview;
+
+            // ── 2b. UILabel → même traitement ────────────────────────────────
+            if ([v isKindOfClass:[UILabel class]]) {
+                UILabel *lbl = (UILabel *)v;
+                if (objc_getAssociatedObject(lbl, &kS7TVReloadGuard)) break;
+                objc_setAssociatedObject(lbl, &kS7TVReloadGuard, @YES,
+                                         OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                NSAttributedString *saved = lbl.attributedText;
+                if (saved.length > 0) {
+                    lbl.attributedText = nil;
+                    lbl.attributedText = saved;
+                    [[SevenTVManager sharedManager] log:@"♻️ UILabel attributedText reset"];
+                }
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                               (int64_t)(0.8 * NSEC_PER_SEC)),
+                               dispatch_get_main_queue(), ^{
+                    objc_setAssociatedObject(lbl, &kS7TVReloadGuard, nil,
+                                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                });
+                return;
+            }
+        }
+
+        // ── 3. STRATÉGIE B : recharger la ligne/cellule dans le scroll view ──
+        // Plus agressif mais garanti de re-render la cellule entière.
+        UIView *cellView = capturedSuper;
+        while (cellView &&
+               ![cellView isKindOfClass:[UITableViewCell class]] &&
+               ![cellView isKindOfClass:[UICollectionViewCell class]]) {
+            cellView = cellView.superview;
+        }
+
+        if (cellView) {
+            UIView *sv = cellView.superview;
+            while (sv) {
+                if ([sv isKindOfClass:[UITableView class]]) {
+                    UITableView *tv2 = (UITableView *)sv;
+                    if (objc_getAssociatedObject(cellView, &kS7TVReloadGuard)) break;
+                    objc_setAssociatedObject(cellView, &kS7TVReloadGuard, @YES,
+                                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                    NSIndexPath *ip = [tv2 indexPathForCell:(UITableViewCell *)cellView];
+                    if (ip) {
+                        [tv2 reloadRowsAtIndexPaths:@[ip]
+                                  withRowAnimation:UITableViewRowAnimationNone];
+                        [[SevenTVManager sharedManager]
+                            log:@"♻️ UITableView reload row %ld", (long)ip.row];
+                    }
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                   (int64_t)(1.0 * NSEC_PER_SEC)),
+                                   dispatch_get_main_queue(), ^{
+                        objc_setAssociatedObject(cellView, &kS7TVReloadGuard, nil,
+                                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                    });
+                    return;
+                }
+                if ([sv isKindOfClass:[UICollectionView class]]) {
+                    UICollectionView *cv = (UICollectionView *)sv;
+                    if (objc_getAssociatedObject(cellView, &kS7TVReloadGuard)) break;
+                    objc_setAssociatedObject(cellView, &kS7TVReloadGuard, @YES,
+                                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                    NSIndexPath *ip = [cv indexPathForCell:(UICollectionViewCell *)cellView];
+                    if (ip) {
+                        [cv reloadItemsAtIndexPaths:@[ip]];
+                        [[SevenTVManager sharedManager]
+                            log:@"♻️ UICollectionView reload item %ld", (long)ip.item];
+                    }
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                   (int64_t)(1.0 * NSEC_PER_SEC)),
+                                   dispatch_get_main_queue(), ^{
+                        objc_setAssociatedObject(cellView, &kS7TVReloadGuard, nil,
+                                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                    });
+                    return;
+                }
+                sv = sv.superview;
+            }
+        }
+
+        // ── 4. FALLBACK : setNeedsDisplay + layer sur toute la hiérarchie ────
+        [[SevenTVManager sharedManager] log:@"♻️ Fallback: setNeedsDisplay x10"];
+        UIView *vv = capturedSuper;
+        for (int d = 0; d < 10 && vv; d++, vv = vv.superview) {
+            [vv setNeedsDisplay];
+            [vv.layer setNeedsDisplay];
+            [vv setNeedsLayout];
         }
     };
 
     if ([NSThread isMainThread]) {
-        applyFix();
+        doWork();
     } else {
-        dispatch_async(dispatch_get_main_queue(), applyFix);
+        dispatch_async(dispatch_get_main_queue(), doWork);
     }
 }
 
