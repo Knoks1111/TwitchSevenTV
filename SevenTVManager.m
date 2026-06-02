@@ -83,6 +83,10 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
 // Dossier racine du cache JSON (créé à la demande)
 @property (nonatomic, strong) NSString *cacheDirectory;
 
+// Timer heartbeat CDN — envoie un HEAD toutes les 20s pour garder
+// la connexion TCP/TLS keep-alive ouverte vers cdn.7tv.app.
+@property (nonatomic, strong) NSTimer *cdnHeartbeatTimer;
+
 @end
 
 
@@ -386,6 +390,14 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
     [self log:@"Channel rejoint: %@, recherche ID Twitch...", channelName];
     self.currentChannelName = channelName;
 
+    // Préchauffer la connexion CDN maintenant — les messages arrivent
+    // ~1-2s après le JOIN, donc la connexion sera chaude à temps.
+    [SevenTVURLProtocol prewarmCDNConnection];
+    [self log:@"🔥 Prewarm CDN au JOIN de %@", channelName];
+
+    // Démarrer (ou redémarrer) le heartbeat pour garder la connexion vivante.
+    [self startCDNHeartbeat];
+
     // Attendre le ROOMSTATE (qui arrive ~100ms après le JOIN)
     // pour avoir le twitchID. Timeout de sécurité à 5s.
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)),
@@ -394,6 +406,41 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
             [self loadEmotesForChannelTwitchID:self.currentChannelTwitchID];
         }
     });
+}
+
+
+// ============================================================
+// MARK: - Heartbeat CDN
+//
+// Envoie un HEAD toutes les 20s vers cdn.7tv.app pour garder
+// la connexion TCP/TLS keep-alive ouverte.
+// iOS ferme les connexions inactives après ~30s → sans heartbeat,
+// la 1ère emote après une pause repart à froid.
+// Le timer est invalidé et recréé à chaque JOIN de channel,
+// ce qui remet aussi le compteur à zéro.
+// ============================================================
+
+- (void)startCDNHeartbeat {
+    // Invalider l'ancien timer s'il existe (changement de channel, etc.)
+    [self.cdnHeartbeatTimer invalidate];
+
+    // NSTimer doit tourner sur le main thread (runloop main)
+    dispatch_async(dispatch_get_main_queue(), ^{
+        self.cdnHeartbeatTimer = [NSTimer scheduledTimerWithTimeInterval:20.0
+                                                                  target:self
+                                                                selector:@selector(cdnHeartbeatTick)
+                                                                userInfo:nil
+                                                                 repeats:YES];
+        // Tolérance de 2s pour économiser la batterie (iOS peut grouper les timers)
+        self.cdnHeartbeatTimer.tolerance = 2.0;
+    });
+}
+
+- (void)cdnHeartbeatTick {
+    [SevenTVURLProtocol prewarmCDNConnection];
+    // Log volontairement absent pour ne pas polluer le buffer —
+    // activer uniquement en debug si besoin:
+    // [self log:@"💓 CDN heartbeat"];
 }
 
 
