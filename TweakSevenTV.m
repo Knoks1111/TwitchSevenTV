@@ -151,6 +151,41 @@ static void s7tv_swizzle(Class targetClass,
 // MARK: - Hook NSURLSessionWebSocketTask (chat IRC Twitch)
 // ────────────────────────────────────────────────────────────
 
+// ── Fix A: fonction C statique pour éviter le crash "unrecognized selector" ──
+// s7tv_handleRoomState: ne peut PAS être une méthode ObjC sur la catégorie car
+// après swizzle, self est __NSURLSessionWebSocketTask (classe concrète) qui ne
+// trouve pas les méthodes de la catégorie abstraite via dispatch ObjC.
+// Une fonction C statique est appelée directement, sans lookup → pas de crash.
+static void s7tv_handleRoomState(NSString *ircMessage) {
+    NSRange roomIDRange = [ircMessage rangeOfString:@"room-id="];
+    if (roomIDRange.location == NSNotFound) return;
+
+    NSString *afterRoomID = [ircMessage substringFromIndex:roomIDRange.location + 8];
+
+    // L'ID se termine au prochain ";", espace, ou fin de ligne
+    NSMutableString *roomID = [NSMutableString string];
+    for (NSUInteger i = 0; i < afterRoomID.length; i++) {
+        unichar c = [afterRoomID characterAtIndex:i];
+        if (c == ';' || c == ' ' || c == '\r' || c == '\n') break;
+        [roomID appendFormat:@"%C", c];
+    }
+
+    if (roomID.length == 0) return;
+
+    [[SevenTVManager sharedManager] log:@"📡 room-id extrait depuis ROOMSTATE: %@", roomID];
+
+    SevenTVManager *mgr = [SevenTVManager sharedManager];
+
+    if (![roomID isEqualToString:mgr.currentChannelTwitchID]) {
+        [[SevenTVManager sharedManager]
+            log:@"📡 Nouveau broadcaster ID (ROOMSTATE): %@ (ancien: %@)",
+            roomID, mgr.currentChannelTwitchID ?: @"aucun"];
+        mgr.currentChannelTwitchID = roomID;
+        [mgr loadEmotesForChannelTwitchID:roomID];
+    }
+}
+
+
 @interface NSURLSessionWebSocketTask (SevenTV)
 - (void)s7tv_receiveMessageWithCompletionHandler:
     (void (^)(NSURLSessionWebSocketMessage *, NSError *))completionHandler;
@@ -189,12 +224,9 @@ static void s7tv_swizzle(Class targetClass,
 
                 if (textToProcess) {
 
-                    // ── Fix A: extraire room-id depuis ROOMSTATE ──────────
-                    // Format: "@room-id=12345678;... :tmi.twitch.tv ROOMSTATE #channel"
-                    // Twitch envoie ROOMSTATE immédiatement après JOIN.
-                    // C'est la source la plus fiable pour obtenir le broadcaster ID.
+                    // ── Fix A: appel direct en C, pas de dispatch ObjC ───
                     if ([textToProcess containsString:@"ROOMSTATE"]) {
-                        [self s7tv_handleRoomState:textToProcess];
+                        s7tv_handleRoomState(textToProcess);
                     }
 
                     // ── Injection des emotes 7TV dans PRIVMSG ────────────
@@ -221,38 +253,6 @@ static void s7tv_swizzle(Class targetClass,
         };
 
     [self s7tv_receiveMessageWithCompletionHandler:wrappedHandler];
-}
-
-// Fix A — Extraire le broadcaster ID depuis un message ROOMSTATE
-// "@emote-only=0;room-id=12345678;slow=0 :tmi.twitch.tv ROOMSTATE #channel"
-- (void)s7tv_handleRoomState:(NSString *)ircMessage {
-    NSRange roomIDRange = [ircMessage rangeOfString:@"room-id="];
-    if (roomIDRange.location == NSNotFound) return;
-
-    NSString *afterRoomID = [ircMessage substringFromIndex:roomIDRange.location + 8];
-
-    // L'ID se termine au prochain ";", espace, ou fin de ligne
-    NSMutableString *roomID = [NSMutableString string];
-    for (NSUInteger i = 0; i < afterRoomID.length; i++) {
-        unichar c = [afterRoomID characterAtIndex:i];
-        if (c == ';' || c == ' ' || c == '\r' || c == '\n') break;
-        [roomID appendFormat:@"%C", c];
-    }
-
-    if (roomID.length == 0) return;
-
-    [[SevenTVManager sharedManager] log:@"📡 room-id extrait depuis ROOMSTATE: %@", roomID];
-
-    SevenTVManager *mgr = [SevenTVManager sharedManager];
-
-    // Nouveau channel → reset cache + charger les emotes du channel
-    if (![roomID isEqualToString:mgr.currentChannelTwitchID]) {
-        [[SevenTVManager sharedManager]
-            log:@"📡 Nouveau broadcaster ID (ROOMSTATE): %@ (ancien: %@)",
-            roomID, mgr.currentChannelTwitchID ?: @"aucun"];
-        mgr.currentChannelTwitchID = roomID;
-        [mgr loadEmotesForChannelTwitchID:roomID];
-    }
 }
 
 // Messages SORTANTS : détecter "JOIN #channel"
