@@ -86,11 +86,60 @@ NSString *const S7TVLogsDidUpdateNotification = @"S7TVLogsDidUpdateNotification"
 
 
 // ============================================================
+// MARK: - Cache disque (NSUserDefaults)
+//
+// Sérialise les emotes en plist pour un chargement instantané au démarrage.
+// Clés: s7tv_cache_global  /  s7tv_cache_ch_{channelID}
+// Format valeur: { "KEKW": { "id": "...", "a": 1 }, ... }
+// ============================================================
+
+static NSString *const kCacheGlobal = @"s7tv_cache_global";
+
+- (void)saveEmotesToCache:(NSDictionary<NSString *, SevenTVEmote *> *)emotes
+                   forKey:(NSString *)key {
+    if (!emotes.count || !key) return;
+    NSMutableDictionary *serial = [NSMutableDictionary dictionaryWithCapacity:emotes.count];
+    for (NSString *name in emotes) {
+        SevenTVEmote *e = emotes[name];
+        serial[name] = @{ @"id": e.emoteID, @"a": @(e.isAnimated) };
+    }
+    [[NSUserDefaults standardUserDefaults] setObject:[serial copy] forKey:key];
+}
+
+- (NSDictionary<NSString *, SevenTVEmote *> *)loadEmotesFromCacheForKey:(NSString *)key {
+    NSDictionary *serial = [[NSUserDefaults standardUserDefaults] dictionaryForKey:key];
+    if (!serial.count) return nil;
+    NSMutableDictionary *result = [NSMutableDictionary dictionaryWithCapacity:serial.count];
+    for (NSString *name in serial) {
+        NSDictionary *d = serial[name];
+        if (![d isKindOfClass:[NSDictionary class]]) continue;
+        SevenTVEmote *e = [[SevenTVEmote alloc] init];
+        e.emoteName  = name;
+        e.emoteID    = d[@"id"];
+        e.isAnimated = [d[@"a"] boolValue];
+        if (e.emoteID.length) result[name] = e;
+    }
+    return result.count ? [result copy] : nil;
+}
+
+
+// ============================================================
 // MARK: - Initialisation
 // ============================================================
 
 - (void)setup {
     [self log:@"SevenTVManager: setup démarré"];
+
+    // Charger le cache disque en premier (instantané, avant toute requête réseau)
+    NSDictionary *cachedGlobal = [self loadEmotesFromCacheForKey:kCacheGlobal];
+    if (cachedGlobal.count) {
+        dispatch_barrier_async(self.emoteQueue, ^{
+            self.globalEmotes = cachedGlobal;
+        });
+        [self log:@"⚡️ %lu emotes globales depuis cache disque", (unsigned long)cachedGlobal.count];
+    }
+
+    // Rafraîchir depuis l'API en arrière-plan
     [self loadGlobalEmotes];
 }
 
@@ -169,6 +218,8 @@ NSString *const S7TVLogsDidUpdateNotification = @"S7TVLogsDidUpdateNotification"
         dispatch_barrier_async(self.emoteQueue, ^{
             self.globalEmotes = parsed;
             [self log:@"✅ %lu emotes globales 7TV chargées", (unsigned long)parsed.count];
+            // Sauvegarder dans le cache disque pour le prochain lancement
+            [self saveEmotesToCache:parsed forKey:kCacheGlobal];
         });
 
     }] resume];
@@ -217,6 +268,16 @@ NSString *const S7TVLogsDidUpdateNotification = @"S7TVLogsDidUpdateNotification"
 
     [self log:@"Chargement des emotes du channel Twitch ID: %@", twitchUserID];
 
+    // Charger le cache disque immédiatement (avant la requête réseau)
+    NSString *cacheKey = [NSString stringWithFormat:@"s7tv_cache_ch_%@", twitchUserID];
+    NSDictionary *cachedChannel = [self loadEmotesFromCacheForKey:cacheKey];
+    if (cachedChannel.count) {
+        dispatch_barrier_async(self.emoteQueue, ^{
+            self.channelEmotes = cachedChannel;
+        });
+        [self log:@"⚡️ %lu emotes channel depuis cache disque", (unsigned long)cachedChannel.count];
+    }
+
     NSString *urlStr = [NSString stringWithFormat:@"%@/users/twitch/%@",
                         S7TV_API_BASE, twitchUserID];
     NSURL *url = [NSURL URLWithString:urlStr];
@@ -250,6 +311,9 @@ NSString *const S7TVLogsDidUpdateNotification = @"S7TVLogsDidUpdateNotification"
             self.channelEmotes = parsed;
             [self.loadedChannelIDs addObject:twitchUserID];
             [self log:@"✅ %lu emotes du channel chargées", (unsigned long)parsed.count];
+            // Sauvegarder dans le cache disque pour le prochain lancement
+            NSString *cacheKey = [NSString stringWithFormat:@"s7tv_cache_ch_%@", twitchUserID];
+            [self saveEmotesToCache:parsed forKey:cacheKey];
         });
 
     }] resume];

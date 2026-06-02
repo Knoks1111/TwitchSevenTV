@@ -83,10 +83,26 @@ static NSString *const kHandledKey = @"SevenTVURLProtocolHandled";
     }
 
     // Construire l'URL 7TV CDN
-    // On essaie d'abord en WebP (meilleur support iOS 14+)
-    // Si le streamer a désactivé les animés, on prend en static
-    BOOL wantAnimated = [SevenTVManager sharedManager].showAnimated;
-    NSString *extension = wantAnimated ? @"4x.webp" : @"4x.webp"; // WebP supporte les deux
+    // - Emote animée + animations activées → GIF (UIKit supporte GIF nativement,
+    //   contrairement au WebP animé non rendu par la plupart des libs iOS)
+    // - Emote statique ou animations désactivées → WebP (plus léger)
+    SevenTVManager *mgr = [SevenTVManager sharedManager];
+
+    // Chercher si l'emote est animée dans les dictionnaires du manager
+    BOOL isAnimated = NO;
+    NSDictionary *globals  = mgr.globalEmotes;
+    NSDictionary *channels = mgr.channelEmotes;
+    for (SevenTVEmote *e in globals.allValues) {
+        if ([e.emoteID isEqualToString:emoteID]) { isAnimated = e.isAnimated; break; }
+    }
+    if (!isAnimated) {
+        for (SevenTVEmote *e in channels.allValues) {
+            if ([e.emoteID isEqualToString:emoteID]) { isAnimated = e.isAnimated; break; }
+        }
+    }
+
+    BOOL useGif = isAnimated && mgr.showAnimated;
+    NSString *extension = useGif ? @"4x.gif" : @"4x.webp";
 
     NSString *cdnURL = [NSString stringWithFormat:@"https://cdn.7tv.app/emote/%@/%@",
                         emoteID, extension];
@@ -125,11 +141,12 @@ static NSString *const kHandledKey = @"SevenTVURLProtocolHandled";
         if (data && response) {
             // Créer une fausse réponse avec l'URL originale (celle que Twitch attendait)
             NSHTTPURLResponse *httpResponse = (NSHTTPURLResponse *)response;
+            NSString *contentType = useGif ? @"image/gif" : @"image/webp";
             NSHTTPURLResponse *spoofedResponse = [[NSHTTPURLResponse alloc]
                 initWithURL:strongSelf.request.URL
                 statusCode:httpResponse.statusCode
                HTTPVersion:@"HTTP/1.1"
-              headerFields:@{@"Content-Type": @"image/webp"}];
+              headerFields:@{@"Content-Type": contentType}];
 
             [strongSelf.client URLProtocol:strongSelf
                         didReceiveResponse:spoofedResponse
