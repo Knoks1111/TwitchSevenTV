@@ -106,7 +106,12 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
 @implementation SevenTVFloatingWindow
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
     UIView *hit = [super hitTest:point withEvent:event];
-    if (!hit || hit == self.rootViewController.view) return nil;
+    // On ne capture la touche QUE si elle tombe sur le bouton ou l'un
+    // de ses sous-vues (label, etc.). Le fond transparent (self) et
+    // la rootVC.view passent toujours à Twitch → nil = ignore.
+    if (hit == nil || hit == self || hit == self.rootViewController.view) {
+        return nil;
+    }
     return hit;
 }
 @end
