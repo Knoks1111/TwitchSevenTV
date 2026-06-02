@@ -271,6 +271,47 @@ static void s7tv_swizzle(Class targetClass,
 // MARK: - Hook NSURLSessionWebSocketTask (chat IRC Twitch)
 // ────────────────────────────────────────────────────────────
 
+// ── Extraction des emote IDs 7TV depuis un message IRC modifié ───────────────
+//
+// Exemple de tag injecté: "emotes=7tv_01FA35:10-17,7tv_01FB22:20-25"
+// Retourne: @[@"01FA35", @"01FB22"] (sans le préfixe "7tv_")
+//
+// On déduplique car une même emote peut apparaître plusieurs fois dans
+// le même message (ex: "KEKW KEKW KEKW" → un seul ID à préfetch).
+static NSArray<NSString *> *s7tv_extractEmoteIDs(NSString *ircMessage) {
+    NSMutableArray<NSString *> *result = [NSMutableArray array];
+
+    NSRange tagRange = [ircMessage rangeOfString:@"emotes="];
+    if (tagRange.location == NSNotFound) return result;
+
+    // Isoler la valeur du tag "emotes=" (jusqu'au prochain espace ou ";")
+    NSString *afterTag = [ircMessage substringFromIndex:tagRange.location + 7];
+    NSRange endRange = [afterTag rangeOfCharacterFromSet:
+                        [NSCharacterSet characterSetWithCharactersInString:@" ;"]];
+    NSString *emotesValue = (endRange.location != NSNotFound)
+        ? [afterTag substringToIndex:endRange.location]
+        : afterTag;
+
+    if (emotesValue.length == 0) return result;
+
+    // Format: "7tv_ID1:0-5/7tv_ID1:8-12,7tv_ID2:20-25"
+    // Séparateur entre emotes différentes: ","
+    NSMutableSet<NSString *> *seen = [NSMutableSet set];
+    for (NSString *entry in [emotesValue componentsSeparatedByString:@","]) {
+        // Prendre seulement la partie avant ":" (= "7tv_ID")
+        NSString *idPart = [entry componentsSeparatedByString:@":"].firstObject ?: entry;
+        if ([idPart hasPrefix:@"7tv_"]) {
+            NSString *emoteID = [idPart substringFromIndex:4]; // retirer "7tv_"
+            if (emoteID.length > 0 && ![seen containsObject:emoteID]) {
+                [seen addObject:emoteID];
+                [result addObject:emoteID];
+            }
+        }
+    }
+    return result;
+}
+
+
 // ── Fix A: fonction C statique pour éviter le crash "unrecognized selector" ──
 // s7tv_handleRoomState: ne peut PAS être une méthode ObjC sur la catégorie car
 // après swizzle, self est __NSURLSessionWebSocketTask (classe concrète) qui ne
@@ -354,9 +395,52 @@ static void s7tv_handleRoomState(NSString *ircMessage) {
                                           injectSevenTVEmotesIntoIRCMessage:textToProcess];
 
                     if (modified && ![modified isEqualToString:textToProcess]) {
-                        NSURLSessionWebSocketMessage *newMsg =
-                            [[NSURLSessionWebSocketMessage alloc] initWithString:modified];
-                        completionHandler(newMsg, nil);
+
+                        // Extraire les IDs des emotes injectées dans ce message
+                        NSArray<NSString *> *emoteIDs = s7tv_extractEmoteIDs(modified);
+
+                        // Filtrer celles qui ne sont pas encore en cache
+                        NSMutableArray<NSString *> *uncached = [NSMutableArray array];
+                        for (NSString *eid in emoteIDs) {
+                            if (![SevenTVURLProtocol isEmoteIDCached:eid]) {
+                                [uncached addObject:eid];
+                            }
+                        }
+
+                        // Bloc qui livre le message modifié à Twitch
+                        NSString *finalText = modified;
+                        void (^deliver)(void) = ^{
+                            NSURLSessionWebSocketMessage *newMsg =
+                                [[NSURLSessionWebSocketMessage alloc] initWithString:finalText];
+                            completionHandler(newMsg, nil);
+                        };
+
+                        if (uncached.count == 0) {
+                            // Tout en cache → livraison immédiate, zéro délai
+                            deliver();
+                        } else {
+                            // Préfetch des images manquantes, PUIS livraison.
+                            // Le message n'est pas encore visible dans le chat Twitch.
+                            // Quand toutes les images sont en cache (~200ms), on le livre.
+                            // Twitch rend la cellule → demande les images → cache chaud → instantané.
+                            [[SevenTVManager sharedManager]
+                                log:@"⏳ Hold message — %lu emote(s) à préfetch: %@",
+                                (unsigned long)uncached.count,
+                                [uncached componentsJoinedByString:@", "]];
+
+                            dispatch_group_t group = dispatch_group_create();
+                            for (NSString *eid in uncached) {
+                                dispatch_group_enter(group);
+                                [SevenTVURLProtocol prefetchEmoteID:eid completion:^{
+                                    dispatch_group_leave(group);
+                                }];
+                            }
+                            // Livrer sur un thread background — pas besoin du main thread ici,
+                            // completionHandler est appelé sur le thread de la session WebSocket.
+                            dispatch_group_notify(group,
+                                                  dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0),
+                                                  deliver);
+                        }
                         return;
                     }
 
