@@ -74,7 +74,9 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
 @property (nonatomic, strong) dispatch_queue_t fileIOQueue;
 
 // Bouton flottant des paramètres
-@property (nonatomic, weak) UIButton *settingsButton;
+@property (nonatomic, weak)   UIButton *settingsButton;
+// Fenêtre dédiée au bouton flottant (strong = reste en vie toute la session)
+@property (nonatomic, strong) UIWindow *floatingWindow;
 
 // Buffer de logs in-app
 @property (nonatomic, strong) NSMutableArray<NSString *> *logBuffer;
@@ -90,6 +92,26 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
 @end
 
 
+// ============================================================
+// MARK: - SevenTVPassthroughView
+//
+// Vue racine de la fenêtre flottante. Couvre tout l'écran mais
+// ne capture les touches QUE sur ses sous-vues (le bouton 7TV).
+// Les zones transparentes laissent passer les touches vers Twitch.
+// ============================================================
+@interface SevenTVPassthroughView : UIView
+@end
+
+@implementation SevenTVPassthroughView
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    UIView *hit = [super hitTest:point withEvent:event];
+    // Si le hit c'est le fond (cette vue) → ignorer, laisser passer à l'app
+    return (hit == self) ? nil : hit;
+}
+@end
+
+
+// ============================================================
 @implementation SevenTVManager
 
 // ============================================================
@@ -865,22 +887,47 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
 
 - (void)addSettingsButton {
     dispatch_async(dispatch_get_main_queue(), ^{
-        UIWindow *window = nil;
-        if (@available(iOS 15.0, *)) {
-            for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-                if ([scene isKindOfClass:[UIWindowScene class]]) {
-                    for (UIWindow *w in ((UIWindowScene *)scene).windows)
-                        if (w.isKeyWindow) { window = w; break; }
-                }
+
+        // ── Trouver la UIWindowScene ──────────────────────────────────────────
+        UIWindowScene *windowScene = nil;
+        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+            if ([scene isKindOfClass:[UIWindowScene class]]) {
+                windowScene = (UIWindowScene *)scene;
+                break;
             }
         }
-        if (!window) window = [UIApplication sharedApplication].windows.firstObject;
-        if (!window) return;
 
+        // ── Créer la fenêtre flottante ────────────────────────────────────────
+        // Une UIWindow dédiée à windowLevel StatusBar+1 flotte au-dessus de
+        // TOUTES les pages de Twitch (navigation, stream, chat, settings...).
+        // Contrairement à un addSubview:keyWindow, elle n'est jamais couverte
+        // par les transitions de navigation.
+        UIWindow *floatingWin;
+        if (windowScene) {
+            floatingWin = [[UIWindow alloc] initWithWindowScene:windowScene];
+        } else {
+            floatingWin = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+        }
+        floatingWin.windowLevel     = UIWindowLevelStatusBar + 1;
+        floatingWin.backgroundColor = [UIColor clearColor];
+        floatingWin.hidden          = NO;
+
+        // rootViewController requis sous iOS 13+
+        UIViewController *rootVC = [[UIViewController alloc] init];
+        SevenTVPassthroughView *passView = [[SevenTVPassthroughView alloc]
+            initWithFrame:[UIScreen mainScreen].bounds];
+        passView.backgroundColor = [UIColor clearColor];
+        rootVC.view = passView;
+        floatingWin.rootViewController = rootVC;
+
+        self.floatingWindow = floatingWin; // strong → fenêtre reste en vie
+
+        // ── Créer le bouton ───────────────────────────────────────────────────
+        CGRect screen = [UIScreen mainScreen].bounds;
         CGFloat size = 44.0, margin = 16.0;
         UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
-        btn.frame = CGRectMake(window.bounds.size.width  - size - margin,
-                               window.bounds.size.height - size - margin - 80.0,
+        btn.frame = CGRectMake(screen.size.width  - size - margin,
+                               screen.size.height - size - margin - 80.0,
                                size, size);
         btn.backgroundColor     = [UIColor colorWithRed:0.35 green:0.13 blue:0.86 alpha:0.88];
         btn.layer.cornerRadius  = size / 2.0;
@@ -895,8 +942,12 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
       forControlEvents:UIControlEventTouchUpInside];
         [btn addGestureRecognizer:[[UIPanGestureRecognizer alloc]
             initWithTarget:self action:@selector(handleSettingsButtonDrag:)]];
-        [window addSubview:btn];
+
+        [passView addSubview:btn];
         self.settingsButton = btn;
+
+        [self log:@"✅ Bouton 7TV dans UIWindow flottante (level %.0f)",
+            (double)floatingWin.windowLevel];
     });
 }
 

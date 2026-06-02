@@ -127,13 +127,103 @@
 - (void)s7tv_setImage:(UIImage *)image {
     [self s7tv_setImage:image]; // appelle l'original (swizzlé)
 
-    // Si l'image a des frames animées, démarrer l'animation
+    if (!image) return;
+
+    // ── Emotes animées ────────────────────────────────────────────────────────
     if (image.images.count > 1) {
-        self.animationImages   = image.images;
-        self.animationDuration = image.duration > 0 ? image.duration : 1.0;
+        self.animationImages      = image.images;
+        self.animationDuration    = image.duration > 0 ? image.duration : 1.0;
         self.animationRepeatCount = 0; // infini
         [self startAnimating];
     }
+
+    // ── Fix taille emotes rectangulaires ─────────────────────────────────────
+    //
+    // Twitch iOS alloue un cadre carré pour toutes les emotes (les siennes
+    // sont toutes carrées). Les emotes 7TV peuvent être rectangulaires.
+    // On lit les vraies dimensions du WebP (image.size) et on corrige la
+    // largeur proportionnellement à la hauteur allouée par Twitch.
+    //
+    // Garde-fous:
+    //   • On ne touche qu'aux petites vues (< 80pt) → c'est la taille emote
+    //   • On ne touche qu'aux images significativement non-carrées (ratio > 1.15)
+    //   • On diffère sur main thread pour avoir le frame final après layout
+
+    CGFloat imgW = image.size.width;
+    CGFloat imgH = image.size.height;
+    if (imgH <= 0 || imgW <= 0) return;
+
+    CGFloat ratio = imgW / imgH;
+    if (ratio < 1.15) return; // carré ou portrait → pas touche
+
+    CGFloat viewH = self.bounds.size.height > 0
+        ? self.bounds.size.height
+        : self.frame.size.height;
+
+    // Log diagnostic (toujours) pour voir ce que Twitch nous donne
+    [[SevenTVManager sharedManager]
+        log:@"📐 img=%.0fx%.0f ratio=%.2f viewFrame=%@ class=%@ superview=%@ constraints=%lu",
+        imgW, imgH, ratio,
+        NSStringFromCGRect(self.frame),
+        NSStringFromClass([self class]),
+        NSStringFromClass([self.superview class]),
+        (unsigned long)self.constraints.count];
+
+    if (viewH < 1 || viewH > 80.0) return; // pas une emote → on sort
+
+    __weak UIImageView *weakSelf = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIImageView *iv = weakSelf;
+        if (!iv) return;
+
+        CGFloat h = iv.bounds.size.height > 0 ? iv.bounds.size.height : iv.frame.size.height;
+        if (h < 1) return;
+        CGFloat targetW = ceilf(h * ratio);
+
+        // ① Chercher une contrainte de largeur fixe posée SUR self
+        BOOL found = NO;
+        for (NSLayoutConstraint *c in iv.constraints) {
+            if (c.firstAttribute  == NSLayoutAttributeWidth &&
+                c.secondItem      == nil) {
+                c.constant = targetW;
+                found = YES;
+                [[SevenTVManager sharedManager]
+                    log:@"📐 Contrainte self.width ajustée → %.0f", targetW];
+                break;
+            }
+        }
+
+        // ② Chercher dans le superview (contrainte externe sur notre largeur)
+        if (!found) {
+            for (NSLayoutConstraint *c in iv.superview.constraints) {
+                BOOL concernsUs = (c.firstItem == iv || c.secondItem == iv);
+                BOOL isWidth    = (c.firstAttribute  == NSLayoutAttributeWidth ||
+                                   c.secondAttribute == NSLayoutAttributeWidth);
+                BOOL isFixed    = (c.secondItem == nil ||
+                                   (c.firstItem == iv && c.secondItem == iv));
+                if (concernsUs && isWidth && isFixed) {
+                    c.constant = targetW;
+                    found = YES;
+                    [[SevenTVManager sharedManager]
+                        log:@"📐 Contrainte superview.width ajustée → %.0f", targetW];
+                    break;
+                }
+            }
+        }
+
+        // ③ Pas de contrainte Auto Layout → frame direct
+        if (!found) {
+            CGRect f      = iv.frame;
+            f.size.width  = targetW;
+            iv.frame      = f;
+            [[SevenTVManager sharedManager]
+                log:@"📐 Frame direct ajusté → %.0fx%.0f", targetW, h];
+        }
+
+        iv.contentMode = UIViewContentModeScaleAspectFit;
+        [iv.superview setNeedsLayout];
+        [iv.superview layoutIfNeeded];
+    });
 }
 
 @end
