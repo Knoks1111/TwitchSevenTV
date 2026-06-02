@@ -169,6 +169,11 @@ NSString *const S7TVLogsDidUpdateNotification = @"S7TVLogsDidUpdateNotification"
         dispatch_barrier_async(self.emoteQueue, ^{
             self.globalEmotes = parsed;
             [self log:@"✅ %lu emotes globales 7TV chargées", (unsigned long)parsed.count];
+
+            // Fix diagnostic 1 — lister les noms pour vérifier qu'ils correspondent
+            // exactement à ce que les gens tapent dans le chat (casse, caractères spéciaux…)
+            NSArray *names = [parsed.allKeys sortedArrayUsingSelector:@selector(compare:)];
+            [self log:@"📋 Emotes globales: %@", [names componentsJoinedByString:@", "]];
         });
 
     }] resume];
@@ -428,6 +433,9 @@ NSString *const S7TVLogsDidUpdateNotification = @"S7TVLogsDidUpdateNotification"
 
     // On ne traite que les messages PRIVMSG (messages de chat)
     if (![rawMessage containsString:@"PRIVMSG"]) return rawMessage;
+
+    // Fix diagnostic 2 — confirmer que le hook IRC se déclenche bien
+    [self log:@"📨 PRIVMSG reçu (hook OK): %.120s…", rawMessage.UTF8String];
 
     // --- Extraire le texte du message ---
     // Format IRC: "@tags :user!user@user.tmi.twitch.tv PRIVMSG #channel :message texte"

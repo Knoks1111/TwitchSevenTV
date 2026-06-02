@@ -132,18 +132,52 @@ static void s7tv_swizzle(Class targetClass,
     void (^wrappedHandler)(NSURLSessionWebSocketMessage *, NSError *) =
         ^(NSURLSessionWebSocketMessage *message, NSError *error) {
 
-            if (!error && message &&
-                message.type == NSURLSessionWebSocketMessageTypeString) {
+            if (!error && message) {
 
-                NSString *original = message.string;
-                NSString *modified = [[SevenTVManager sharedManager]
-                                      injectSevenTVEmotesIntoIRCMessage:original];
+                NSString *textToProcess = nil;
 
-                if (modified && ![modified isEqualToString:original]) {
-                    NSURLSessionWebSocketMessage *newMsg =
-                        [[NSURLSessionWebSocketMessage alloc] initWithString:modified];
-                    completionHandler(newMsg, nil);
-                    return;
+                if (message.type == NSURLSessionWebSocketMessageTypeString) {
+                    // Cas normal : message texte IRC brut
+                    textToProcess = message.string;
+
+                } else if (message.type == NSURLSessionWebSocketMessageTypeData) {
+                    // Fix 3 — Twitch peut envoyer des frames binaires.
+                    // On tente une conversion UTF-8 directe (pas de décompression
+                    // ici — si Twitch utilise permessage-deflate, NSURLSession
+                    // le gère en amont et livre déjà du texte décompressé).
+                    // Ce cas couvre surtout les messages IRC encodés en Data.
+                    textToProcess = [[NSString alloc] initWithData:message.data
+                                                          encoding:NSUTF8StringEncoding];
+                    if (textToProcess) {
+                        [[SevenTVManager sharedManager]
+                            log:@"ℹ️  Frame TypeData convertie en texte (%lu octets)",
+                            (unsigned long)message.data.length];
+                    } else {
+                        [[SevenTVManager sharedManager]
+                            log:@"⚠️  Frame TypeData non-UTF8 ignorée (%lu octets)",
+                            (unsigned long)message.data.length];
+                    }
+                }
+
+                if (textToProcess) {
+                    NSString *modified = [[SevenTVManager sharedManager]
+                                          injectSevenTVEmotesIntoIRCMessage:textToProcess];
+
+                    if (modified && ![modified isEqualToString:textToProcess]) {
+                        NSURLSessionWebSocketMessage *newMsg =
+                            [[NSURLSessionWebSocketMessage alloc] initWithString:modified];
+                        completionHandler(newMsg, nil);
+                        return;
+                    }
+
+                    // Pas d'emote mais le message est passé dans le hook → OK
+                    // Si c'était un TypeData converti, on renvoie en String
+                    if (message.type == NSURLSessionWebSocketMessageTypeData && textToProcess) {
+                        NSURLSessionWebSocketMessage *asText =
+                            [[NSURLSessionWebSocketMessage alloc] initWithString:textToProcess];
+                        completionHandler(asText, nil);
+                        return;
+                    }
                 }
             }
             completionHandler(message, error);
@@ -180,19 +214,28 @@ static void s7tv_swizzle(Class targetClass,
 // ────────────────────────────────────────────────────────────
 
 static void s7tv_swizzle_session(void) {
-    NSURLSession *probe = [NSURLSession sessionWithConfiguration:
-                           [NSURLSessionConfiguration defaultSessionConfiguration]];
-    Class realSessionClass = object_getClass(probe);
-
-    [[SevenTVManager sharedManager] log:@"🔍 NSURLSession classe concrète: %@",
-     NSStringFromClass(realSessionClass)];
-
     SEL swizzledSel = @selector(s7tv_dataTaskWithRequest:completionHandler:);
+    SEL originalSel = @selector(dataTaskWithRequest:completionHandler:);
 
-    s7tv_swizzle(realSessionClass,
-                 [NSURLSession class],
-                 @selector(dataTaskWithRequest:completionHandler:),
-                 swizzledSel);
+    // ── Session standard (sessionWithConfiguration:) ──
+    NSURLSession *probeStd = [NSURLSession sessionWithConfiguration:
+                              [NSURLSessionConfiguration defaultSessionConfiguration]];
+    Class classStd = object_getClass(probeStd);
+    [[SevenTVManager sharedManager] log:@"🔍 NSURLSession standard: %@",
+     NSStringFromClass(classStd)];
+    s7tv_swizzle(classStd, [NSURLSession class], originalSel, swizzledSel);
+
+    // ── Fix 4 — sharedSession (classe potentiellement différente) ──
+    // Twitch peut utiliser [NSURLSession sharedSession] pour ses requêtes GQL.
+    Class classShared = object_getClass([NSURLSession sharedSession]);
+    [[SevenTVManager sharedManager] log:@"🔍 NSURLSession shared: %@",
+     NSStringFromClass(classShared)];
+    if (classShared != classStd) {
+        // Classe différente → swizzle séparé nécessaire
+        s7tv_swizzle(classShared, [NSURLSession class], originalSel, swizzledSel);
+    } else {
+        [[SevenTVManager sharedManager] log:@"ℹ️  sharedSession même classe que standard, pas de swizzle supplémentaire"];
+    }
 }
 
 
