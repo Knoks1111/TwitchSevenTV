@@ -1,21 +1,15 @@
 /*
  * TweakSevenTV.m  —  Substrate-FREE version
  *
- * Remplace TweakSevenTV.xm (Logos/Substrate) par du pur
- * Objective-C runtime (method swizzling).
- * Aucune dépendance à CydiaSubstrate → fonctionne en sideload sans jailbreak.
+ * CORRECTIFS v1.2:
+ *   Fix A — ROOMSTATE: extraire le room-id directement depuis IRC
+ *            (plus fiable que le hook GQL). Twitch envoie ROOMSTATE
+ *            immédiatement après JOIN avec room-id=XXXXX.
  *
- * Mécanisme :
- *   1. __attribute__((constructor)) → s'exécute automatiquement au chargement du dylib
- *   2. method_exchangeImplementations → remplace les méthodes ciblées
- *   3. Catégories ObjC → contiennent les nouvelles implémentations
- *
- * CORRECTIF v1.1 — Swizzle WebSocket (Twitch 29.6)
- *   NSClassFromString(@"NSURLSessionWebSocketTask") retourne la classe ABSTRAITE.
- *   Twitch instancie une sous-classe concrète interne (ex: __NSCFURLSessionWebSocketTask).
- *   Fix: créer une instance-sonde WebSocket pour obtenir la vraie classe runtime,
- *   puis copier + échanger les méthodes sur cette classe concrète.
- *   Même pattern que le fix NSURLSession déjà validé.
+ *   Fix B — URLProtocol: swizzler protocolClasses sur
+ *            NSURLSessionConfiguration pour que SevenTVURLProtocol
+ *            intercepte les requêtes de TOUTES les sessions Twitch,
+ *            y compris celles avec une config custom.
  */
 
 #import <objc/runtime.h>
@@ -24,22 +18,11 @@
 #import "SevenTVManager.h"
 #import "SevenTVURLProtocol.h"
 
+
 // ────────────────────────────────────────────────────────────
 // MARK: - Helper swizzling
 // ────────────────────────────────────────────────────────────
 
-/*
- * s7tv_swizzle:
- * Copie la méthode `swizzled` depuis `sourceClass` vers `targetClass`
- * (si elle n'existe pas déjà sur targetClass), puis échange les
- * implémentations de `original` et `swizzled` sur `targetClass`.
- *
- * Pourquoi le paramètre sourceClass ?
- *   Les méthodes swizzlées sont définies dans des catégories sur les
- *   classes abstraites (NSURLSession, NSURLSessionWebSocketTask).
- *   Quand on veut swizzler une sous-classe concrète, ces méthodes
- *   n'existent pas encore dessus → il faut les y copier d'abord.
- */
 static void s7tv_swizzle(Class targetClass,
                          Class sourceClass,
                          SEL   original,
@@ -50,7 +33,6 @@ static void s7tv_swizzle(Class targetClass,
         return;
     }
 
-    // Copier la méthode swizzlée depuis la classe source si nécessaire
     Method swizzledMethod = class_getInstanceMethod(sourceClass, swizzled);
     if (!swizzledMethod) {
         [[SevenTVManager sharedManager] log:@"⚠️  méthode swizzlée introuvable: %@",
@@ -62,7 +44,6 @@ static void s7tv_swizzle(Class targetClass,
                     method_getImplementation(swizzledMethod),
                     method_getTypeEncoding(swizzledMethod));
 
-    // Vérifier que la méthode originale existe sur la cible
     Method origMethod = class_getInstanceMethod(targetClass, original);
     if (!origMethod) {
         [[SevenTVManager sharedManager] log:@"⚠️  méthode originale introuvable sur %@: %@",
@@ -70,13 +51,48 @@ static void s7tv_swizzle(Class targetClass,
         return;
     }
 
-    // Re-récupérer la méthode swizzlée (maintenant sur targetClass)
     Method swizzledOnTarget = class_getInstanceMethod(targetClass, swizzled);
     method_exchangeImplementations(origMethod, swizzledOnTarget);
 
     [[SevenTVManager sharedManager] log:@"✅ swizzle OK [%@] %@",
      NSStringFromClass(targetClass), NSStringFromSelector(original)];
 }
+
+
+// ────────────────────────────────────────────────────────────
+// MARK: - Fix B: NSURLSessionConfiguration → protocolClasses
+//
+// [NSURLProtocol registerClass:] ne couvre que les sessions
+// utilisant la configuration par défaut du système.
+// Twitch crée ses propres sessions avec des configs custom →
+// notre URLProtocol est ignoré par défaut.
+//
+// Solution: swizzler protocolClasses pour injecter
+// SevenTVURLProtocol dans toutes les configurations.
+// ────────────────────────────────────────────────────────────
+
+@interface NSURLSessionConfiguration (SevenTV)
+- (NSArray *)s7tv_protocolClasses;
+@end
+
+@implementation NSURLSessionConfiguration (SevenTV)
+
+- (NSArray *)s7tv_protocolClasses {
+    NSArray *original = [self s7tv_protocolClasses]; // appelle l'original après swizzle
+    Class ourClass = [SevenTVURLProtocol class];
+
+    if (![original containsObject:ourClass]) {
+        // Mettre notre protocole EN PREMIER pour avoir la priorité
+        NSMutableArray *arr = [NSMutableArray arrayWithObject:ourClass];
+        if (original.count > 0) {
+            [arr addObjectsFromArray:original];
+        }
+        return [arr copy];
+    }
+    return original;
+}
+
+@end
 
 
 // ────────────────────────────────────────────────────────────
@@ -110,8 +126,6 @@ static void s7tv_swizzle(Class targetClass,
     return [self s7tv_dataTaskWithRequest:request completionHandler:completionHandler];
 }
 
-// Fix 2 — Twitch 29.6 utilise aussi dataTaskWithURL: (sans NSURLRequest)
-// pour certaines requêtes GQL → on intercepte cette variante aussi.
 - (NSURLSessionDataTask *)s7tv_dataTaskWithURL:(NSURL *)url
                              completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completionHandler {
     NSString *host = url.host ?: @"";
@@ -146,7 +160,7 @@ static void s7tv_swizzle(Class targetClass,
 
 @implementation NSURLSessionWebSocketTask (SevenTV)
 
-// Messages ENTRANTS : injecter les emotes 7TV dans les messages IRC
+// Messages ENTRANTS : extraire room-id depuis ROOMSTATE + injecter emotes dans PRIVMSG
 - (void)s7tv_receiveMessageWithCompletionHandler:
     (void (^)(NSURLSessionWebSocketMessage *, NSError *))completionHandler {
 
@@ -158,15 +172,8 @@ static void s7tv_swizzle(Class targetClass,
                 NSString *textToProcess = nil;
 
                 if (message.type == NSURLSessionWebSocketMessageTypeString) {
-                    // Cas normal : message texte IRC brut
                     textToProcess = message.string;
-
                 } else if (message.type == NSURLSessionWebSocketMessageTypeData) {
-                    // Fix 3 — Twitch peut envoyer des frames binaires.
-                    // On tente une conversion UTF-8 directe (pas de décompression
-                    // ici — si Twitch utilise permessage-deflate, NSURLSession
-                    // le gère en amont et livre déjà du texte décompressé).
-                    // Ce cas couvre surtout les messages IRC encodés en Data.
                     textToProcess = [[NSString alloc] initWithData:message.data
                                                           encoding:NSUTF8StringEncoding];
                     if (textToProcess) {
@@ -181,6 +188,16 @@ static void s7tv_swizzle(Class targetClass,
                 }
 
                 if (textToProcess) {
+
+                    // ── Fix A: extraire room-id depuis ROOMSTATE ──────────
+                    // Format: "@room-id=12345678;... :tmi.twitch.tv ROOMSTATE #channel"
+                    // Twitch envoie ROOMSTATE immédiatement après JOIN.
+                    // C'est la source la plus fiable pour obtenir le broadcaster ID.
+                    if ([textToProcess containsString:@"ROOMSTATE"]) {
+                        [self s7tv_handleRoomState:textToProcess];
+                    }
+
+                    // ── Injection des emotes 7TV dans PRIVMSG ────────────
                     NSString *modified = [[SevenTVManager sharedManager]
                                           injectSevenTVEmotesIntoIRCMessage:textToProcess];
 
@@ -191,8 +208,7 @@ static void s7tv_swizzle(Class targetClass,
                         return;
                     }
 
-                    // Pas d'emote mais le message est passé dans le hook → OK
-                    // Si c'était un TypeData converti, on renvoie en String
+                    // Frame TypeData convertie → renvoyer en String
                     if (message.type == NSURLSessionWebSocketMessageTypeData && textToProcess) {
                         NSURLSessionWebSocketMessage *asText =
                             [[NSURLSessionWebSocketMessage alloc] initWithString:textToProcess];
@@ -204,11 +220,42 @@ static void s7tv_swizzle(Class targetClass,
             completionHandler(message, error);
         };
 
-    // Après swizzle, s7tv_ appelle l'original
     [self s7tv_receiveMessageWithCompletionHandler:wrappedHandler];
 }
 
-// Messages SORTANTS : détecter "JOIN #channel" pour charger les emotes
+// Fix A — Extraire le broadcaster ID depuis un message ROOMSTATE
+// "@emote-only=0;room-id=12345678;slow=0 :tmi.twitch.tv ROOMSTATE #channel"
+- (void)s7tv_handleRoomState:(NSString *)ircMessage {
+    NSRange roomIDRange = [ircMessage rangeOfString:@"room-id="];
+    if (roomIDRange.location == NSNotFound) return;
+
+    NSString *afterRoomID = [ircMessage substringFromIndex:roomIDRange.location + 8];
+
+    // L'ID se termine au prochain ";", espace, ou fin de ligne
+    NSMutableString *roomID = [NSMutableString string];
+    for (NSUInteger i = 0; i < afterRoomID.length; i++) {
+        unichar c = [afterRoomID characterAtIndex:i];
+        if (c == ';' || c == ' ' || c == '\r' || c == '\n') break;
+        [roomID appendFormat:@"%C", c];
+    }
+
+    if (roomID.length == 0) return;
+
+    [[SevenTVManager sharedManager] log:@"📡 room-id extrait depuis ROOMSTATE: %@", roomID];
+
+    SevenTVManager *mgr = [SevenTVManager sharedManager];
+
+    // Nouveau channel → reset cache + charger les emotes du channel
+    if (![roomID isEqualToString:mgr.currentChannelTwitchID]) {
+        [[SevenTVManager sharedManager]
+            log:@"📡 Nouveau broadcaster ID (ROOMSTATE): %@ (ancien: %@)",
+            roomID, mgr.currentChannelTwitchID ?: @"aucun"];
+        mgr.currentChannelTwitchID = roomID;
+        [mgr loadEmotesForChannelTwitchID:roomID];
+    }
+}
+
+// Messages SORTANTS : détecter "JOIN #channel"
 - (void)s7tv_sendMessage:(NSURLSessionWebSocketMessage *)message
        completionHandler:(void (^)(NSError *))completionHandler {
 
@@ -223,11 +270,29 @@ static void s7tv_swizzle(Class targetClass,
         }
     }
 
-    // Toujours envoyer le message original sans modification
     [self s7tv_sendMessage:message completionHandler:completionHandler];
 }
 
 @end
+
+
+// ────────────────────────────────────────────────────────────
+// MARK: - Swizzle NSURLSessionConfiguration.protocolClasses
+// ────────────────────────────────────────────────────────────
+
+static void s7tv_swizzle_protocol_classes(void) {
+    // Obtenir la classe concrète via une instance sonde
+    NSURLSessionConfiguration *probe = [NSURLSessionConfiguration defaultSessionConfiguration];
+    Class configClass = object_getClass(probe);
+
+    [[SevenTVManager sharedManager] log:@"🔍 NSURLSessionConfiguration classe: %@",
+     NSStringFromClass(configClass)];
+
+    s7tv_swizzle(configClass,
+                 [NSURLSessionConfiguration class],
+                 @selector(protocolClasses),
+                 @selector(s7tv_protocolClasses));
+}
 
 
 // ────────────────────────────────────────────────────────────
@@ -247,7 +312,6 @@ static void s7tv_swizzle_session(void) {
      NSStringFromClass(classStd)];
 
     s7tv_swizzle(classStd, [NSURLSession class], selRequest, swizRequest);
-    // Fix 2 — aussi swizzler la variante URL (sans NSURLRequest)
     s7tv_swizzle(classStd, [NSURLSession class], selURL, swizURL);
 
     Class classShared = object_getClass([NSURLSession sharedSession]);
@@ -263,13 +327,7 @@ static void s7tv_swizzle_session(void) {
 
 
 // ────────────────────────────────────────────────────────────
-// MARK: - Swizzle NSURLSessionWebSocketTask (classe concrète via sonde)
-//
-// CORRECTIF v1.1:
-//   Avant (cassé) : NSClassFromString(@"NSURLSessionWebSocketTask")
-//                   → retourne la classe abstraite, jamais instanciée par Twitch
-//   Maintenant    : on crée une instance-sonde pour obtenir la vraie classe
-//                   concrète utilisée au runtime, puis on swizzle celle-ci.
+// MARK: - Swizzle NSURLSessionWebSocketTask (classe concrète)
 // ────────────────────────────────────────────────────────────
 
 static void s7tv_swizzle_websocket(void) {
@@ -279,73 +337,59 @@ static void s7tv_swizzle_websocket(void) {
         return;
     }
 
-    // Créer une session éphémère + une tâche WebSocket "sonde" vers une URL
-    // quelconque — on ne la démarre pas, on veut juste son isa.
-    // wss://irc-ws.chat.twitch.tv est cohérent avec le contexte.
     NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration ephemeralSessionConfiguration];
-    // Désactiver le swizzle NSURLSession sur cette session interne pour éviter
-    // une récursion si le hook session est déjà actif.
     NSURLSession *probeSession = [NSURLSession sessionWithConfiguration:cfg];
     NSURL *probeURL = [NSURL URLWithString:@"wss://irc-ws.chat.twitch.tv/irc"];
 
     NSURLSessionWebSocketTask *probeTask = [probeSession webSocketTaskWithURL:probeURL];
     Class realWSClass = object_getClass(probeTask);
-    [probeTask cancel]; // On n'a pas besoin de la connecter
+    [probeTask cancel];
 
     [[SevenTVManager sharedManager] log:@"🔍 NSURLSessionWebSocketTask classe concrète: %@",
      NSStringFromClass(realWSClass)];
 
-    // Si la classe concrète est différente de l'abstraite, loguer les deux
     if (realWSClass != wsAbstractClass) {
         [[SevenTVManager sharedManager] log:@"ℹ️  Classe abstraite: %@ → classe concrète: %@",
          NSStringFromClass(wsAbstractClass), NSStringFromClass(realWSClass)];
     }
 
-    // Swizzle receiveMessageWithCompletionHandler:
     s7tv_swizzle(realWSClass,
                  wsAbstractClass,
                  @selector(receiveMessageWithCompletionHandler:),
                  @selector(s7tv_receiveMessageWithCompletionHandler:));
 
-    // Swizzle sendMessage:completionHandler:
     s7tv_swizzle(realWSClass,
                  wsAbstractClass,
                  @selector(sendMessage:completionHandler:),
                  @selector(s7tv_sendMessage:completionHandler:));
-
-    // Si realWSClass == wsAbstractClass (cas rare iOS < 16), les swizzles ci-dessus
-    // couvrent quand même le cas: les sous-classes héritent de l'implémentation échangée.
 }
 
 
 // ────────────────────────────────────────────────────────────
-// MARK: - Point d'entrée (remplace %ctor de Logos)
+// MARK: - Point d'entrée
 // ────────────────────────────────────────────────────────────
-// __attribute__((constructor)) s'exécute automatiquement quand
-// le dylib est chargé par dyld, avant main(). Pas besoin de Substrate.
 
 __attribute__((constructor))
 static void TwitchSevenTVInit(void) {
-    // Pré-initialiser le log buffer AVANT les swizzles pour que
-    // les messages de diagnostic soient capturés dès le départ.
-    // sharedManager crée le buffer dans son init → appel suffisant.
     SevenTVManager *mgr = [SevenTVManager sharedManager];
-    [mgr log:@"🔌 Chargement TwitchSevenTV v1.1 (substrate-free)..."];
+    [mgr log:@"🔌 Chargement TwitchSevenTV v1.2 (substrate-free)..."];
+
+    // ── Fix B: protocolClasses swizzle (avant la création de sessions) ──
+    s7tv_swizzle_protocol_classes();
 
     // ── Swizzle NSURLSession (réponses GQL Twitch) ──
     s7tv_swizzle_session();
 
     // ── Swizzle NSURLSessionWebSocketTask (chat IRC) ──
-    //    CORRECTIF: utilise une instance-sonde pour obtenir la classe concrète
     s7tv_swizzle_websocket();
 
     // ── Initialiser le gestionnaire 7TV sur le main thread ──
     dispatch_async(dispatch_get_main_queue(), ^{
         [[SevenTVManager sharedManager] setup];
+        // registerClass reste utile pour les sessions "système" non swizzlées
         [NSURLProtocol registerClass:[SevenTVURLProtocol class]];
         [[SevenTVManager sharedManager] log:@"✅ SevenTVManager prêt, URLProtocol enregistré"];
 
-        // Ajouter le bouton flottant après 2s (UI Twitch pas encore prête au launch)
         dispatch_after(
             dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
             dispatch_get_main_queue(), ^{
