@@ -237,69 +237,11 @@ static const char kS7TVReloadGuard = 0;
             }
         }
 
-        // ── 3. STRATÉGIE B : recharger la ligne/cellule dans le scroll view ──
-        // Plus agressif mais garanti de re-render la cellule entière.
-        UIView *cellView = capturedSuper;
-        while (cellView &&
-               ![cellView isKindOfClass:[UITableViewCell class]] &&
-               ![cellView isKindOfClass:[UICollectionViewCell class]]) {
-            cellView = cellView.superview;
-        }
-
-        if (cellView) {
-            UIView *sv = cellView.superview;
-            while (sv) {
-                if ([sv isKindOfClass:[UITableView class]]) {
-                    UITableView *tv2 = (UITableView *)sv;
-                    if (objc_getAssociatedObject(cellView, &kS7TVReloadGuard)) break;
-                    objc_setAssociatedObject(cellView, &kS7TVReloadGuard, @YES,
-                                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                    NSIndexPath *ip = [tv2 indexPathForCell:(UITableViewCell *)cellView];
-                    if (ip) {
-                        [tv2 reloadRowsAtIndexPaths:@[ip]
-                                  withRowAnimation:UITableViewRowAnimationNone];
-                        [[SevenTVManager sharedManager]
-                            log:@"♻️ UITableView reload row %ld", (long)ip.row];
-                    }
-                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
-                                   (int64_t)(1.0 * NSEC_PER_SEC)),
-                                   dispatch_get_main_queue(), ^{
-                        objc_setAssociatedObject(cellView, &kS7TVReloadGuard, nil,
-                                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                    });
-                    return;
-                }
-                if ([sv isKindOfClass:[UICollectionView class]]) {
-                    UICollectionView *cv = (UICollectionView *)sv;
-                    if (objc_getAssociatedObject(cellView, &kS7TVReloadGuard)) break;
-                    objc_setAssociatedObject(cellView, &kS7TVReloadGuard, @YES,
-                                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                    NSIndexPath *ip = [cv indexPathForCell:(UICollectionViewCell *)cellView];
-                    if (ip) {
-                        [cv reloadItemsAtIndexPaths:@[ip]];
-                        [[SevenTVManager sharedManager]
-                            log:@"♻️ UICollectionView reload item %ld", (long)ip.item];
-                    }
-                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
-                                   (int64_t)(1.0 * NSEC_PER_SEC)),
-                                   dispatch_get_main_queue(), ^{
-                        objc_setAssociatedObject(cellView, &kS7TVReloadGuard, nil,
-                                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                    });
-                    return;
-                }
-                sv = sv.superview;
-            }
-        }
-
-        // ── 4. FALLBACK : setNeedsDisplay + layer sur toute la hiérarchie ────
-        [[SevenTVManager sharedManager] log:@"♻️ Fallback: setNeedsDisplay x10"];
-        UIView *vv = capturedSuper;
-        for (int d = 0; d < 10 && vv; d++, vv = vv.superview) {
-            [vv setNeedsDisplay];
-            [vv.layer setNeedsDisplay];
-            [vv setNeedsLayout];
-        }
+        // Stratégies 3 (reloadRows/reloadItems) et 4 (setNeedsDisplay x10) supprimées.
+        // Elles causaient une boucle : reloadRows → Twitch recrée la cellule →
+        // setImage: se redéclenche sur le nouvel objet → guard manqué → freeze UI.
+        // Le système de prefetch garantit que l'image est en cache AVANT la livraison
+        // du message à Twitch → UITextView/UILabel reset (stratégies 1 & 2) suffisent.
     };
 
     if ([NSThread isMainThread]) {
