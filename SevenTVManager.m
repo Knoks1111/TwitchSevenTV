@@ -8,26 +8,27 @@
  *
  * NOUVEAUTÉS v1.5 — Cache & Préchargement:
  *   Fix E — Cache fichier JSON (remplace NSUserDefaults).
- *            Les emotes sont stockées dans Library/Caches/s7tv/ sous forme de
- *            fichiers JSON individuels par channel. Plus fiable, plus rapide à
- *            lire (lecture synchrone sur file I/O queue), et iOS peut les purger
- *            automatiquement si le stockage est plein sans crasher l'app.
- *
  *   Fix F — Stratégie cache-first + refresh arrière-plan.
- *            Comportement:
- *              1. Au JOIN d'un channel → cache chargé IMMÉDIATEMENT (synchrone)
- *                 → les emotes sont disponibles avant même le 1er message du chat.
- *              2. Si le cache date de plus de S7TV_CACHE_TTL secondes (1h par défaut)
- *                 → refresh API lancé en arrière-plan, chat non bloqué.
- *              3. Si pas de cache du tout → API fetch immédiat.
- *            Résultat: 2e lancement sur un channel déjà visité = 0 délai.
+ *   Fix G — Protection anti-doublons affinée (fetchingChannelIDs).
  *
- *   Fix G — Protection anti-doublons affinée.
- *            `fetchingChannelIDs` remplace `loadedChannelIDs`.
- *            Il n'empêche plus les refreshs futurs — il évite seulement deux
- *            requêtes réseau simultanées vers le même channel (ex: ROOMSTATE
- *            reçu deux fois rapidement). Les refreshs périodiques sont gérés
- *            par l'horodatage du cache, pas par ce set.
+ * CORRECTIFS v1.6 — Format IRC + Positions:
+ *   Fix H — Trimming messageText: on ne retire plus que \r\n en fin de message,
+ *            jamais les espaces de début (qui décaleraient toutes les positions).
+ *
+ *   Fix I — Format tag emotes= conforme au standard Twitch IRC:
+ *              • occurrences du MÊME emote ID → séparées par ","
+ *                  ex: ID:0-4,10-14
+ *              • emote IDs DIFFÉRENTS → séparés par "/"
+ *                  ex: ID1:0-4/ID2:10-14
+ *            L'ancien code joinait tout avec "," ce qui rendait les messages
+ *            mixtes (texte + plusieurs emotes) malformés.
+ *
+ *   Fix J — Séparateur "/" lors de la fusion avec des emotes Twitch existantes.
+ *            L'ancien "," faisait croire à Twitch que notre emote 7TV était
+ *            une 2ème occurrence de l'emote Twitch précédente, cachant du texte.
+ *
+ *   Fix K — Écriture cache: retry automatique avec recréation du dossier si iOS
+ *            a purgé Library/Caches/s7tv/ entre deux lancements.
  */
 
 #import "SevenTVManager.h"
@@ -233,7 +234,16 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
     dispatch_async(self.fileIOQueue, ^{
         BOOL ok = [data writeToFile:path atomically:YES];
         if (!ok) {
-            [self log:@"⚠️ Écriture cache échouée: %@", path.lastPathComponent];
+            // Retry: le dossier a peut-être été purgé par iOS entre temps
+            [[NSFileManager defaultManager]
+                createDirectoryAtPath:[path stringByDeletingLastPathComponent]
+               withIntermediateDirectories:YES
+                                attributes:nil
+                                     error:nil];
+            ok = [data writeToFile:path atomically:YES];
+            if (!ok) {
+                [self log:@"⚠️ Écriture cache échouée (retry): %@", path.lastPathComponent];
+            }
         }
     });
 }
@@ -650,9 +660,17 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
     NSRange colonRange = [afterPrivmsg rangeOfString:@" :"];
     if (colonRange.location == NSNotFound) return line;
 
-    NSString *messageText = [[afterPrivmsg substringFromIndex:colonRange.location + 2]
-                             stringByTrimmingCharactersInSet:
-                             [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    // ── Fix H: ne PAS toucher les espaces de début de message (ils décalent les positions)
+    // On retire uniquement \r et \n en fin de chaîne.
+    NSString *messageText = [afterPrivmsg substringFromIndex:colonRange.location + 2];
+    while (messageText.length > 0) {
+        unichar last = [messageText characterAtIndex:messageText.length - 1];
+        if (last == '\r' || last == '\n') {
+            messageText = [messageText substringToIndex:messageText.length - 1];
+        } else {
+            break;
+        }
+    }
     if (messageText.length == 0) return line;
 
     __block NSDictionary *global, *channel;
@@ -661,7 +679,15 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
         channel = self.channelEmotes ?: @{};
     });
 
-    NSMutableArray<NSString *> *emoteTags = [NSMutableArray array];
+    // emotesMap: emoteID (avec préfixe) → tableau de positions "start-end"
+    // Permet de regrouper les occurrences du même ID pour le format Twitch:
+    //   même ID → ID:pos1,pos2       (virgule entre les positions)
+    //   ID différents → ID1:pos1/ID2:pos2  (slash entre les IDs)
+    NSMutableDictionary<NSString *, NSMutableArray<NSString *> *> *emotesMap =
+        [NSMutableDictionary dictionary];
+    // Ordre d'insertion conservé pour la reproductibilité du tag final
+    NSMutableArray<NSString *> *emoteIDOrder = [NSMutableArray array];
+
     NSUInteger currentPos = 0;
 
     for (NSString *word in [messageText componentsSeparatedByString:@" "]) {
@@ -672,10 +698,17 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
             if (!emote.isAnimated || self.showAnimated) {
                 NSUInteger start = currentPos;
                 NSUInteger end   = currentPos + word.length - 1;
-                NSString *tag = [NSString stringWithFormat:@"%@%@:%lu-%lu",
-                                 S7TV_EMOTE_ID_PREFIX, emote.emoteID,
-                                 (unsigned long)start, (unsigned long)end];
-                [emoteTags addObject:tag];
+                NSString *fakeID  = [NSString stringWithFormat:@"%@%@",
+                                     S7TV_EMOTE_ID_PREFIX, emote.emoteID];
+                NSString *posStr  = [NSString stringWithFormat:@"%lu-%lu",
+                                     (unsigned long)start, (unsigned long)end];
+
+                if (!emotesMap[fakeID]) {
+                    emotesMap[fakeID] = [NSMutableArray array];
+                    [emoteIDOrder addObject:fakeID];
+                }
+                [emotesMap[fakeID] addObject:posStr];
+
                 [self log:@"🎭 Emote trouvée: %@ (ID: %@) pos:%lu-%lu",
                  word, emote.emoteID, (unsigned long)start, (unsigned long)end];
             }
@@ -683,16 +716,37 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
         currentPos += word.length + 1;
     }
 
-    if (emoteTags.count == 0) return line;
+    if (emotesMap.count == 0) return line;
+
+    // ── Fix I: construire le tag emotes= au format correct Twitch ───────────
+    // Format: ID1:start1-end1,start2-end2/ID2:start3-end3
+    NSMutableArray<NSString *> *emoteEntries = [NSMutableArray arrayWithCapacity:emoteIDOrder.count];
+    for (NSString *eid in emoteIDOrder) {
+        NSString *positions = [emotesMap[eid] componentsJoinedByString:@","];
+        [emoteEntries addObject:[NSString stringWithFormat:@"%@:%@", eid, positions]];
+    }
+    // Différents emote IDs séparés par "/" (format Twitch officiel)
+    NSString *newEmotesStr = [emoteEntries componentsJoinedByString:@"/"];
 
     [self log:@"💉 Injection de %lu emote(s): %@",
-     (unsigned long)emoteTags.count, [emoteTags componentsJoinedByString:@" | "]];
+     (unsigned long)emoteIDOrder.count, newEmotesStr];
 
-    NSString *result = [self buildIRCLineWithEmotes:[emoteTags componentsJoinedByString:@","]
-                                             inLine:line];
+    NSString *result = [self buildIRCLineWithEmotes:newEmotesStr inLine:line];
 
-    [self log:@"🏷 tag final -> %@",
-     [result substringToIndex:MIN((NSUInteger)150, result.length)]];
+    // ── Logging: afficher la valeur complète du tag emotes= ─────────────────
+    NSRange emoteTagInResult = [result rangeOfString:@"emotes="];
+    if (emoteTagInResult.location != NSNotFound) {
+        NSString *afterTag = [result substringFromIndex:emoteTagInResult.location];
+        NSRange scInResult = [afterTag rangeOfString:@";"];
+        NSRange spInResult = [afterTag rangeOfString:@" "];
+        NSUInteger endTag  = afterTag.length;
+        if (scInResult.location != NSNotFound) endTag = scInResult.location;
+        if (spInResult.location != NSNotFound && spInResult.location < endTag) endTag = spInResult.location;
+        [self log:@"🏷 tag final -> %@", [afterTag substringToIndex:endTag]];
+    } else {
+        [self log:@"🏷 tag final (150) -> %@",
+         [result substringToIndex:MIN((NSUInteger)150, result.length)]];
+    }
 
     return result;
 }
@@ -714,8 +768,10 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
         NSString *existingEmotes = [afterEmotes substringToIndex:limit];
         NSString *suffix         = [afterEmotes substringFromIndex:limit];
 
+        // ── Fix J: "/" pour séparer des emote IDs différents (standard Twitch)
+        // "," sépare des occurrences du MÊME ID — ce que Twitch attendait avant
         NSString *combined = existingEmotes.length > 0
-            ? [NSString stringWithFormat:@"%@,%@", existingEmotes, newEmotesStr]
+            ? [NSString stringWithFormat:@"%@/%@", existingEmotes, newEmotesStr]
             : newEmotesStr;
 
         return [NSString stringWithFormat:@"%@%@%@", prefix, combined, suffix];
