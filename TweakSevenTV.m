@@ -518,6 +518,105 @@ static void s7tv_scrollChatToBottom(void) {
 }
 
 
+// ── Reload les UITextView/UILabel visibles dans le chat ─────────────────────
+//
+// Appelé depuis le main thread après que le prefetch background a terminé.
+// Les images sont maintenant en cache → on reset l'attributedText des cellules
+// visibles → CoreText recalcule le layout → URLProtocol.startLoading → cache
+// hit synchrone → emote apparaît. Même logique que Stratégie A/B dans
+// s7tv_setImage:, mais appliquée à toutes les cellules visibles d'un coup.
+static void s7tv_reloadVisibleChatCells(void) {
+    UIWindow *keyWindow = nil;
+    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+        if ([scene isKindOfClass:[UIWindowScene class]]) {
+            for (UIWindow *w in ((UIWindowScene *)scene).windows) {
+                if (w.isKeyWindow) { keyWindow = w; break; }
+            }
+        }
+    }
+    if (!keyWindow) keyWindow = [UIApplication sharedApplication].windows.firstObject;
+    if (!keyWindow) return;
+
+    // BFS : trouver le plus grand UIScrollView avec overflow (= le chat)
+    UIScrollView *chatView = nil;
+    CGFloat       bestArea = 0;
+    NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:keyWindow];
+    while (queue.count > 0) {
+        UIView *v = queue.firstObject;
+        [queue removeObjectAtIndex:0];
+        if ([v isKindOfClass:[UIScrollView class]] && !v.isHidden && v.alpha > 0.01) {
+            UIScrollView *sv = (UIScrollView *)v;
+            CGFloat area     = sv.bounds.size.width * sv.bounds.size.height;
+            CGFloat overflow = sv.contentSize.height - sv.bounds.size.height;
+            if (area > bestArea && overflow > 100) {
+                bestArea = area;
+                chatView = sv;
+            }
+        }
+        for (UIView *sub in v.subviews) {
+            if (!sub.isHidden) [queue addObject:sub];
+        }
+    }
+    if (!chatView) return;
+
+    // BFS dans le chat : reset attributedText de tous les UITextView/UILabel visibles
+    NSInteger reloaded = 0;
+    NSMutableArray<UIView *> *bfs = [NSMutableArray arrayWithArray:chatView.subviews];
+    while (bfs.count > 0) {
+        UIView *v = bfs.firstObject;
+        [bfs removeObjectAtIndex:0];
+
+        if ([v isKindOfClass:[UITextView class]]) {
+            UITextView *tv = (UITextView *)v;
+            if (!objc_getAssociatedObject(tv, &kS7TVReloadGuard)) {
+                objc_setAssociatedObject(tv, &kS7TVReloadGuard, @YES,
+                                         OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                NSAttributedString *saved = tv.attributedText;
+                if (saved.length > 0) {
+                    tv.attributedText = nil;
+                    tv.attributedText = saved;
+                    reloaded++;
+                }
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                               (int64_t)(0.8 * NSEC_PER_SEC)),
+                               dispatch_get_main_queue(), ^{
+                    objc_setAssociatedObject(tv, &kS7TVReloadGuard, nil,
+                                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                });
+            }
+            continue; // ne pas descendre dans les sous-vues d'un UITextView
+        }
+
+        if ([v isKindOfClass:[UILabel class]]) {
+            UILabel *lbl = (UILabel *)v;
+            if (!objc_getAssociatedObject(lbl, &kS7TVReloadGuard)) {
+                objc_setAssociatedObject(lbl, &kS7TVReloadGuard, @YES,
+                                         OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                NSAttributedString *saved = lbl.attributedText;
+                if (saved.length > 0) {
+                    lbl.attributedText = nil;
+                    lbl.attributedText = saved;
+                    reloaded++;
+                }
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                               (int64_t)(0.8 * NSEC_PER_SEC)),
+                               dispatch_get_main_queue(), ^{
+                    objc_setAssociatedObject(lbl, &kS7TVReloadGuard, nil,
+                                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                });
+            }
+            continue;
+        }
+
+        for (UIView *sub in v.subviews) {
+            if (!sub.isHidden) [bfs addObject:sub];
+        }
+    }
+
+    [[SevenTVManager sharedManager] log:@"♻️ Reload %ld cellule(s) visibles", (long)reloaded];
+}
+
+
 @interface NSURLSessionWebSocketTask (SevenTV)
 - (void)s7tv_receiveMessageWithCompletionHandler:
     (void (^)(NSURLSessionWebSocketMessage *, NSError *))completionHandler;
@@ -567,10 +666,19 @@ static void s7tv_scrollChatToBottom(void) {
 
                     if (modified && ![modified isEqualToString:textToProcess]) {
 
-                        // Extraire les IDs des emotes injectées dans ce message
-                        NSArray<NSString *> *emoteIDs = s7tv_extractEmoteIDs(modified);
+                        // ── Livraison IMMÉDIATE — comme 7TV PC ────────────────
+                        // Pas de hold. Le message apparaît dans le chat sans délai,
+                        // emote vide pendant ~2s le temps du download, puis reload.
+                        completionHandler(
+                            [[NSURLSessionWebSocketMessage alloc] initWithString:modified],
+                            nil
+                        );
 
-                        // Filtrer celles qui ne sont pas encore en cache
+                        // Emotes absentes du cache → prefetch en background.
+                        // Quand TOUTES les images sont prêtes → reload des cellules
+                        // visibles sur le main thread → CoreText recalcule →
+                        // URLProtocol cache hit sync → emote apparaît. ✅
+                        NSArray<NSString *> *emoteIDs = s7tv_extractEmoteIDs(modified);
                         NSMutableArray<NSString *> *uncached = [NSMutableArray array];
                         for (NSString *eid in emoteIDs) {
                             if (![SevenTVURLProtocol isEmoteIDCached:eid]) {
@@ -578,32 +686,9 @@ static void s7tv_scrollChatToBottom(void) {
                             }
                         }
 
-                        // Bloc qui livre le message modifié à Twitch
-                        NSString *finalText = modified;
-                        void (^deliver)(void) = ^{
-                            NSURLSessionWebSocketMessage *newMsg =
-                                [[NSURLSessionWebSocketMessage alloc] initWithString:finalText];
-                            completionHandler(newMsg, nil);
-                            // Scroll chat en bas après livraison d'un message retenu :
-                            // si d'autres messages sont arrivés pendant la hold, notre
-                            // cellule risque d'être hors écran → l'emote ne se charge pas.
-                            dispatch_after(
-                                dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)),
-                                dispatch_get_main_queue(),
-                                ^{ s7tv_scrollChatToBottom(); }
-                            );
-                        };
-
-                        if (uncached.count == 0) {
-                            // Tout en cache → livraison immédiate, zéro délai
-                            deliver();
-                        } else {
-                            // Préfetch des images manquantes, PUIS livraison.
-                            // Le message n'est pas encore visible dans le chat Twitch.
-                            // Quand toutes les images sont en cache (~200ms), on le livre.
-                            // Twitch rend la cellule → demande les images → cache chaud → instantané.
+                        if (uncached.count > 0) {
                             [[SevenTVManager sharedManager]
-                                log:@"⏳ Hold message — %lu emote(s) à préfetch: %@",
+                                log:@"🔄 Prefetch background — %lu emote(s): %@",
                                 (unsigned long)uncached.count,
                                 [uncached componentsJoinedByString:@", "]];
 
@@ -614,11 +699,11 @@ static void s7tv_scrollChatToBottom(void) {
                                     dispatch_group_leave(group);
                                 }];
                             }
-                            // Livrer sur un thread background — pas besoin du main thread ici,
-                            // completionHandler est appelé sur le thread de la session WebSocket.
-                            dispatch_group_notify(group,
-                                                  dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0),
-                                                  deliver);
+                            dispatch_group_notify(group, dispatch_get_main_queue(), ^{
+                                [[SevenTVManager sharedManager]
+                                    log:@"✅ Images prêtes → reload cellules visibles"];
+                                s7tv_reloadVisibleChatCells();
+                            });
                         }
                         return;
                     }

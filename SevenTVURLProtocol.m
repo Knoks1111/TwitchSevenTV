@@ -295,22 +295,14 @@ static NSURL *SevenTVCDNURLForEmoteID(NSString *emoteID) {
         return;
     }
 
-    // Téléchargement via la session prefetch dédiée.
-    // Pas de kHandledKey → requête propre → même clé de cache que startLoading.
-    //
-    // POURQUOI PAS DE dispatch_after TIMEOUT :
-    // L'ancien mécanisme (timeout 1s + done/onceQ) fire la completion avant
-    // la fin du download (~2s) → deliver() → cellule rendue → image absente du
-    // cache → case vide. Le message 2 arrivait 2s plus tard et trouvait l'image
-    // en cache → s'affichait correctement → confirmait le bug.
-    //
-    // Fix : on laisse NSURLSession gérer le timeout via timeoutInterval.
-    // La completion est garantie appelée exactement une fois (succès, erreur
-    // réseau, ou expiration à 5s). deliver() ne fire QUE quand l'image est
-    // effectivement en cache (ou quand le réseau a abandonné).
+    // Téléchargement en background via la session prefetch dédiée.
+    // La completion est appelée exactement une fois par NSURLSession :
+    // succès, erreur réseau, ou expiration à 10s (timeoutInterval).
+    // Pas de dispatch_after externe : on n'a plus besoin du guard done/onceQ
+    // puisqu'on ne bloque plus la livraison du message.
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
     req.cachePolicy     = NSURLRequestReturnCacheDataElseLoad;
-    req.timeoutInterval = 5.0; // 5s max → chat jamais bloqué indéfiniment
+    req.timeoutInterval = 10.0;
 
     [[SevenTVGetPrefetchSession() dataTaskWithRequest:req
                completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
