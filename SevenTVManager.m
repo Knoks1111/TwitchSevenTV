@@ -312,6 +312,7 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
     //    On le fait systématiquement, cache frais ou non.
     [SevenTVURLProtocol prewarmCDNConnection];
     [self log:@"🔥 Préchauffage connexion CDN lancé"];
+}
 
 
 // ============================================================
