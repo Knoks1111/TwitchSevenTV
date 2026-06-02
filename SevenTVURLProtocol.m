@@ -297,12 +297,12 @@ static NSURL *SevenTVCDNURLForEmoteID(NSString *emoteID) {
 
     // Téléchargement en background via la session prefetch dédiée.
     // La completion est appelée exactement une fois par NSURLSession :
-    // succès, erreur réseau, ou expiration à 10s (timeoutInterval).
-    // Pas de dispatch_after externe : on n'a plus besoin du guard done/onceQ
-    // puisqu'on ne bloque plus la livraison du message.
+    // succès, erreur réseau, ou expiration (timeoutInterval).
+    // 30s : avec 6 streams HTTP/2 en parallèle et 335 emotes, les requêtes
+    // en queue pouvaient expirer avant d'être envoyées avec l'ancien 10s.
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
     req.cachePolicy     = NSURLRequestReturnCacheDataElseLoad;
-    req.timeoutInterval = 10.0;
+    req.timeoutInterval = 30.0;
 
     [[SevenTVGetPrefetchSession() dataTaskWithRequest:req
                completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {

@@ -507,7 +507,12 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
 
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
 
-        dispatch_semaphore_t sem = dispatch_semaphore_create(20);
+        // 6 connexions simultanées — limite adaptée à HTTP/2 sur mobile.
+        // cdn.7tv.app multiplex sur une seule connexion TCP : au-delà de ~8
+        // streams le CDN throttle et iOS annule les requêtes en attente après
+        // 10s → timeouts en cascade → emotes jamais cachées.
+        // 6 est le sweet spot : débit maximal sans perte sur Wi-Fi et 4G/5G.
+        dispatch_semaphore_t sem = dispatch_semaphore_create(6);
         dispatch_group_t group   = dispatch_group_create();
 
         __block NSUInteger done    = 0;
