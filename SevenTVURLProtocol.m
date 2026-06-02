@@ -295,35 +295,28 @@ static NSURL *SevenTVCDNURLForEmoteID(NSString *emoteID) {
         return;
     }
 
-    // File série pour garantir que completion est appelé exactement une fois,
-    // peu importe lequel (timeout ou téléchargement) arrive en premier.
-    __block BOOL done = NO;
-    dispatch_queue_t onceQ = dispatch_queue_create("s7tv.prefetch.once", DISPATCH_QUEUE_SERIAL);
-
-    void (^finish)(NSString *reason) = ^(NSString *reason) {
-        dispatch_async(onceQ, ^{
-            if (!done) {
-                done = YES;
-                [[SevenTVManager sharedManager] log:@"📦 Préfetch %@ → %@", emoteID, reason];
-                if (completion) completion();
-            }
-        });
-    };
-
-    // Timeout de sécurité : 1s max pour ne pas bloquer le chat indéfiniment
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1 * NSEC_PER_SEC),
-                   dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        finish(@"timeout 1s");
-    });
-
     // Téléchargement via la session prefetch dédiée.
     // Pas de kHandledKey → requête propre → même clé de cache que startLoading.
+    //
+    // POURQUOI PAS DE dispatch_after TIMEOUT :
+    // L'ancien mécanisme (timeout 1s + done/onceQ) fire la completion avant
+    // la fin du download (~2s) → deliver() → cellule rendue → image absente du
+    // cache → case vide. Le message 2 arrivait 2s plus tard et trouvait l'image
+    // en cache → s'affichait correctement → confirmait le bug.
+    //
+    // Fix : on laisse NSURLSession gérer le timeout via timeoutInterval.
+    // La completion est garantie appelée exactement une fois (succès, erreur
+    // réseau, ou expiration à 5s). deliver() ne fire QUE quand l'image est
+    // effectivement en cache (ou quand le réseau a abandonné).
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
-    req.cachePolicy = NSURLRequestReturnCacheDataElseLoad;
+    req.cachePolicy     = NSURLRequestReturnCacheDataElseLoad;
+    req.timeoutInterval = 5.0; // 5s max → chat jamais bloqué indéfiniment
 
     [[SevenTVGetPrefetchSession() dataTaskWithRequest:req
                completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
-        finish(err ? err.localizedDescription : @"OK");
+        [[SevenTVManager sharedManager] log:@"📦 Préfetch %@ → %@", emoteID,
+            err ? err.localizedDescription : @"OK"];
+        if (completion) completion();
     }] resume];
 }
 
