@@ -83,7 +83,7 @@ static void SevenTVCollectScrollViews(UIView *root,
 // (menus, overlays, etc.) qui n'ont rien à voir.
 
 static void SevenTVReloadVisibleChatCells(void) {
-    NSAssert([NSThread isMainThread], @"SevenTVReloadVisibleChatCells must run on main thread");
+    NSCAssert([NSThread isMainThread], @"SevenTVReloadVisibleChatCells must run on main thread");
 
     UIWindow *keyWindow = nil;
     // iOS 13+ : chercher la première scène connectée en foreground
