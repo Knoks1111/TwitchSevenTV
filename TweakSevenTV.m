@@ -156,7 +156,7 @@
         ? self.bounds.size.height
         : self.frame.size.height;
 
-    if (viewH < 1 || viewH > 80.0) return;
+    if (viewH < 10 || viewH > 80.0) return; // trop petite (curseur, séparateur…) ou trop grande → pas une emote
 
     __weak UIImageView *weakSelf = self;
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -424,6 +424,62 @@ static void s7tv_handleRoomState(NSString *ircMessage) {
 }
 
 
+// ── Scroll le chat vers le bas après livraison d'un message retenu ──────────
+//
+// Pendant la hold (~500ms), d'autres messages arrivent et Twitch auto-scrolle
+// pour eux. Notre message est livré APRÈS : il est ajouté en bas de la liste
+// mais Twitch ne scrolle plus → cellule hors écran → image jamais demandée.
+//
+// On cherche le plus grand UIScrollView visible (= le chat) et on scrolle
+// en bas, MAIS seulement si l'utilisateur était déjà proche du bas (< 200pt).
+// Si l'utilisateur a scrollé vers le haut pour lire, on ne le dérange pas.
+static void s7tv_scrollChatToBottom(void) {
+    UIWindow *keyWindow = nil;
+    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+        if ([scene isKindOfClass:[UIWindowScene class]]) {
+            for (UIWindow *w in ((UIWindowScene *)scene).windows) {
+                if (w.isKeyWindow) { keyWindow = w; break; }
+            }
+        }
+    }
+    if (!keyWindow) keyWindow = [UIApplication sharedApplication].windows.firstObject;
+    if (!keyWindow) return;
+
+    // BFS : trouver le plus grand UIScrollView avec contenu qui déborde (= le chat)
+    UIScrollView *chatView  = nil;
+    CGFloat       bestArea  = 0;
+    NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:keyWindow];
+    while (queue.count > 0) {
+        UIView *v = queue.firstObject;
+        [queue removeObjectAtIndex:0];
+        if ([v isKindOfClass:[UIScrollView class]] && !v.isHidden && v.alpha > 0.01) {
+            UIScrollView *sv  = (UIScrollView *)v;
+            CGFloat area      = sv.bounds.size.width * sv.bounds.size.height;
+            CGFloat overflow  = sv.contentSize.height - sv.bounds.size.height;
+            if (area > bestArea && overflow > 100) {
+                bestArea = area;
+                chatView = sv;
+            }
+        }
+        for (UIView *sub in v.subviews) {
+            if (!sub.isHidden) [queue addObject:sub];
+        }
+    }
+    if (!chatView) return;
+
+    CGFloat maxY     = chatView.contentSize.height - chatView.bounds.size.height;
+    CGFloat currentY = chatView.contentOffset.y;
+    if (maxY <= 0) return;
+
+    // Seulement si on était déjà proche du bas (≤ 200pt d'écart)
+    if (maxY - currentY <= 200.0) {
+        [chatView setContentOffset:CGPointMake(chatView.contentOffset.x, maxY)
+                          animated:NO];
+        [[SevenTVManager sharedManager] log:@"📜 Scroll chat → bas (delta=%.0f)", maxY - currentY];
+    }
+}
+
+
 @interface NSURLSessionWebSocketTask (SevenTV)
 - (void)s7tv_receiveMessageWithCompletionHandler:
     (void (^)(NSURLSessionWebSocketMessage *, NSError *))completionHandler;
@@ -490,6 +546,14 @@ static void s7tv_handleRoomState(NSString *ircMessage) {
                             NSURLSessionWebSocketMessage *newMsg =
                                 [[NSURLSessionWebSocketMessage alloc] initWithString:finalText];
                             completionHandler(newMsg, nil);
+                            // Scroll chat en bas après livraison d'un message retenu :
+                            // si d'autres messages sont arrivés pendant la hold, notre
+                            // cellule risque d'être hors écran → l'emote ne se charge pas.
+                            dispatch_after(
+                                dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)),
+                                dispatch_get_main_queue(),
+                                ^{ s7tv_scrollChatToBottom(); }
+                            );
                         };
 
                         if (uncached.count == 0) {
