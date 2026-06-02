@@ -86,6 +86,8 @@ static void s7tv_swizzle(Class targetClass,
 @interface NSURLSession (SevenTV)
 - (NSURLSessionDataTask *)s7tv_dataTaskWithRequest:(NSURLRequest *)request
                                  completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completionHandler;
+- (NSURLSessionDataTask *)s7tv_dataTaskWithURL:(NSURL *)url
+                             completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completionHandler;
 @end
 
 @implementation NSURLSession (SevenTV)
@@ -102,11 +104,30 @@ static void s7tv_swizzle(Class targetClass,
                 }
                 completionHandler(data, response, error);
             };
-        // Après swizzle, appeler s7tv_ appelle en réalité l'original
         return [self s7tv_dataTaskWithRequest:request completionHandler:wrappedHandler];
     }
 
     return [self s7tv_dataTaskWithRequest:request completionHandler:completionHandler];
+}
+
+// Fix 2 — Twitch 29.6 utilise aussi dataTaskWithURL: (sans NSURLRequest)
+// pour certaines requêtes GQL → on intercepte cette variante aussi.
+- (NSURLSessionDataTask *)s7tv_dataTaskWithURL:(NSURL *)url
+                             completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completionHandler {
+    NSString *host = url.host ?: @"";
+
+    if ([host isEqualToString:@"gql.twitch.tv"] && completionHandler) {
+        void (^wrappedHandler)(NSData *, NSURLResponse *, NSError *) =
+            ^(NSData *data, NSURLResponse *response, NSError *error) {
+                if (data && !error) {
+                    [[SevenTVManager sharedManager] extractAndLoadEmotesFromGQLResponse:data];
+                }
+                completionHandler(data, response, error);
+            };
+        return [self s7tv_dataTaskWithURL:url completionHandler:wrappedHandler];
+    }
+
+    return [self s7tv_dataTaskWithURL:url completionHandler:completionHandler];
 }
 
 @end
@@ -214,27 +235,29 @@ static void s7tv_swizzle(Class targetClass,
 // ────────────────────────────────────────────────────────────
 
 static void s7tv_swizzle_session(void) {
-    SEL swizzledSel = @selector(s7tv_dataTaskWithRequest:completionHandler:);
-    SEL originalSel = @selector(dataTaskWithRequest:completionHandler:);
+    SEL selRequest  = @selector(dataTaskWithRequest:completionHandler:);
+    SEL selURL      = @selector(dataTaskWithURL:completionHandler:);
+    SEL swizRequest = @selector(s7tv_dataTaskWithRequest:completionHandler:);
+    SEL swizURL     = @selector(s7tv_dataTaskWithURL:completionHandler:);
 
-    // ── Session standard (sessionWithConfiguration:) ──
     NSURLSession *probeStd = [NSURLSession sessionWithConfiguration:
                               [NSURLSessionConfiguration defaultSessionConfiguration]];
     Class classStd = object_getClass(probeStd);
     [[SevenTVManager sharedManager] log:@"🔍 NSURLSession standard: %@",
      NSStringFromClass(classStd)];
-    s7tv_swizzle(classStd, [NSURLSession class], originalSel, swizzledSel);
 
-    // ── Fix 4 — sharedSession (classe potentiellement différente) ──
-    // Twitch peut utiliser [NSURLSession sharedSession] pour ses requêtes GQL.
+    s7tv_swizzle(classStd, [NSURLSession class], selRequest, swizRequest);
+    // Fix 2 — aussi swizzler la variante URL (sans NSURLRequest)
+    s7tv_swizzle(classStd, [NSURLSession class], selURL, swizURL);
+
     Class classShared = object_getClass([NSURLSession sharedSession]);
     [[SevenTVManager sharedManager] log:@"🔍 NSURLSession shared: %@",
      NSStringFromClass(classShared)];
     if (classShared != classStd) {
-        // Classe différente → swizzle séparé nécessaire
-        s7tv_swizzle(classShared, [NSURLSession class], originalSel, swizzledSel);
+        s7tv_swizzle(classShared, [NSURLSession class], selRequest, swizRequest);
+        s7tv_swizzle(classShared, [NSURLSession class], selURL, swizURL);
     } else {
-        [[SevenTVManager sharedManager] log:@"ℹ️  sharedSession même classe que standard, pas de swizzle supplémentaire"];
+        [[SevenTVManager sharedManager] log:@"ℹ️  sharedSession même classe que standard"];
     }
 }
 

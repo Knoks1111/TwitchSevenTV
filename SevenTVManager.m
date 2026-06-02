@@ -169,11 +169,6 @@ NSString *const S7TVLogsDidUpdateNotification = @"S7TVLogsDidUpdateNotification"
         dispatch_barrier_async(self.emoteQueue, ^{
             self.globalEmotes = parsed;
             [self log:@"✅ %lu emotes globales 7TV chargées", (unsigned long)parsed.count];
-
-            // Fix diagnostic 1 — lister les noms pour vérifier qu'ils correspondent
-            // exactement à ce que les gens tapent dans le chat (casse, caractères spéciaux…)
-            NSArray *names = [parsed.allKeys sortedArrayUsingSelector:@selector(compare:)];
-            [self log:@"📋 Emotes globales: %@", [names componentsJoinedByString:@", "]];
         });
 
     }] resume];
@@ -434,9 +429,6 @@ NSString *const S7TVLogsDidUpdateNotification = @"S7TVLogsDidUpdateNotification"
     // On ne traite que les messages PRIVMSG (messages de chat)
     if (![rawMessage containsString:@"PRIVMSG"]) return rawMessage;
 
-    // Fix diagnostic 2 — confirmer que le hook IRC se déclenche bien
-    [self log:@"📨 PRIVMSG reçu (hook OK): %.120s…", rawMessage.UTF8String];
-
     // --- Extraire le texte du message ---
     // Format IRC: "@tags :user!user@user.tmi.twitch.tv PRIVMSG #channel :message texte"
     NSRange privmsgRange = [rawMessage rangeOfString:@"PRIVMSG #"];
@@ -447,7 +439,17 @@ NSString *const S7TVLogsDidUpdateNotification = @"S7TVLogsDidUpdateNotification"
     if (colonRange.location == NSNotFound) return rawMessage;
 
     NSString *messageText = [afterPrivmsg substringFromIndex:colonRange.location + 2];
+
+    // Fix 1 — Les frames IRC se terminent par \r\n.
+    // Sans ce trim, le dernier mot est "KEKW\r\n" au lieu de "KEKW"
+    // → le dictionnaire d'emotes ne trouve jamais de correspondance.
+    messageText = [messageText stringByTrimmingCharactersInSet:
+                   [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+
     if (messageText.length == 0) return rawMessage;
+
+    // Diagnostic — voir exactement le texte parsé (à retirer une fois confirmé)
+    [self log:@"🔎 Texte parsé: \"%@\"", messageText];
 
     // --- Obtenir la liste combinée de toutes les emotes connues ---
     __block NSDictionary *global;
