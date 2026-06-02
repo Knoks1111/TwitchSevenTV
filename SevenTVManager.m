@@ -237,7 +237,8 @@ NSString *const S7TVLogsDidUpdateNotification = @"S7TVLogsDidUpdateNotification"
         if (!json) return;
 
         // La réponse contient un objet "emote_set" avec les emotes du channel
-        NSDictionary *emoteSet = json[@"emote_set"];
+        id rawEmoteSet = json[@"emote_set"];
+        NSDictionary *emoteSet = [rawEmoteSet isKindOfClass:[NSDictionary class]] ? rawEmoteSet : nil;
         if (!emoteSet) {
             [self log:@"Pas d'emote_set pour ce channel (channel pas sur 7TV?)"];
             return;
@@ -266,16 +267,30 @@ NSString *const S7TVLogsDidUpdateNotification = @"S7TVLogsDidUpdateNotification"
 
     NSMutableDictionary *result = [NSMutableDictionary dictionaryWithCapacity:emotesList.count];
 
-    for (NSDictionary *item in emotesList) {
+    for (id item in emotesList) {
         // Chaque item a la forme:
         // { "id": "...", "name": "KEKW", "data": { "animated": true/false } }
+
+        // Défense: l'API peut retourner NSNull à n'importe quel niveau
+        if (![item isKindOfClass:[NSDictionary class]]) continue;
+
         NSString *name   = item[@"name"];
         NSString *itemID = item[@"id"];
 
+        // NSNull guard: name et itemID peuvent être NSNull (JSON null)
+        if (![name isKindOfClass:[NSString class]])   name   = nil;
+        if (![itemID isKindOfClass:[NSString class]]) itemID = nil;
+
         // Certains items ont les données dans une clé "data"
-        NSDictionary *data = item[@"data"];
-        NSString *emoteID  = data[@"id"] ?: itemID;
-        BOOL animated      = [data[@"animated"] boolValue];
+        // "data" peut être NSNull si l'API retourne null pour ce champ
+        id rawData = item[@"data"];
+        NSDictionary *data = [rawData isKindOfClass:[NSDictionary class]] ? rawData : nil;
+
+        id rawEmoteID = data[@"id"];
+        NSString *emoteID = [rawEmoteID isKindOfClass:[NSString class]] ? rawEmoteID : itemID;
+
+        id rawAnimated = data[@"animated"];
+        BOOL animated  = [rawAnimated isKindOfClass:[NSNumber class]] && [rawAnimated boolValue];
 
         if (!name || !emoteID) continue;
 
@@ -367,8 +382,9 @@ NSString *const S7TVLogsDidUpdateNotification = @"S7TVLogsDidUpdateNotification"
                 if ([self isTwitchUserID:foundID]) {
                     // Extraire aussi le login si disponible
                     if (outLogin) {
-                        NSString *login = value[@"login"] ?: value[@"name"];
-                        if ([login isKindOfClass:[NSString class]] && login.length > 0) {
+                        id rawLogin = value[@"login"] ?: value[@"name"];
+                        NSString *login = [rawLogin isKindOfClass:[NSString class]] ? rawLogin : nil;
+                        if (login.length > 0) {
                             *outLogin = login;
                         }
                     }
