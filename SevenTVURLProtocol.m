@@ -134,10 +134,13 @@ static NSURLSession *SevenTVGetCDNSession(void) {
     NSURLSession *session = SevenTVGetCDNSession();
 
     // ── Construire l'URL 7TV CDN ─────────────────────────────────────────────
-    // - Emote animée + animations activées → GIF
-    //   (UIKit supporte GIF via UIImage.animationImages; WebP animé pas supporté
-    //    nativement par la plupart des libs iOS sans flag de compilation spécial)
-    // - Emote statique ou animations désactivées → WebP (plus léger)
+    // WebP animé est 2-3x plus léger qu'un GIF équivalent et supporté
+    // nativement par CGImageSource depuis iOS 14 via CGImageSourceCreateWithData.
+    // On utilise TOUJOURS WebP (animé ou statique) — plus de GIF.
+    //
+    // Taille: Twitch demande ses emotes en "3.0" (haute résolution Retina).
+    // On demande 4x au CDN 7TV pour correspondre à la taille visuelle
+    // des emotes Twitch natives dans le chat.
     SevenTVManager *mgr = [SevenTVManager sharedManager];
 
     // Chercher si l'emote est animée — lecture thread-safe via emoteQueue
@@ -145,7 +148,6 @@ static NSURLSession *SevenTVGetCDNSession(void) {
     dispatch_sync(mgr.emoteQueue, ^{
         SevenTVEmote *found = mgr.channelEmotes[emoteID] ?: mgr.globalEmotes[emoteID];
         if (!found) {
-            // Fallback: chercher par emoteID dans les valeurs
             for (SevenTVEmote *e in mgr.channelEmotes.allValues) {
                 if ([e.emoteID isEqualToString:emoteID]) { found = e; break; }
             }
@@ -158,14 +160,17 @@ static NSURLSession *SevenTVGetCDNSession(void) {
         isAnimated = found ? found.isAnimated : NO;
     });
 
-    BOOL useGif = isAnimated && mgr.showAnimated;
-    NSString *extension = useGif ? @"4x.gif" : @"4x.webp";
+    // Toujours WebP — animé ou statique.
+    // WebP animé = même qualité qu'un GIF mais 2-3x plus petit → charge en 1-2s au lieu de 5-10s.
+    // CGImageSource sur iOS 14+ décode nativement les WebP animés frame par frame.
+    BOOL useAnimated = isAnimated && mgr.showAnimated;
+    NSString *extension = @"4x.webp";  // WebP dans tous les cas
 
     NSString *cdnURL = [NSString stringWithFormat:@"https://cdn.7tv.app/emote/%@/%@",
                         emoteID, extension];
 
     [mgr log:@"🌐 URLProtocol intercept → emote:%@ animé:%@ url:%@",
-     emoteID, isAnimated ? @"oui" : @"non", cdnURL];
+     emoteID, useAnimated ? @"oui" : @"non", cdnURL];
 
     NSURL *targetURL = [NSURL URLWithString:cdnURL];
     if (!targetURL) {
@@ -195,14 +200,13 @@ static NSURLSession *SevenTVGetCDNSession(void) {
         }
 
         if (data && response) {
-            // Créer une fausse réponse avec l'URL originale (celle que Twitch attendait)
             NSHTTPURLResponse *httpResponse = (NSHTTPURLResponse *)response;
-            NSString *contentType = useGif ? @"image/gif" : @"image/webp";
+            // Toujours WebP (animé ou statique)
             NSHTTPURLResponse *spoofedResponse = [[NSHTTPURLResponse alloc]
                 initWithURL:strongSelf.request.URL
                 statusCode:httpResponse.statusCode
                HTTPVersion:@"HTTP/1.1"
-              headerFields:@{@"Content-Type": contentType}];
+              headerFields:@{@"Content-Type": @"image/webp"}];
 
             [strongSelf.client URLProtocol:strongSelf
                         didReceiveResponse:spoofedResponse

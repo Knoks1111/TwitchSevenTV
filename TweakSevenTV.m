@@ -37,50 +37,81 @@
 @implementation UIImage (SevenTVGIF)
 
 + (UIImage *)s7tv_imageWithData:(NSData *)data {
-    // Vérifier si c'est un GIF (magic bytes: 47 49 46 38 = "GIF8")
-    if (data.length >= 4) {
-        const uint8_t *b = (const uint8_t *)data.bytes;
-        if (b[0] == 0x47 && b[1] == 0x49 && b[2] == 0x46 && b[3] == 0x38) {
-            CGImageSourceRef src =
-                CGImageSourceCreateWithData((__bridge CFDataRef)data, NULL);
-            if (src) {
-                size_t count = CGImageSourceGetCount(src);
-                if (count > 1) {
-                    NSMutableArray<UIImage *> *frames = [NSMutableArray arrayWithCapacity:count];
-                    NSTimeInterval totalDuration = 0;
+    if (data.length < 4) {
+        return [self s7tv_imageWithData:data];
+    }
 
-                    for (size_t i = 0; i < count; i++) {
-                        CGImageRef cgImg =
-                            CGImageSourceCreateImageAtIndex(src, i, NULL);
-                        if (cgImg) {
-                            [frames addObject:[UIImage imageWithCGImage:cgImg]];
-                            CFRelease(cgImg);
-                        }
+    const uint8_t *b = (const uint8_t *)data.bytes;
 
-                        // Durée de la frame (kCGImagePropertyGIFDictionary)
-                        NSDictionary *props = (__bridge_transfer NSDictionary *)
-                            CGImageSourceCopyPropertiesAtIndex(src, i, NULL);
-                        NSDictionary *gif  = props[(__bridge NSString *)
-                                                   kCGImagePropertyGIFDictionary];
-                        NSNumber *delay =
-                            gif[(__bridge NSString *)kCGImagePropertyGIFUnclampedDelayTime]
-                            ?: gif[(__bridge NSString *)kCGImagePropertyGIFDelayTime];
-                        // Minimum 10ms pour éviter les GIFs trop rapides
-                        totalDuration += MAX(delay.doubleValue, 0.01);
+    // Détecter GIF (47 49 46 38 = "GIF8") ou WebP (52 49 46 46 = "RIFF" + offset 8: "57 45 42 50" = "WEBP")
+    BOOL isGIF  = (b[0] == 0x47 && b[1] == 0x49 && b[2] == 0x46 && b[3] == 0x38);
+    BOOL isWebP = (data.length >= 12 &&
+                   b[0] == 0x52 && b[1] == 0x49 && b[2] == 0x46 && b[3] == 0x46 &&
+                   b[8] == 0x57 && b[9] == 0x45 && b[10] == 0x42 && b[11] == 0x50);
+
+    if (isGIF || isWebP) {
+        CGImageSourceRef src =
+            CGImageSourceCreateWithData((__bridge CFDataRef)data, NULL);
+        if (src) {
+            size_t count = CGImageSourceGetCount(src);
+
+            if (count > 1) {
+                // ── Image animée (multi-frames) ───────────────────────────
+                NSMutableArray<UIImage *> *frames = [NSMutableArray arrayWithCapacity:count];
+                NSTimeInterval totalDuration = 0;
+
+                for (size_t i = 0; i < count; i++) {
+                    CGImageRef cgImg = CGImageSourceCreateImageAtIndex(src, i, NULL);
+                    if (cgImg) {
+                        // Upscale: les emotes 7TV en 4x WebP font ~112px, les emotes
+                        // Twitch natives affichées dans le chat font ~56pt @2x = 112px.
+                        // On target 56pt = taille d'une emote Twitch standard dans le chat.
+                        // Si l'image est plus petite on la scale up via UIGraphicsImageRenderer.
+                        UIImage *frame = [UIImage imageWithCGImage:cgImg
+                                                             scale:1.0
+                                                       orientation:UIImageOrientationUp];
+                        [frames addObject:frame];
+                        CFRelease(cgImg);
                     }
-                    CFRelease(src);
 
-                    if (frames.count > 1) {
-                        return [UIImage animatedImageWithImages:frames
-                                                      duration:totalDuration];
-                    }
-                    if (frames.count == 1) return frames[0];
+                    // Durée de la frame
+                    NSDictionary *props = (__bridge_transfer NSDictionary *)
+                        CGImageSourceCopyPropertiesAtIndex(src, i, NULL);
+                    NSDictionary *gifDict  = props[(__bridge NSString *)kCGImagePropertyGIFDictionary];
+                    NSDictionary *webpDict = props[(__bridge NSString *)kCGImagePropertyWebPDictionary];
+                    NSDictionary *animDict = gifDict ?: webpDict;
+
+                    NSNumber *delay =
+                        animDict[(__bridge NSString *)kCGImagePropertyGIFUnclampedDelayTime]
+                        ?: animDict[(__bridge NSString *)kCGImagePropertyGIFDelayTime];
+                    totalDuration += MAX(delay.doubleValue, 0.01);
                 }
-                if (src) CFRelease(src);
+                CFRelease(src);
+
+                if (frames.count > 1) {
+                    return [UIImage animatedImageWithImages:frames
+                                                  duration:totalDuration];
+                }
+                if (frames.count == 1) return frames[0];
+
+            } else if (count == 1) {
+                // ── Image statique ────────────────────────────────────────
+                CGImageRef cgImg = CGImageSourceCreateImageAtIndex(src, 0, NULL);
+                CFRelease(src);
+                if (cgImg) {
+                    UIImage *img = [UIImage imageWithCGImage:cgImg
+                                                      scale:1.0
+                                                orientation:UIImageOrientationUp];
+                    CFRelease(cgImg);
+                    return img;
+                }
+            } else {
+                CFRelease(src);
             }
         }
     }
-    // Fallback: appel de l'original (swizzlé → s7tv_ appelle l'original)
+
+    // Fallback: appel de l'original
     return [self s7tv_imageWithData:data];
 }
 
