@@ -3,22 +3,31 @@
  * Implémentation du gestionnaire 7TV.
  *
  * CORRECTIFS v1.4:
- *   Fix C — Injection IRC: traiter chaque ligne IRC séparément.
- *            Twitch envoie parfois plusieurs messages dans un seul paquet
- *            WebSocket (séparés par \r\n). L'ancien code cherchait "emotes="
- *            dans tout le paquet → trouvait celui d'une autre ligne → injectait
- *            au mauvais endroit. Résultat: l'emote était "injectée" mais dans
- *            un tag inutilisable, Twitch ignorait l'image.
+ *   Fix C — Injection IRC: traiter chaque ligne IRC séparément (paquets multi-messages).
+ *   Fix D — Logs de diagnostic étendus (tag final complet, positions).
  *
- *   Fix D — Log de diagnostic étendu: le tag final complet (pas tronqué à 120)
- *            est loggué quand une emote est injectée, pour faciliter le debug.
+ * NOUVEAUTÉS v1.5 — Cache & Préchargement:
+ *   Fix E — Cache fichier JSON (remplace NSUserDefaults).
+ *            Les emotes sont stockées dans Library/Caches/s7tv/ sous forme de
+ *            fichiers JSON individuels par channel. Plus fiable, plus rapide à
+ *            lire (lecture synchrone sur file I/O queue), et iOS peut les purger
+ *            automatiquement si le stockage est plein sans crasher l'app.
  *
- * Ce fichier gère:
- * - Les appels API vers 7tv.io pour récupérer les emotes
- * - La mise en cache des emotes (pour ne pas re-télécharger à chaque fois)
- * - L'injection des emotes dans les messages IRC de Twitch
- * - La détection du broadcaster ID via les réponses GQL
- * - Le buffer de logs in-app (visible dans SevenTVLogsController)
+ *   Fix F — Stratégie cache-first + refresh arrière-plan.
+ *            Comportement:
+ *              1. Au JOIN d'un channel → cache chargé IMMÉDIATEMENT (synchrone)
+ *                 → les emotes sont disponibles avant même le 1er message du chat.
+ *              2. Si le cache date de plus de S7TV_CACHE_TTL secondes (1h par défaut)
+ *                 → refresh API lancé en arrière-plan, chat non bloqué.
+ *              3. Si pas de cache du tout → API fetch immédiat.
+ *            Résultat: 2e lancement sur un channel déjà visité = 0 délai.
+ *
+ *   Fix G — Protection anti-doublons affinée.
+ *            `fetchingChannelIDs` remplace `loadedChannelIDs`.
+ *            Il n'empêche plus les refreshs futurs — il évite seulement deux
+ *            requêtes réseau simultanées vers le même channel (ex: ROOMSTATE
+ *            reçu deux fois rapidement). Les refreshs périodiques sont gérés
+ *            par l'horodatage du cache, pas par ce set.
  */
 
 #import "SevenTVManager.h"
@@ -26,9 +35,17 @@
 #import <objc/runtime.h>
 
 // ============================================================
-// Constante de notification (définie ici, déclarée dans .h)
+// Constante de notification
 // ============================================================
 NSString *const S7TVLogsDidUpdateNotification = @"S7TVLogsDidUpdateNotification";
+
+// ============================================================
+// TTL du cache en secondes
+//   Globales : 1h  (elles changent très rarement)
+//   Channel  : 30 min (le streamer peut ajouter/retirer des emotes)
+// ============================================================
+static const NSTimeInterval kCacheTTLGlobal  = 3600.0;   // 1 heure
+static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
 
 
 // ============================================================
@@ -42,24 +59,37 @@ NSString *const S7TVLogsDidUpdateNotification = @"S7TVLogsDidUpdateNotification"
 // SevenTVManager (privé)
 // ============================================================
 @interface SevenTVManager ()
-// Ensemble des channel IDs déjà chargés (pour éviter les doublons)
-@property (nonatomic, strong) NSMutableSet<NSString *> *loadedChannelIDs;
-// File de dispatch pour la thread-safety des données d'emotes (readwrite en privé)
+
+// IDs de channels dont un fetch réseau est EN COURS (anti-doublon concurrent)
+// Ne bloque PAS les futurs refreshs — seulement les requêtes simultanées.
+@property (nonatomic, strong) NSMutableSet<NSString *> *fetchingChannelIDs;
+
+// File de dispatch pour la thread-safety des données d'emotes
 @property (nonatomic, strong, readwrite) dispatch_queue_t emoteQueue;
+
+// File série pour les I/O fichier (lecture/écriture cache JSON)
+// Série = pas de concurrent file access, pas besoin de lock séparé.
+@property (nonatomic, strong) dispatch_queue_t fileIOQueue;
+
 // Bouton flottant des paramètres
 @property (nonatomic, weak) UIButton *settingsButton;
 
-// ── Buffer de logs in-app ──────────────────────────────────
+// Buffer de logs in-app
 @property (nonatomic, strong) NSMutableArray<NSString *> *logBuffer;
 @property (nonatomic, strong) NSLock *logLock;
+
+// Dossier racine du cache JSON (créé à la demande)
+@property (nonatomic, strong) NSString *cacheDirectory;
+
 @end
 
 
 @implementation SevenTVManager
 
 // ============================================================
-// Singleton
+// MARK: - Singleton
 // ============================================================
+
 + (instancetype)sharedManager {
     static SevenTVManager *instance = nil;
     static dispatch_once_t onceToken;
@@ -76,52 +106,162 @@ NSString *const S7TVLogsDidUpdateNotification = @"S7TVLogsDidUpdateNotification"
         _showAnimated = YES;
         _debugLogging = (S7TV_DEBUG == 1);
 
-        _globalEmotes  = @{};
-        _channelEmotes = @{};
-        _loadedChannelIDs = [NSMutableSet set];
-        _emoteQueue = dispatch_queue_create("tv.s7tv.emote-queue",
-                                            DISPATCH_QUEUE_CONCURRENT);
+        _globalEmotes      = @{};
+        _channelEmotes     = @{};
+        _fetchingChannelIDs = [NSMutableSet set];
+
+        _emoteQueue  = dispatch_queue_create("tv.s7tv.emote-queue",  DISPATCH_QUEUE_CONCURRENT);
+        _fileIOQueue = dispatch_queue_create("tv.s7tv.file-io-queue", DISPATCH_QUEUE_SERIAL);
 
         _logBuffer = [NSMutableArray arrayWithCapacity:256];
         _logLock   = [[NSLock alloc] init];
 
         [self loadPreferences];
+        [self ensureCacheDirectory];
     }
     return self;
 }
 
 
 // ============================================================
-// MARK: - Cache disque (NSUserDefaults)
+// MARK: - Cache JSON sur disque (Library/Caches/s7tv/)
+//
+// Format de chaque fichier:
+//   {
+//     "ts": 1718000000,          ← timestamp Unix de la dernière mise à jour
+//     "emotes": {
+//       "KEKW": { "id": "...", "a": true },
+//       "Pog":  { "id": "...", "a": false },
+//       ...
+//     }
+//   }
+//
+// Noms de fichiers:
+//   global.json          ← emotes globales 7TV
+//   ch_155601320.json    ← emotes du channel Twitch ID 155601320
 // ============================================================
 
-static NSString *const kCacheGlobal = @"s7tv_cache_global";
+- (void)ensureCacheDirectory {
+    NSArray *paths = NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES);
+    NSString *caches = paths.firstObject;
+    NSString *dir = [caches stringByAppendingPathComponent:@"s7tv"];
 
-- (void)saveEmotesToCache:(NSDictionary<NSString *, SevenTVEmote *> *)emotes
-                   forKey:(NSString *)key {
-    if (!emotes.count || !key) return;
-    NSMutableDictionary *serial = [NSMutableDictionary dictionaryWithCapacity:emotes.count];
-    for (NSString *name in emotes) {
-        SevenTVEmote *e = emotes[name];
-        serial[name] = @{ @"id": e.emoteID, @"a": @(e.isAnimated) };
+    NSError *err;
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir
+                              withIntermediateDirectories:YES
+                                               attributes:nil
+                                                    error:&err];
+    if (err) {
+        NSLog(@"[TwitchSevenTV] ⚠️ Impossible de créer le dossier cache: %@", err.localizedDescription);
     }
-    [[NSUserDefaults standardUserDefaults] setObject:[serial copy] forKey:key];
+    self.cacheDirectory = dir;
 }
 
-- (NSDictionary<NSString *, SevenTVEmote *> *)loadEmotesFromCacheForKey:(NSString *)key {
-    NSDictionary *serial = [[NSUserDefaults standardUserDefaults] dictionaryForKey:key];
-    if (!serial.count) return nil;
-    NSMutableDictionary *result = [NSMutableDictionary dictionaryWithCapacity:serial.count];
-    for (NSString *name in serial) {
-        NSDictionary *d = serial[name];
+// Chemin complet d'un fichier cache
+- (NSString *)cacheFilePathForName:(NSString *)name {
+    return [self.cacheDirectory stringByAppendingPathComponent:
+            [NSString stringWithFormat:@"%@.json", name]];
+}
+
+// ── Lecture synchrone (sur fileIOQueue) ───────────────────────────────────────
+// Retourne le dictionnaire d'emotes et via outAge l'âge du cache en secondes.
+// outAge = -1 si le fichier n'existe pas.
+// APPELER DEPUIS fileIOQueue UNIQUEMENT (ou via dispatch_sync(fileIOQueue, ...))
+
+- (NSDictionary<NSString *, SevenTVEmote *> *)_readCacheFile:(NSString *)path
+                                                          age:(NSTimeInterval *)outAge {
+    if (outAge) *outAge = -1;
+
+    NSData *data = [NSData dataWithContentsOfFile:path];
+    if (!data) return nil;
+
+    NSDictionary *root = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    if (![root isKindOfClass:[NSDictionary class]]) return nil;
+
+    // Âge du cache
+    NSNumber *ts = root[@"ts"];
+    if ([ts isKindOfClass:[NSNumber class]] && outAge) {
+        *outAge = [NSDate date].timeIntervalSince1970 - ts.doubleValue;
+    }
+
+    NSDictionary *emotesDict = root[@"emotes"];
+    if (![emotesDict isKindOfClass:[NSDictionary class]]) return nil;
+
+    NSMutableDictionary *result = [NSMutableDictionary dictionaryWithCapacity:emotesDict.count];
+    for (NSString *name in emotesDict) {
+        NSDictionary *d = emotesDict[name];
         if (![d isKindOfClass:[NSDictionary class]]) continue;
+        NSString *emoteID = d[@"id"];
+        if (![emoteID isKindOfClass:[NSString class]] || !emoteID.length) continue;
+
         SevenTVEmote *e = [[SevenTVEmote alloc] init];
         e.emoteName  = name;
-        e.emoteID    = d[@"id"];
+        e.emoteID    = emoteID;
         e.isAnimated = [d[@"a"] boolValue];
-        if (e.emoteID.length) result[name] = e;
+        result[name] = e;
     }
+
     return result.count ? [result copy] : nil;
+}
+
+// ── Écriture asynchrone (sur fileIOQueue) ────────────────────────────────────
+// Appelé depuis n'importe quel thread — dispatché sur fileIOQueue en interne.
+
+- (void)_writeCacheFile:(NSString *)path
+              withEmotes:(NSDictionary<NSString *, SevenTVEmote *> *)emotes {
+    if (!emotes.count || !path) return;
+
+    // Sérialiser
+    NSMutableDictionary *emotesDict = [NSMutableDictionary dictionaryWithCapacity:emotes.count];
+    for (NSString *name in emotes) {
+        SevenTVEmote *e = emotes[name];
+        emotesDict[name] = @{ @"id": e.emoteID, @"a": @(e.isAnimated) };
+    }
+
+    NSDictionary *root = @{
+        @"ts":     @([NSDate date].timeIntervalSince1970),
+        @"emotes": [emotesDict copy]
+    };
+
+    NSError *err;
+    NSData *data = [NSJSONSerialization dataWithJSONObject:root options:0 error:&err];
+    if (!data || err) {
+        [self log:@"⚠️ Impossible de sérialiser le cache: %@", err.localizedDescription];
+        return;
+    }
+
+    dispatch_async(self.fileIOQueue, ^{
+        BOOL ok = [data writeToFile:path atomically:YES];
+        if (!ok) {
+            [self log:@"⚠️ Écriture cache échouée: %@", path.lastPathComponent];
+        }
+    });
+}
+
+// ── API publique: charger depuis le cache ────────────────────────────────────
+// Retourne les emotes immédiatement (synchrone sur l'appelant via dispatch_sync).
+// outAge = âge en secondes (-1 = pas de cache).
+
+- (NSDictionary<NSString *, SevenTVEmote *> *)loadCacheForName:(NSString *)name
+                                                            age:(NSTimeInterval *)outAge {
+    NSString *path = [self cacheFilePathForName:name];
+    __block NSDictionary *result = nil;
+    __block NSTimeInterval age = -1;
+
+    dispatch_sync(self.fileIOQueue, ^{
+        result = [self _readCacheFile:path age:&age];
+    });
+
+    if (outAge) *outAge = age;
+    return result;
+}
+
+// ── API publique: sauvegarder dans le cache (async) ──────────────────────────
+
+- (void)saveCacheForName:(NSString *)name
+              withEmotes:(NSDictionary<NSString *, SevenTVEmote *> *)emotes {
+    NSString *path = [self cacheFilePathForName:name];
+    [self _writeCacheFile:path withEmotes:emotes];
 }
 
 
@@ -132,30 +272,41 @@ static NSString *const kCacheGlobal = @"s7tv_cache_global";
 - (void)setup {
     [self log:@"SevenTVManager: setup démarré"];
 
-    NSDictionary *cachedGlobal = [self loadEmotesFromCacheForKey:kCacheGlobal];
+    // 1. Charger les emotes globales depuis le cache fichier (instantané)
+    NSTimeInterval globalAge = -1;
+    NSDictionary *cachedGlobal = [self loadCacheForName:@"global" age:&globalAge];
+
     if (cachedGlobal.count) {
         dispatch_barrier_async(self.emoteQueue, ^{
             self.globalEmotes = cachedGlobal;
         });
-        [self log:@"⚡️ %lu emotes globales depuis cache disque", (unsigned long)cachedGlobal.count];
+        if (globalAge >= 0) {
+            [self log:@"⚡️ %lu emotes globales depuis cache (âge: %.0fs)",
+             (unsigned long)cachedGlobal.count, globalAge];
+        }
     }
 
-    [self loadGlobalEmotes];
+    // 2. Refresh API si cache absent ou périmé
+    if (globalAge < 0 || globalAge > kCacheTTLGlobal) {
+        if (globalAge > kCacheTTLGlobal) {
+            [self log:@"🔄 Cache global périmé (%.0fs) → refresh", globalAge];
+        }
+        [self loadGlobalEmotes];
+    } else {
+        [self log:@"✅ Cache global frais, pas de refresh réseau"];
+    }
 }
 
 
 // ============================================================
-// MARK: - Préférences utilisateur
+// MARK: - Préférences utilisateur (NSUserDefaults — petit, OK ici)
 // ============================================================
 
 - (void)loadPreferences {
     NSUserDefaults *prefs = [NSUserDefaults standardUserDefaults];
-    if ([prefs objectForKey:@"s7tv_enabled"] != nil)
-        _isEnabled = [prefs boolForKey:@"s7tv_enabled"];
-    if ([prefs objectForKey:@"s7tv_animated"] != nil)
-        _showAnimated = [prefs boolForKey:@"s7tv_animated"];
-    if ([prefs objectForKey:@"s7tv_debug"] != nil)
-        _debugLogging = [prefs boolForKey:@"s7tv_debug"];
+    if ([prefs objectForKey:@"s7tv_enabled"]  != nil) _isEnabled    = [prefs boolForKey:@"s7tv_enabled"];
+    if ([prefs objectForKey:@"s7tv_animated"] != nil) _showAnimated = [prefs boolForKey:@"s7tv_animated"];
+    if ([prefs objectForKey:@"s7tv_debug"]    != nil) _debugLogging = [prefs boolForKey:@"s7tv_debug"];
 }
 
 - (void)savePreferences {
@@ -166,18 +317,9 @@ static NSString *const kCacheGlobal = @"s7tv_cache_global";
     [prefs synchronize];
 }
 
-- (void)setIsEnabled:(BOOL)isEnabled {
-    _isEnabled = isEnabled;
-    [self savePreferences];
-}
-- (void)setShowAnimated:(BOOL)showAnimated {
-    _showAnimated = showAnimated;
-    [self savePreferences];
-}
-- (void)setDebugLogging:(BOOL)debugLogging {
-    _debugLogging = debugLogging;
-    [self savePreferences];
-}
+- (void)setIsEnabled:(BOOL)v    { _isEnabled    = v; [self savePreferences]; }
+- (void)setShowAnimated:(BOOL)v { _showAnimated  = v; [self savePreferences]; }
+- (void)setDebugLogging:(BOOL)v { _debugLogging  = v; [self savePreferences]; }
 
 
 // ============================================================
@@ -186,32 +328,33 @@ static NSString *const kCacheGlobal = @"s7tv_cache_global";
 // ============================================================
 
 - (void)loadGlobalEmotes {
-    [self log:@"Chargement des emotes globales 7TV..."];
+    [self log:@"🌍 Chargement emotes globales depuis API..."];
 
     NSURL *url = [NSURL URLWithString:[NSString stringWithFormat:@"%@/emote-sets/global", S7TV_API_BASE]];
-    NSURLSessionConfiguration *config = [NSURLSessionConfiguration ephemeralSessionConfiguration];
-    NSURLSession *session = [NSURLSession sessionWithConfiguration:config];
+    NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration ephemeralSessionConfiguration];
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:cfg];
 
     [[session dataTaskWithURL:url
             completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
 
         if (error || !data) {
-            [self log:@"❌ Erreur chargement emotes globales: %@", error.localizedDescription];
+            [self log:@"❌ Erreur emotes globales: %@", error.localizedDescription];
             return;
         }
 
         NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-        if (!json) {
-            [self log:@"❌ JSON invalide pour les emotes globales"];
-            return;
-        }
+        if (!json) { [self log:@"❌ JSON invalide (globales)"]; return; }
 
         NSDictionary *parsed = [self parseEmoteSetJSON:json];
+        if (!parsed.count) { [self log:@"⚠️ Aucune emote globale parsée"]; return; }
+
         dispatch_barrier_async(self.emoteQueue, ^{
             self.globalEmotes = parsed;
-            [self log:@"✅ %lu emotes globales 7TV chargées", (unsigned long)parsed.count];
-            [self saveEmotesToCache:parsed forKey:kCacheGlobal];
+            [self log:@"✅ %lu emotes globales chargées depuis API", (unsigned long)parsed.count];
         });
+
+        // Sauvegarder en cache (async, non bloquant)
+        [self saveCacheForName:@"global" withEmotes:parsed];
 
     }] resume];
 }
@@ -222,12 +365,13 @@ static NSString *const kCacheGlobal = @"s7tv_cache_global";
 // ============================================================
 
 - (void)loadEmotesForChannelName:(NSString *)channelName {
-    if (!channelName || channelName.length == 0) return;
-
+    if (!channelName.length) return;
     [self log:@"Channel rejoint: %@, recherche ID Twitch...", channelName];
     self.currentChannelName = channelName;
 
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
+    // Attendre le ROOMSTATE (qui arrive ~100ms après le JOIN)
+    // pour avoir le twitchID. Timeout de sécurité à 5s.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)),
                    dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         if (self.currentChannelTwitchID) {
             [self loadEmotesForChannelTwitchID:self.currentChannelTwitchID];
@@ -238,39 +382,75 @@ static NSString *const kCacheGlobal = @"s7tv_cache_global";
 
 // ============================================================
 // MARK: - Chargement des emotes d'un channel par ID Twitch
-// API: GET https://7tv.io/v3/users/twitch/{twitch_id}
+//
+// Stratégie cache-first (Fix F):
+//   1. Lire le cache fichier IMMÉDIATEMENT (synchrone sur fileIOQueue)
+//      → les emotes sont dispo AVANT le 1er message du chat
+//   2. Si cache frais (< 30 min) → on s'arrête là, pas de réseau
+//   3. Si cache absent ou périmé → requête API en arrière-plan
+//      → mise à jour transparente pendant que le chat tourne
 // ============================================================
 
 - (void)loadEmotesForChannelTwitchID:(NSString *)twitchUserID {
-    if (!twitchUserID || twitchUserID.length == 0) return;
+    if (!twitchUserID.length) return;
 
-    if ([self.loadedChannelIDs containsObject:twitchUserID]) {
-        [self log:@"Emotes du channel %@ déjà en cache", twitchUserID];
+    // Anti-doublon concurrent: si une requête réseau est déjà en cours → ignorer
+    @synchronized(self.fetchingChannelIDs) {
+        if ([self.fetchingChannelIDs containsObject:twitchUserID]) {
+            [self log:@"⏳ Fetch déjà en cours pour channel %@, ignoré", twitchUserID];
+            return;
+        }
+    }
+
+    NSString *cacheName = [NSString stringWithFormat:@"ch_%@", twitchUserID];
+
+    // ── Étape 1: lire le cache immédiatement ──────────────────
+    NSTimeInterval cacheAge = -1;
+    NSDictionary *cached = [self loadCacheForName:cacheName age:&cacheAge];
+
+    if (cached.count) {
+        dispatch_barrier_async(self.emoteQueue, ^{
+            self.channelEmotes = cached;
+        });
+        [self log:@"⚡️ %lu emotes channel depuis cache (âge: %.0fs)",
+         (unsigned long)cached.count, cacheAge];
+    }
+
+    // ── Étape 2: décider si un refresh réseau est nécessaire ──
+    BOOL cacheIsFresh = (cached.count > 0 && cacheAge >= 0 && cacheAge < kCacheTTLChannel);
+
+    if (cacheIsFresh) {
+        [self log:@"✅ Cache channel frais (%.0fs < %.0fs), pas de refresh",
+         cacheAge, kCacheTTLChannel];
         return;
     }
 
-    [self log:@"Chargement des emotes du channel Twitch ID: %@", twitchUserID];
-
-    NSString *cacheKey = [NSString stringWithFormat:@"s7tv_cache_ch_%@", twitchUserID];
-    NSDictionary *cachedChannel = [self loadEmotesFromCacheForKey:cacheKey];
-    if (cachedChannel.count) {
-        dispatch_barrier_async(self.emoteQueue, ^{
-            self.channelEmotes = cachedChannel;
-        });
-        [self log:@"⚡️ %lu emotes channel depuis cache disque", (unsigned long)cachedChannel.count];
+    // ── Étape 3: requête API en arrière-plan ──────────────────
+    if (cacheAge > 0) {
+        [self log:@"🔄 Cache channel périmé (%.0fs) → refresh API", cacheAge];
+    } else {
+        [self log:@"🌐 Pas de cache pour channel %@ → fetch API", twitchUserID];
     }
 
-    NSString *urlStr = [NSString stringWithFormat:@"%@/users/twitch/%@",
-                        S7TV_API_BASE, twitchUserID];
+    @synchronized(self.fetchingChannelIDs) {
+        [self.fetchingChannelIDs addObject:twitchUserID];
+    }
+
+    NSString *urlStr = [NSString stringWithFormat:@"%@/users/twitch/%@", S7TV_API_BASE, twitchUserID];
     NSURL *url = [NSURL URLWithString:urlStr];
-    NSURLSessionConfiguration *config = [NSURLSessionConfiguration ephemeralSessionConfiguration];
-    NSURLSession *session = [NSURLSession sessionWithConfiguration:config];
+    NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration ephemeralSessionConfiguration];
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:cfg];
 
     [[session dataTaskWithURL:url
             completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
 
+        // Retirer de fetchingChannelIDs dans tous les cas
+        @synchronized(self.fetchingChannelIDs) {
+            [self.fetchingChannelIDs removeObject:twitchUserID];
+        }
+
         if (error || !data) {
-            [self log:@"❌ Erreur chargement emotes channel: %@", error.localizedDescription];
+            [self log:@"❌ Erreur emotes channel %@: %@", twitchUserID, error.localizedDescription];
             return;
         }
 
@@ -280,19 +460,20 @@ static NSString *const kCacheGlobal = @"s7tv_cache_global";
         id rawEmoteSet = json[@"emote_set"];
         NSDictionary *emoteSet = [rawEmoteSet isKindOfClass:[NSDictionary class]] ? rawEmoteSet : nil;
         if (!emoteSet) {
-            [self log:@"Pas d'emote_set pour ce channel (channel pas sur 7TV?)"];
+            [self log:@"Pas d'emote_set pour channel %@ (pas sur 7TV?)", twitchUserID];
             return;
         }
 
         NSDictionary *parsed = [self parseEmoteSetJSON:emoteSet];
+        if (!parsed.count) return;
 
         dispatch_barrier_async(self.emoteQueue, ^{
             self.channelEmotes = parsed;
-            [self.loadedChannelIDs addObject:twitchUserID];
-            [self log:@"✅ %lu emotes du channel chargées", (unsigned long)parsed.count];
-            NSString *ck = [NSString stringWithFormat:@"s7tv_cache_ch_%@", twitchUserID];
-            [self saveEmotesToCache:parsed forKey:ck];
+            [self log:@"✅ %lu emotes du channel chargées depuis API", (unsigned long)parsed.count];
         });
+
+        // Sauvegarder en cache (async)
+        [self saveCacheForName:cacheName withEmotes:parsed];
 
     }] resume];
 }
@@ -313,14 +494,13 @@ static NSString *const kCacheGlobal = @"s7tv_cache_global";
 
         NSString *name   = item[@"name"];
         NSString *itemID = item[@"id"];
-
-        if (![name isKindOfClass:[NSString class]])   name   = nil;
+        if (![name   isKindOfClass:[NSString class]]) name   = nil;
         if (![itemID isKindOfClass:[NSString class]]) itemID = nil;
 
         id rawData = item[@"data"];
         NSDictionary *data = [rawData isKindOfClass:[NSDictionary class]] ? rawData : nil;
 
-        id rawEmoteID = data[@"id"];
+        id rawEmoteID  = data[@"id"];
         NSString *emoteID = [rawEmoteID isKindOfClass:[NSString class]] ? rawEmoteID : itemID;
 
         id rawAnimated = data[@"animated"];
@@ -329,10 +509,9 @@ static NSString *const kCacheGlobal = @"s7tv_cache_global";
         if (!name || !emoteID) continue;
 
         SevenTVEmote *emote = [[SevenTVEmote alloc] init];
-        emote.emoteID       = emoteID;
-        emote.emoteName     = name;
-        emote.isAnimated    = animated;
-
+        emote.emoteID    = emoteID;
+        emote.emoteName  = name;
+        emote.isAnimated = animated;
         result[name] = emote;
     }
 
@@ -348,9 +527,8 @@ static NSString *const kCacheGlobal = @"s7tv_cache_global";
     if (!responseData) return;
 
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
-        NSError *error;
-        id json = [NSJSONSerialization JSONObjectWithData:responseData options:0 error:&error];
-        if (!json || error) return;
+        id json = [NSJSONSerialization JSONObjectWithData:responseData options:0 error:nil];
+        if (!json) return;
 
         NSArray *responses = [json isKindOfClass:[NSArray class]] ? json : @[json];
 
@@ -360,7 +538,6 @@ static NSString *const kCacheGlobal = @"s7tv_cache_global";
             NSString *channelLogin = nil;
             NSString *broadcasterID = [self findBroadcasterIDInObject:response
                                                          channelLogin:&channelLogin];
-
             if (!broadcasterID) continue;
 
             if (channelLogin.length > 0) {
@@ -375,8 +552,10 @@ static NSString *const kCacheGlobal = @"s7tv_cache_global";
                 NSString *oldID = self.currentChannelTwitchID;
                 dispatch_barrier_async(self.emoteQueue, ^{
                     self.channelEmotes = @{};
-                    if (oldID) [self.loadedChannelIDs removeObject:oldID];
                 });
+                @synchronized(self.fetchingChannelIDs) {
+                    if (oldID) [self.fetchingChannelIDs removeObject:oldID];
+                }
 
                 self.currentChannelTwitchID = broadcasterID;
                 [self loadEmotesForChannelTwitchID:broadcasterID];
@@ -386,12 +565,11 @@ static NSString *const kCacheGlobal = @"s7tv_cache_global";
     });
 }
 
-- (NSString *)findBroadcasterIDInObject:(id)obj
-                           channelLogin:(NSString **)outLogin {
+- (NSString *)findBroadcasterIDInObject:(id)obj channelLogin:(NSString **)outLogin {
     if ([obj isKindOfClass:[NSDictionary class]]) {
         NSDictionary *dict = obj;
-
         NSArray *channelKeys = @[@"channel", @"broadcaster", @"user", @"streamer", @"owner"];
+
         for (NSString *key in channelKeys) {
             id value = dict[key];
             if ([value isKindOfClass:[NSDictionary class]]) {
@@ -399,8 +577,8 @@ static NSString *const kCacheGlobal = @"s7tv_cache_global";
                 if ([self isTwitchUserID:foundID]) {
                     if (outLogin) {
                         id rawLogin = value[@"login"] ?: value[@"name"];
-                        NSString *login = [rawLogin isKindOfClass:[NSString class]] ? rawLogin : nil;
-                        if (login.length > 0) *outLogin = login;
+                        if ([rawLogin isKindOfClass:[NSString class]] && [rawLogin length] > 0)
+                            *outLogin = rawLogin;
                     }
                     return foundID;
                 }
@@ -410,20 +588,17 @@ static NSString *const kCacheGlobal = @"s7tv_cache_global";
         for (NSString *key in dict) {
             if ([key.lowercaseString containsString:@"broadcast"] ||
                 [key.lowercaseString containsString:@"channel"]) {
-                NSString *result = [self findBroadcasterIDInObject:dict[key]
-                                                      channelLogin:outLogin];
+                NSString *result = [self findBroadcasterIDInObject:dict[key] channelLogin:outLogin];
                 if (result) return result;
             }
         }
     }
-
     if ([obj isKindOfClass:[NSArray class]]) {
         for (id item in (NSArray *)obj) {
             NSString *result = [self findBroadcasterIDInObject:item channelLogin:outLogin];
             if (result) return result;
         }
     }
-
     return nil;
 }
 
@@ -431,73 +606,43 @@ static NSString *const kCacheGlobal = @"s7tv_cache_global";
     if (![value isKindOfClass:[NSString class]]) return NO;
     NSString *str = value;
     if (str.length < 4 || str.length > 15) return NO;
-    NSCharacterSet *nonDigits = [[NSCharacterSet decimalDigitCharacterSet] invertedSet];
-    return ([str rangeOfCharacterFromSet:nonDigits].location == NSNotFound);
+    return ([str rangeOfCharacterFromSet:
+             [[NSCharacterSet decimalDigitCharacterSet] invertedSet]].location == NSNotFound);
 }
 
 
 // ============================================================
-// MARK: - Injection des emotes 7TV dans les messages IRC
+// MARK: - Injection des emotes 7TV dans les messages IRC (Fix C v1.4)
 //
-// FIX C (v1.4): Un paquet WebSocket peut contenir plusieurs lignes IRC
-// séparées par \r\n. On traite chaque ligne indépendamment pour éviter
-// que la recherche de "emotes=" d'une ligne n'interfère avec une autre.
-//
-// Exemple de paquet multi-lignes:
-//   @badge-info=...;emotes=25:0-4 :user1 PRIVMSG #ch :Kappa\r\n
-//   @badge-info=...;badges=...    :user2 PRIVMSG #ch :ptn
-//
-// Avant: "emotes=" était trouvé dans la ligne 1, mais PRIVMSG dans la ligne 2
-//        → injection au mauvais endroit → tag incohérent → Twitch ignorait l'image.
-// Après: chaque ligne est traitée séparément → injection toujours correcte.
+// Un paquet WebSocket peut contenir plusieurs lignes IRC séparées par \r\n.
+// On traite chaque ligne indépendamment pour éviter les croisements de tags.
 // ============================================================
 
 - (NSString *)injectSevenTVEmotesIntoIRCMessage:(NSString *)rawMessage {
     if (!self.isEnabled || rawMessage.length == 0) return rawMessage;
 
-    // Séparer les lignes IRC (paquet multi-messages)
     NSArray<NSString *> *lines = [rawMessage componentsSeparatedByString:@"\r\n"];
 
-    // Optimisation: si une seule ligne, pas besoin de rejoindre
     if (lines.count == 1) {
         return [self injectIntoSingleIRCLine:rawMessage];
     }
 
     BOOL modified = NO;
-    NSMutableArray<NSString *> *processedLines = [NSMutableArray arrayWithCapacity:lines.count];
+    NSMutableArray<NSString *> *processed = [NSMutableArray arrayWithCapacity:lines.count];
 
     for (NSString *line in lines) {
-        if (line.length == 0) {
-            // Conserver les lignes vides (terminateur \r\n final)
-            [processedLines addObject:line];
-            continue;
-        }
-        NSString *processed = [self injectIntoSingleIRCLine:line];
-        if (!modified && ![processed isEqualToString:line]) {
-            modified = YES;
-        }
-        [processedLines addObject:processed];
+        if (line.length == 0) { [processed addObject:line]; continue; }
+        NSString *result = [self injectIntoSingleIRCLine:line];
+        if (!modified && ![result isEqualToString:line]) modified = YES;
+        [processed addObject:result];
     }
 
-    return modified ? [processedLines componentsJoinedByString:@"\r\n"] : rawMessage;
+    return modified ? [processed componentsJoinedByString:@"\r\n"] : rawMessage;
 }
 
-
-// ============================================================
-// MARK: - Injection sur une seule ligne IRC (logique principale)
-//
-// Format IRC Twitch:
-//   @tags :user!user@tmi.twitch.tv PRIVMSG #channel :texte du message
-//
-// On cherche les mots du texte dans notre dictionnaire d'emotes,
-// puis on injecte les positions dans le tag "emotes=" des @tags.
-// ============================================================
-
 - (NSString *)injectIntoSingleIRCLine:(NSString *)line {
-    // On ne traite que les PRIVMSG
     if (![line containsString:@"PRIVMSG"]) return line;
 
-    // ── Extraire le texte du message ──────────────────────────
     NSRange privmsgRange = [line rangeOfString:@"PRIVMSG #"];
     if (privmsgRange.location == NSNotFound) return line;
 
@@ -505,91 +650,58 @@ static NSString *const kCacheGlobal = @"s7tv_cache_global";
     NSRange colonRange = [afterPrivmsg rangeOfString:@" :"];
     if (colonRange.location == NSNotFound) return line;
 
-    NSString *messageText = [afterPrivmsg substringFromIndex:colonRange.location + 2];
-
-    // Supprimer \r\n éventuels en fin de ligne
-    messageText = [messageText stringByTrimmingCharactersInSet:
-                   [NSCharacterSet whitespaceAndNewlineCharacterSet]];
-
+    NSString *messageText = [[afterPrivmsg substringFromIndex:colonRange.location + 2]
+                             stringByTrimmingCharactersInSet:
+                             [NSCharacterSet whitespaceAndNewlineCharacterSet]];
     if (messageText.length == 0) return line;
 
-    // ── Lire les emotes connues (thread-safe) ─────────────────
-    __block NSDictionary *global;
-    __block NSDictionary *channel;
+    __block NSDictionary *global, *channel;
     dispatch_sync(self.emoteQueue, ^{
         global  = self.globalEmotes  ?: @{};
         channel = self.channelEmotes ?: @{};
     });
 
-    // ── Trouver les emotes 7TV dans le message ─────────────────
     NSMutableArray<NSString *> *emoteTags = [NSMutableArray array];
-    NSArray<NSString *> *words = [messageText componentsSeparatedByString:@" "];
     NSUInteger currentPos = 0;
 
-    for (NSString *word in words) {
-        if (word.length == 0) {
-            currentPos += 1;
-            continue;
-        }
+    for (NSString *word in [messageText componentsSeparatedByString:@" "]) {
+        if (word.length == 0) { currentPos += 1; continue; }
 
         SevenTVEmote *emote = channel[word] ?: global[word];
-
         if (emote) {
-            if (emote.isAnimated && !self.showAnimated) {
-                currentPos += word.length + 1;
-                continue;
+            if (!emote.isAnimated || self.showAnimated) {
+                NSUInteger start = currentPos;
+                NSUInteger end   = currentPos + word.length - 1;
+                NSString *tag = [NSString stringWithFormat:@"%@%@:%lu-%lu",
+                                 S7TV_EMOTE_ID_PREFIX, emote.emoteID,
+                                 (unsigned long)start, (unsigned long)end];
+                [emoteTags addObject:tag];
+                [self log:@"🎭 Emote trouvée: %@ (ID: %@) pos:%lu-%lu",
+                 word, emote.emoteID, (unsigned long)start, (unsigned long)end];
             }
-
-            NSUInteger startPos = currentPos;
-            NSUInteger endPos   = currentPos + word.length - 1;
-
-            NSString *tag = [NSString stringWithFormat:@"%@%@:%lu-%lu",
-                             S7TV_EMOTE_ID_PREFIX, emote.emoteID,
-                             (unsigned long)startPos,
-                             (unsigned long)endPos];
-            [emoteTags addObject:tag];
-
-            [self log:@"🎭 Emote trouvée: %@ (ID: %@) pos:%lu-%lu",
-             word, emote.emoteID, (unsigned long)startPos, (unsigned long)endPos];
         }
-
         currentPos += word.length + 1;
     }
 
     if (emoteTags.count == 0) return line;
 
     [self log:@"💉 Injection de %lu emote(s): %@",
-     (unsigned long)emoteTags.count,
-     [emoteTags componentsJoinedByString:@" | "]];
+     (unsigned long)emoteTags.count, [emoteTags componentsJoinedByString:@" | "]];
 
-    // ── Injecter dans le tag emotes= de CETTE ligne ───────────
-    NSString *newEmotesStr = [emoteTags componentsJoinedByString:@","];
-    NSString *result = [self buildIRCLineWithEmotes:newEmotesStr inLine:line];
+    NSString *result = [self buildIRCLineWithEmotes:[emoteTags componentsJoinedByString:@","]
+                                             inLine:line];
 
-    // Log diagnostic: les 150 premiers caractères du résultat final
     [self log:@"🏷 tag final -> %@",
      [result substringToIndex:MIN((NSUInteger)150, result.length)]];
 
     return result;
 }
 
-
-// ============================================================
-// MARK: - Construction du tag emotes= dans une ligne IRC
-//
-// Deux cas:
-//   A) La ligne contient déjà "emotes=" → on fusionne (append)
-//   B) La ligne n'a pas de "emotes="   → on insère au début des @tags
-// ============================================================
-
 - (NSString *)buildIRCLineWithEmotes:(NSString *)newEmotesStr inLine:(NSString *)line {
-
     NSRange emoteTagRange = [line rangeOfString:@"emotes="];
 
     if (emoteTagRange.location != NSNotFound) {
-        // ── Cas A: tag emotes= existant ───────────────────────
-        // On cherche la fin de la valeur: premier ';' ou ' ' après "emotes="
-        NSUInteger insertPos = emoteTagRange.location + emoteTagRange.length;
+        NSUInteger insertPos  = emoteTagRange.location + emoteTagRange.length;
         NSString *afterEmotes = [line substringFromIndex:insertPos];
 
         NSRange sc = [afterEmotes rangeOfString:@";"];
@@ -602,7 +714,6 @@ static NSString *const kCacheGlobal = @"s7tv_cache_global";
         NSString *existingEmotes = [afterEmotes substringToIndex:limit];
         NSString *suffix         = [afterEmotes substringFromIndex:limit];
 
-        // Si la valeur existante est vide (emotes=;) on ne met pas de virgule
         NSString *combined = existingEmotes.length > 0
             ? [NSString stringWithFormat:@"%@,%@", existingEmotes, newEmotesStr]
             : newEmotesStr;
@@ -610,15 +721,11 @@ static NSString *const kCacheGlobal = @"s7tv_cache_global";
         return [NSString stringWithFormat:@"%@%@%@", prefix, combined, suffix];
 
     } else {
-        // ── Cas B: pas de tag emotes= → on l'insère en tête des @tags ──
         if ([line hasPrefix:@"@"]) {
-            // "@badge-info=..." → "@emotes=XXX;badge-info=..."
-            NSString *withoutAt = [line substringFromIndex:1];
-            return [NSString stringWithFormat:@"@emotes=%@;%@", newEmotesStr, withoutAt];
-        } else {
-            // Ligne sans @ (inhabituel mais géré)
-            return [NSString stringWithFormat:@"@emotes=%@ %@", newEmotesStr, line];
+            return [NSString stringWithFormat:@"@emotes=%@;%@", newEmotesStr,
+                    [line substringFromIndex:1]];
         }
+        return [NSString stringWithFormat:@"@emotes=%@ %@", newEmotesStr, line];
     }
 }
 
@@ -637,9 +744,8 @@ static NSString *const kCacheGlobal = @"s7tv_cache_global";
 
 - (NSURL *)cdnURLForEmote:(SevenTVEmote *)emote {
     if (!emote) return nil;
-    NSString *urlStr = [NSString stringWithFormat:@"%@/%@/4x.webp",
-                        S7TV_CDN_BASE, emote.emoteID];
-    return [NSURL URLWithString:urlStr];
+    return [NSURL URLWithString:
+            [NSString stringWithFormat:@"%@/%@/4x.webp", S7TV_CDN_BASE, emote.emoteID]];
 }
 
 
@@ -650,47 +756,35 @@ static NSString *const kCacheGlobal = @"s7tv_cache_global";
 - (void)addSettingsButton {
     dispatch_async(dispatch_get_main_queue(), ^{
         UIWindow *window = nil;
-
         if (@available(iOS 15.0, *)) {
             for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
                 if ([scene isKindOfClass:[UIWindowScene class]]) {
-                    UIWindowScene *windowScene = (UIWindowScene *)scene;
-                    for (UIWindow *w in windowScene.windows) {
+                    for (UIWindow *w in ((UIWindowScene *)scene).windows)
                         if (w.isKeyWindow) { window = w; break; }
-                    }
                 }
             }
         }
-
         if (!window) window = [UIApplication sharedApplication].windows.firstObject;
         if (!window) return;
 
-        CGFloat size = 44.0;
-        CGFloat margin = 16.0;
-        CGFloat x = window.bounds.size.width - size - margin;
-        CGFloat y = window.bounds.size.height - size - margin - 80.0;
-
+        CGFloat size = 44.0, margin = 16.0;
         UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
-        btn.frame = CGRectMake(x, y, size, size);
-        btn.backgroundColor = [UIColor colorWithRed:0.35 green:0.13 blue:0.86 alpha:0.88];
-        btn.layer.cornerRadius = size / 2.0;
-        btn.layer.shadowColor  = [UIColor blackColor].CGColor;
-        btn.layer.shadowOffset = CGSizeMake(0, 2);
-        btn.layer.shadowRadius = 4;
+        btn.frame = CGRectMake(window.bounds.size.width  - size - margin,
+                               window.bounds.size.height - size - margin - 80.0,
+                               size, size);
+        btn.backgroundColor     = [UIColor colorWithRed:0.35 green:0.13 blue:0.86 alpha:0.88];
+        btn.layer.cornerRadius  = size / 2.0;
+        btn.layer.shadowColor   = [UIColor blackColor].CGColor;
+        btn.layer.shadowOffset  = CGSizeMake(0, 2);
+        btn.layer.shadowRadius  = 4;
         btn.layer.shadowOpacity = 0.4;
-
         [btn setTitle:@"7TV" forState:UIControlStateNormal];
         btn.titleLabel.font = [UIFont boldSystemFontOfSize:11];
         [btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-
-        [btn addTarget:self
-                action:@selector(settingsButtonTapped:)
+        [btn addTarget:self action:@selector(settingsButtonTapped:)
       forControlEvents:UIControlEventTouchUpInside];
-
-        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc]
-            initWithTarget:self action:@selector(handleSettingsButtonDrag:)];
-        [btn addGestureRecognizer:pan];
-
+        [btn addGestureRecognizer:[[UIPanGestureRecognizer alloc]
+            initWithTarget:self action:@selector(handleSettingsButtonDrag:)]];
         [window addSubview:btn];
         self.settingsButton = btn;
     });
@@ -698,59 +792,41 @@ static NSString *const kCacheGlobal = @"s7tv_cache_global";
 
 - (void)settingsButtonTapped:(UIButton *)sender {
     dispatch_async(dispatch_get_main_queue(), ^{
-        SevenTVSettingsController *settingsVC = [[SevenTVSettingsController alloc] init];
-        UINavigationController *navVC = [[UINavigationController alloc]
-                                         initWithRootViewController:settingsVC];
-        UIViewController *topVC = [self topViewController];
-        if (topVC) {
-            [topVC presentViewController:navVC animated:YES completion:nil];
-        }
+        SevenTVSettingsController *vc = [[SevenTVSettingsController alloc] init];
+        UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
+        [[self topViewController] presentViewController:nav animated:YES completion:nil];
     });
 }
 
 - (void)handleSettingsButtonDrag:(UIPanGestureRecognizer *)gesture {
-    UIView *btn    = gesture.view;
-    UIView *parent = btn.superview;
+    UIView *btn = gesture.view, *parent = btn.superview;
     if (!parent) return;
-
-    CGPoint translation = [gesture translationInView:parent];
-    CGPoint newCenter   = CGPointMake(btn.center.x + translation.x,
-                                      btn.center.y + translation.y);
-
-    CGFloat halfW = btn.bounds.size.width  / 2.0;
-    CGFloat halfH = btn.bounds.size.height / 2.0;
-    newCenter.x = MAX(halfW, MIN(parent.bounds.size.width  - halfW, newCenter.x));
-    newCenter.y = MAX(halfH, MIN(parent.bounds.size.height - halfH, newCenter.y));
-
-    btn.center = newCenter;
+    CGPoint t = [gesture translationInView:parent];
+    CGFloat hw = btn.bounds.size.width/2, hh = btn.bounds.size.height/2;
+    btn.center = CGPointMake(
+        MAX(hw, MIN(parent.bounds.size.width  - hw, btn.center.x + t.x)),
+        MAX(hh, MIN(parent.bounds.size.height - hh, btn.center.y + t.y)));
     [gesture setTranslation:CGPointZero inView:parent];
 }
 
 - (UIViewController *)topViewController {
     UIWindow *window = nil;
-
     if (@available(iOS 15.0, *)) {
         for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-            if ([scene isKindOfClass:[UIWindowScene class]]) {
-                UIWindowScene *ws = (UIWindowScene *)scene;
-                for (UIWindow *w in ws.windows) {
+            if ([scene isKindOfClass:[UIWindowScene class]])
+                for (UIWindow *w in ((UIWindowScene *)scene).windows)
                     if (w.isKeyWindow) { window = w; break; }
-                }
-            }
         }
     }
     if (!window) window = [UIApplication sharedApplication].windows.firstObject;
-
     UIViewController *vc = window.rootViewController;
-    while (vc.presentedViewController) {
-        vc = vc.presentedViewController;
-    }
+    while (vc.presentedViewController) vc = vc.presentedViewController;
     return vc;
 }
 
 
 // ============================================================
-// MARK: - Logging (buffer in-app + console optionnelle)
+// MARK: - Logging
 // ============================================================
 
 - (void)log:(NSString *)format, ... {
@@ -761,26 +837,23 @@ static NSString *const kCacheGlobal = @"s7tv_cache_global";
 
     NSDateFormatter *fmt = [[NSDateFormatter alloc] init];
     fmt.dateFormat = @"HH:mm:ss.SSS";
-    NSString *timestamp = [fmt stringFromDate:[NSDate date]];
-    NSString *line = [NSString stringWithFormat:@"[%@] %@", timestamp, msg];
+    NSString *line = [NSString stringWithFormat:@"[%@] %@",
+                      [fmt stringFromDate:[NSDate date]], msg];
 
     [self.logLock lock];
     [self.logBuffer addObject:line];
     if (self.logBuffer.count > S7TV_LOG_BUFFER_MAX) {
-        NSUInteger excess = self.logBuffer.count - S7TV_LOG_BUFFER_MAX;
-        [self.logBuffer removeObjectsInRange:NSMakeRange(0, excess)];
+        [self.logBuffer removeObjectsInRange:
+         NSMakeRange(0, self.logBuffer.count - S7TV_LOG_BUFFER_MAX)];
     }
     [self.logLock unlock];
 
-    if (self.debugLogging) {
-        NSLog(@"[TwitchSevenTV] %@", msg);
-    }
+    if (self.debugLogging) NSLog(@"[TwitchSevenTV] %@", msg);
 
     dispatch_async(dispatch_get_main_queue(), ^{
         [[NSNotificationCenter defaultCenter]
             postNotificationName:S7TVLogsDidUpdateNotification
-                          object:self
-                        userInfo:@{@"line": line}];
+                          object:self userInfo:@{@"line": line}];
     });
 }
 
@@ -795,12 +868,10 @@ static NSString *const kCacheGlobal = @"s7tv_cache_global";
     [self.logLock lock];
     [self.logBuffer removeAllObjects];
     [self.logLock unlock];
-
     dispatch_async(dispatch_get_main_queue(), ^{
         [[NSNotificationCenter defaultCenter]
             postNotificationName:S7TVLogsDidUpdateNotification
-                          object:self
-                        userInfo:@{@"cleared": @YES}];
+                          object:self userInfo:@{@"cleared": @YES}];
     });
 }
 
