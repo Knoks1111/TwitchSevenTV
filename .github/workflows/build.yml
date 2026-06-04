@@ -391,7 +391,7 @@ jobs:
         with:
           name: TwitchSevenTV-v${{ github.run_number }}-Patched-IPA
           path: ${{ env.IPA_NAME }}
-          retention-days: 30
+          retention-days: 1
 
       - name: 📤 Sauvegarder le .deb
         if: env.DEB_PATH != ''
@@ -399,14 +399,14 @@ jobs:
         with:
           name: TwitchSevenTV-v${{ github.run_number }}-deb
           path: ${{ env.DEB_PATH }}
-          retention-days: 30
+          retention-days: 1
 
       - name: 📤 Sauvegarder la .dylib seule
         uses: actions/upload-artifact@v4
         with:
           name: TwitchSevenTV-v${{ github.run_number }}-dylib
           path: ${{ env.DYLIB_PATH }}
-          retention-days: 30
+          retention-days: 1
 
       - name: ✅ Résumé
         run: |
