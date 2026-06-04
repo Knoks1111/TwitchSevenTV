@@ -1297,7 +1297,7 @@ static const CGFloat kCellSize      = 52.0;
     NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration ephemeralSessionConfiguration];
     cfg.URLCache = [NSURLCache sharedURLCache];
     NSURLSession *sess = [NSURLSession sessionWithConfiguration:cfg];
-    [sess dataTaskWithURL:emoteURL completionHandler:^(NSData *data, NSURLResponse *r, NSError *e) {
+    [[sess dataTaskWithURL:emoteURL completionHandler:^(NSData *data, NSURLResponse *r, NSError *e) {
         if (!data) return;
         UIImage *img = [UIImage imageWithData:data];
         dispatch_async(dispatch_get_main_queue(), ^{
