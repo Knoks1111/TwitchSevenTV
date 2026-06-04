@@ -35,8 +35,12 @@ jobs:
               print(a['id'])
           ")
 
-            COUNT=$(echo "$IDS" | grep -c . 2>/dev/null || echo 0)
-            [ "$COUNT" -eq 0 ] && break
+            # Si aucun ID retourné, on arrête
+            if [ -z "$(echo "$IDS" | tr -d '[:space:]')" ]; then
+              break
+            fi
+
+            COUNT=$(echo "$IDS" | wc -l | tr -d ' ')
 
             for ID in $IDS; do
               HTTP=$(curl --silent --output /dev/null --write-out "%{http_code}" \
