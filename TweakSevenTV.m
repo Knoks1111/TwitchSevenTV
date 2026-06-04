@@ -601,10 +601,12 @@ static void s7tv_injectButtonInTextField(UITextField *tf) {
                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
     dispatch_async(dispatch_get_main_queue(), ^{
-        UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
-        btn.frame = CGRectMake(0, 0, 32, 32);
+        // Remonter d'un niveau pour trouver la barre de saisie complète
+        // (qui contient aussi les boutons natifs Twitch)
+        UIView *bar = tf.superview ?: tf;
 
-        // Icône SF Symbol "sparkles" violet — identique au screen de référence
+        UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
+
         UIImageSymbolConfiguration *symCfg = [UIImageSymbolConfiguration
             configurationWithPointSize:15 weight:UIImageSymbolWeightMedium];
         UIImage *icon = [UIImage systemImageNamed:@"sparkles" withConfiguration:symCfg];
@@ -618,73 +620,110 @@ static void s7tv_injectButtonInTextField(UITextField *tf) {
             btn.titleLabel.font = [UIFont boldSystemFontOfSize:13];
         }
 
-        // Stocker le TextField sur le bouton pour le callback
         objc_setAssociatedObject(btn, &kS7TVTextFieldTagged, tf,
                                  OBJC_ASSOCIATION_ASSIGN);
-
         [btn addTarget:[SevenTVManager sharedManager]
                 action:@selector(s7tv_emoteButtonTappedForButton:)
       forControlEvents:UIControlEventTouchUpInside];
 
-        // Wrapper avec padding
-        UIView *wrapper = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 36, 32)];
-        btn.center = CGPointMake(18, 16);
-        [wrapper addSubview:btn];
+        // Positionner le bouton à GAUCHE du TextField dans la barre parent
+        CGRect tfInBar = [tf convertRect:tf.bounds toView:bar];
+        CGFloat btnSize = 32.0;
+        CGFloat btnX = tfInBar.origin.x - btnSize - 6;
+        if (btnX < 2) btnX = 2;
+        CGFloat btnY = CGRectGetMidY(tfInBar) - btnSize / 2.0;
+        btn.frame = CGRectMake(btnX, btnY, btnSize, btnSize);
+        btn.autoresizingMask = UIViewAutoresizingFlexibleRightMargin |
+                               UIViewAutoresizingFlexibleTopMargin   |
+                               UIViewAutoresizingFlexibleBottomMargin;
+        btn.tag = 0x7777; // tag unique pour éviter les doublons
 
-        tf.rightView     = wrapper;
-        tf.rightViewMode = UITextFieldViewModeAlways;
+        // Vérifier qu'on n'a pas déjà ajouté le bouton
+        BOOL alreadyAdded = NO;
+        for (UIView *sub in bar.subviews) {
+            if (sub.tag == 0x7777) { alreadyAdded = YES; break; }
+        }
+        if (!alreadyAdded) {
+            [bar addSubview:btn];
+            [bar bringSubviewToFront:btn];
+        }
 
-        [[SevenTVManager sharedManager] log:@"🎹 Bouton 7TV injecté (placeholder: \"%@\")",
-         tf.placeholder ?: @"(vide)"];
+        [[SevenTVManager sharedManager] log:@"🎹 Bouton 7TV injecté dans bar:%@ x=%.0f (ph:\"%@\")",
+         NSStringFromClass([bar class]), btnX, tf.placeholder ?: @"(vide)"];
     });
 }
 
-// Timer de scan — tourne à ~2fps, s'arrête après 60s sans trouver de champ
-// (évite de tourner indéfiniment en dehors du chat)
-static CADisplayLink *s_chatScanLink = nil;
-static NSInteger      s_chatScanMiss = 0;
+// ── Objet cible pour NSTimer (évite les fonctions C comme target) ────────────
+@interface S7TVChatScanner : NSObject
++ (instancetype)shared;
+- (void)startScan;
+- (void)scanTick;
+@end
+
+@implementation S7TVChatScanner {
+    NSTimer  *_timer;
+    NSInteger _missCount;
+}
+
++ (instancetype)shared {
+    static S7TVChatScanner *s = nil;
+    static dispatch_once_t t;
+    dispatch_once(&t, ^{ s = [[S7TVChatScanner alloc] init]; });
+    return s;
+}
+
+- (void)startScan {
+    if (_timer) return;
+    _missCount = 0;
+    _timer = [NSTimer scheduledTimerWithTimeInterval:0.5
+                                             target:self
+                                           selector:@selector(scanTick)
+                                           userInfo:nil
+                                            repeats:YES];
+}
+
+- (void)scanTick {
+    UIWindow *keyWindow = nil;
+    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+        if ([scene isKindOfClass:[UIWindowScene class]])
+            for (UIWindow *w in ((UIWindowScene *)scene).windows)
+                if (w.isKeyWindow) { keyWindow = w; break; }
+    }
+    if (!keyWindow) keyWindow = [UIApplication sharedApplication].windows.firstObject;
+    if (!keyWindow) return;
+
+    NSMutableArray<UITextField *> *fields = [NSMutableArray array];
+    s7tv_findTextFields(keyWindow, fields);
+
+    BOOL found = NO;
+    for (UITextField *tf in fields) {
+        if (s7tv_isChatTextField(tf)) {
+            s7tv_injectButtonInTextField(tf);
+            found = YES;
+            _missCount = 0;
+        }
+    }
+
+    if (!found) {
+        _missCount++;
+        // Après 60s sans trouver → pause, relance dans 10s
+        if (_missCount > 120) {
+            [_timer invalidate];
+            _timer = nil;
+            _missCount = 0;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 10LL * NSEC_PER_SEC),
+                           dispatch_get_main_queue(), ^{
+                [[S7TVChatScanner shared] startScan];
+            });
+        }
+    }
+}
+
+@end
 
 static void s7tv_startChatBarScan(void) {
-    if (s_chatScanLink) return;
     dispatch_async(dispatch_get_main_queue(), ^{
-        s_chatScanLink = [CADisplayLink displayLinkWithTarget:[NSBlockOperation blockOperationWithBlock:^{
-            UIWindow *keyWindow = nil;
-            for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-                if ([scene isKindOfClass:[UIWindowScene class]])
-                    for (UIWindow *w in ((UIWindowScene *)scene).windows)
-                        if (w.isKeyWindow) { keyWindow = w; break; }
-            }
-            if (!keyWindow) keyWindow = [UIApplication sharedApplication].windows.firstObject;
-            if (!keyWindow) return;
-
-            NSMutableArray<UITextField *> *fields = [NSMutableArray array];
-            s7tv_findTextFields(keyWindow, fields);
-
-            BOOL found = NO;
-            for (UITextField *tf in fields) {
-                if (s7tv_isChatTextField(tf)) {
-                    s7tv_injectButtonInTextField(tf);
-                    found = YES;
-                    s_chatScanMiss = 0;
-                }
-            }
-            if (!found) {
-                s_chatScanMiss++;
-                // Après 120 ticks sans trouver (~60s à 2fps) → pause
-                if (s_chatScanMiss > 120) {
-                    [s_chatScanLink invalidate];
-                    s_chatScanLink = nil;
-                    s_chatScanMiss = 0;
-                    // Relancer après 10s (l'utilisateur navigue peut-être)
-                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 10LL * NSEC_PER_SEC),
-                                   dispatch_get_main_queue(), ^{
-                        s7tv_startChatBarScan();
-                    });
-                }
-            }
-        }] selector:@selector(main)];
-        s_chatScanLink.preferredFramesPerSecond = 2;
-        [s_chatScanLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+        [[S7TVChatScanner shared] startScan];
     });
 }
 
