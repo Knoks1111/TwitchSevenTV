@@ -15,7 +15,8 @@ env:
   THEOS: ${{ github.workspace }}/theos
 
 permissions:
-  actions: write   # nécessaire pour supprimer les artifacts via l'API
+  actions: write   # supprimer les artifacts
+  contents: read   # checkout du repo
 
 jobs:
   build:
