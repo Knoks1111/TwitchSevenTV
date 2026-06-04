@@ -38,6 +38,11 @@ extern NSString *const S7TVLogsDidUpdateNotification;
 @property (nonatomic, strong) NSString *emoteID;   // ID 7TV (ex: "63071bb9464de28875c52531")
 @property (nonatomic, strong) NSString *emoteName;  // Nom (ex: "KEKW")
 @property (nonatomic, assign) BOOL isAnimated;      // Si c'est un GIF/animé
+// Dimensions 1x en points (extraites de data.host.files dans l'API 7TV).
+// Correspondent à la taille d'affichage cible dans le chat.
+// 0 si non disponibles (anciennes entrées cache sans dimensions).
+@property (nonatomic, assign) NSInteger width;
+@property (nonatomic, assign) NSInteger height;
 @end
 
 

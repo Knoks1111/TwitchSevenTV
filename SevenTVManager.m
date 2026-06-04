@@ -234,6 +234,10 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
         e.emoteName  = name;
         e.emoteID    = emoteID;
         e.isAnimated = [d[@"a"] boolValue];
+        // Dimensions 1x (optionnel — absent dans les anciennes entrées cache)
+        id dw = d[@"w"], dh = d[@"h"];
+        if ([dw isKindOfClass:[NSNumber class]]) e.width  = [dw integerValue];
+        if ([dh isKindOfClass:[NSNumber class]]) e.height = [dh integerValue];
         result[name] = e;
     }
 
@@ -251,7 +255,13 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
     NSMutableDictionary *emotesDict = [NSMutableDictionary dictionaryWithCapacity:emotes.count];
     for (NSString *name in emotes) {
         SevenTVEmote *e = emotes[name];
-        emotesDict[name] = @{ @"id": e.emoteID, @"a": @(e.isAnimated) };
+        // Inclure les dimensions si disponibles (rétrocompatible: champ absent = 0)
+        if (e.width > 0 && e.height > 0) {
+            emotesDict[name] = @{ @"id": e.emoteID, @"a": @(e.isAnimated),
+                                  @"w": @(e.width),  @"h": @(e.height) };
+        } else {
+            emotesDict[name] = @{ @"id": e.emoteID, @"a": @(e.isAnimated) };
+        }
     }
 
     NSDictionary *root = @{
@@ -717,10 +727,44 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
 
         if (!name || !emoteID) continue;
 
+        // ── Dimensions 1x depuis data.host.files ──────────────────────────────
+        // L'API 7TV v3 retourne un tableau de fichiers par taille (1x, 2x, 3x, 4x).
+        // On prend le fichier "1x" : c'est la taille d'affichage cible en points.
+        // Exemple pour KEKW : 1x = 28×28pt, 4x = 112×112px.
+        NSInteger emoteW = 0, emoteH = 0;
+        id rawHost = data[@"host"];
+        if ([rawHost isKindOfClass:[NSDictionary class]]) {
+            id rawFiles = rawHost[@"files"];
+            if ([rawFiles isKindOfClass:[NSArray class]]) {
+                for (NSDictionary *file in (NSArray *)rawFiles) {
+                    if (![file isKindOfClass:[NSDictionary class]]) continue;
+                    NSString *fname = file[@"name"];
+                    // "1x.webp", "1x.avif", "1x.gif" → premier fichier 1x trouvé
+                    if ([fname hasPrefix:@"1x"]) {
+                        id fw = file[@"width"], fh = file[@"height"];
+                        if ([fw isKindOfClass:[NSNumber class]]) emoteW = [fw integerValue];
+                        if ([fh isKindOfClass:[NSNumber class]]) emoteH = [fh integerValue];
+                        break;
+                    }
+                }
+                // Fallback: si aucun fichier "1x" → utiliser le premier disponible
+                if (emoteW == 0 && [(NSArray *)rawFiles count] > 0) {
+                    NSDictionary *first = ((NSArray *)rawFiles)[0];
+                    if ([first isKindOfClass:[NSDictionary class]]) {
+                        id fw = first[@"width"], fh = first[@"height"];
+                        if ([fw isKindOfClass:[NSNumber class]]) emoteW = [fw integerValue];
+                        if ([fh isKindOfClass:[NSNumber class]]) emoteH = [fh integerValue];
+                    }
+                }
+            }
+        }
+
         SevenTVEmote *emote = [[SevenTVEmote alloc] init];
         emote.emoteID    = emoteID;
         emote.emoteName  = name;
         emote.isAnimated = animated;
+        emote.width      = emoteW;
+        emote.height     = emoteH;
         result[name] = emote;
     }
 

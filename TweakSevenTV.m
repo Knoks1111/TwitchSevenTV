@@ -162,32 +162,78 @@ static const char kS7TVReloadGuard = 0;
 
     void (^doWork)(void) = ^{
 
-        // ── 1. Ajustement largeur pour emotes rectangulaires ─────────────────
-        if (ratio >= 1.15) {
-            CGFloat h = self.bounds.size.height > 0
-                ? self.bounds.size.height : viewH;
-            if (h > 0) {
-                CGFloat targetW = ceilf(h * ratio);
-                BOOL found = NO;
-                for (NSLayoutConstraint *c in self.constraints) {
-                    if (c.firstAttribute == NSLayoutAttributeWidth && !c.secondItem) {
-                        c.constant = targetW; found = YES; break;
+        // ── 1. Taille cible depuis les dimensions natives de l'image ──────────
+        //
+        // On charge toujours le 4x.webp depuis cdn.7tv.app.
+        // "4x" = 4 × la taille d'affichage 1x en points.
+        // → targetW = imgW / 4,  targetH = imgH / 4
+        //
+        // Exemples :
+        //   KEKW  112×112px → 28×28pt  (carré, même taille que les emotes Twitch)
+        //   Pog   298×112px → 74×28pt  (large, ratio > 1 → était tronqué avant)
+        //   monkaS 84×84px  → 21×21pt  (petite, garde les proportions)
+        //
+        // Garde-fou : si l'image n'est pas réellement en 4x (emote très petite
+        // dont la "4x" est en fait une 2x), on tombe dans le fallback viewH.
+        const CGFloat kCDNScale = 4.0;
+        CGFloat targetW = ceilf(imgW / kCDNScale);
+        CGFloat targetH = ceilf(imgH / kCDNScale);
+
+        // Fallback si le résultat est hors plage raisonnable pour une emote de chat
+        if (targetH < 10 || targetH > 60) {
+            targetH = viewH > 0 ? viewH : 28.0;
+            targetW = ceilf(targetH * ratio);
+        }
+
+        // ── Appliquer width ET height (avant: seulement width si ratio > 1.15) ─
+        BOOL widthFixed = NO, heightFixed = NO;
+
+        for (NSLayoutConstraint *c in self.constraints) {
+            if (c.secondItem) continue;
+            if (c.firstAttribute == NSLayoutAttributeWidth)  { c.constant = targetW; widthFixed  = YES; }
+            if (c.firstAttribute == NSLayoutAttributeHeight) { c.constant = targetH; heightFixed = YES; }
+        }
+        for (NSLayoutConstraint *c in (self.superview.constraints ?: @[])) {
+            if (c.firstItem != self && c.secondItem != self) continue;
+            NSLayoutAttribute a1 = c.firstAttribute, a2 = c.secondAttribute;
+            if (a1 == NSLayoutAttributeWidth  || a2 == NSLayoutAttributeWidth)  { c.constant = targetW; widthFixed  = YES; }
+            if (a1 == NSLayoutAttributeHeight || a2 == NSLayoutAttributeHeight) { c.constant = targetH; heightFixed = YES; }
+        }
+        if (!widthFixed || !heightFixed) {
+            CGRect f = self.frame;
+            if (!widthFixed)  f.size.width  = targetW;
+            if (!heightFixed) f.size.height = targetH;
+            self.frame = f;
+        }
+        self.contentMode = UIViewContentModeScaleAspectFit;
+
+        // ── Corriger les bounds du NSTextAttachment avant le reset ────────────
+        // Si Twitch a mis une taille fixe sur l'attachment (ex: 28×28 par défaut
+        // pour toutes les emotes), on la corrige ICI, avant que CoreText recalcule
+        // le layout au reset de l'attributedText → résultat net: bonne taille dès
+        // le re-render, pas de décalage visible.
+        {
+            UIView *scan = capturedSuper;
+            for (int d = 0; d < 12 && scan; d++, scan = scan.superview) {
+                if (![scan isKindOfClass:[UITextView class]]) continue;
+                UITextView *tv = (UITextView *)scan;
+                NSAttributedString *attrStr = tv.attributedText;
+                if (!attrStr.length) break;
+                [attrStr enumerateAttribute:NSAttachmentAttributeName
+                                    inRange:NSMakeRange(0, attrStr.length)
+                                    options:0
+                                 usingBlock:^(id att, NSRange r, BOOL *stop) {
+                    if (![att isKindOfClass:[NSTextAttachment class]]) return;
+                    NSTextAttachment *a = (NSTextAttachment *)att;
+                    // Identifier l'attachment par son image (identité d'objet)
+                    if (a.image == image) {
+                        // baseline offset: -4pt pour aligner le bas de l'emote
+                        // avec la ligne de texte (convention UIKit standard)
+                        a.bounds = CGRectMake(0, -4.0, targetW, targetH);
+                        *stop = YES;
                     }
-                }
-                if (!found) {
-                    for (NSLayoutConstraint *c in self.superview.constraints) {
-                        if ((c.firstItem == self || c.secondItem == self) &&
-                            (c.firstAttribute == NSLayoutAttributeWidth ||
-                             c.secondAttribute == NSLayoutAttributeWidth) &&
-                            !c.secondItem) {
-                            c.constant = targetW; found = YES; break;
-                        }
-                    }
-                }
-                if (!found) {
-                    CGRect f = self.frame; f.size.width = targetW; self.frame = f;
-                }
-                self.contentMode = UIViewContentModeScaleAspectFit;
+                }];
+                break;
             }
         }
 
