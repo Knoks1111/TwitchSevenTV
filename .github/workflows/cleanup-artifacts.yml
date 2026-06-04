@@ -20,7 +20,6 @@ jobs:
           REPO="${{ github.repository }}"
           TARGET_WORKFLOW="Build TwitchSevenTV + Inject into IPA"
 
-          # Récupérer l'ID du workflow par son nom
           WORKFLOW_ID=$(curl --silent \
             --header "Authorization: Bearer $GH_TOKEN" \
             --header "Accept: application/vnd.github+json" \
@@ -56,26 +55,20 @@ jobs:
               print(r['id'])
           ")
 
-            if [ -z "$(echo "$RUNS" | tr -d '[:space:]')" ]; then
-              break
-            fi
-
+            if [ -z "$(echo "$RUNS" | tr -d '[:space:]')" ]; then break; fi
             COUNT=$(echo "$RUNS" | wc -l | tr -d ' ')
 
             for RUN_ID in $RUNS; do
-              # Garder le tout premier run (le plus récent, retourné en premier par l'API)
               if [ "$FIRST" = "true" ]; then
                 echo "  ⭐ Conservé (plus récent): $RUN_ID"
                 FIRST=false
                 continue
               fi
-
               HTTP=$(curl --silent --output /dev/null --write-out "%{http_code}" \
                 --request DELETE \
                 --header "Authorization: Bearer $GH_TOKEN" \
                 --header "Accept: application/vnd.github+json" \
                 "https://api.github.com/repos/${REPO}/actions/runs/${RUN_ID}")
-
               if [ "$HTTP" = "204" ]; then
                 DELETED=$((DELETED+1))
                 echo "  ✅ Run supprimé: $RUN_ID"
@@ -88,5 +81,72 @@ jobs:
             PAGE=$((PAGE+1))
           done
 
-          echo ""
-          echo "✅ Terminé — $DELETED run(s) supprimé(s) (artifacts inclus)"
+          echo "✅ Terminé — $DELETED run(s) supprimé(s) pour Build"
+
+      - name: 🗑️ Supprimer les anciens runs de ce workflow (cleanup)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CURRENT_RUN_ID: ${{ github.run_id }}
+        run: |
+          echo "🧹 Nettoyage des anciens runs du workflow cleanup..."
+          REPO="${{ github.repository }}"
+          TARGET_WORKFLOW="🧹 Supprimer tous les artifacts"
+
+          WORKFLOW_ID=$(curl --silent \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${REPO}/actions/workflows" | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          for w in data.get('workflows', []):
+              if w['name'] == '${TARGET_WORKFLOW}':
+                  print(w['id'])
+                  break
+          ")
+
+          if [ -z "$WORKFLOW_ID" ]; then
+            echo "❌ Workflow cleanup introuvable"
+            exit 1
+          fi
+
+          PAGE=1
+          DELETED=0
+
+          while true; do
+            RUNS=$(curl --silent \
+              --header "Authorization: Bearer $GH_TOKEN" \
+              --header "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${REPO}/actions/workflows/${WORKFLOW_ID}/runs?per_page=100&page=${PAGE}" | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          for r in data.get('workflow_runs', []):
+              print(r['id'])
+          ")
+
+            if [ -z "$(echo "$RUNS" | tr -d '[:space:]')" ]; then break; fi
+            COUNT=$(echo "$RUNS" | wc -l | tr -d ' ')
+
+            for RUN_ID in $RUNS; do
+              # Garder le run en cours
+              if [ "$RUN_ID" = "$CURRENT_RUN_ID" ]; then
+                echo "  ⭐ Conservé (run en cours): $RUN_ID"
+                continue
+              fi
+              HTTP=$(curl --silent --output /dev/null --write-out "%{http_code}" \
+                --request DELETE \
+                --header "Authorization: Bearer $GH_TOKEN" \
+                --header "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/${REPO}/actions/runs/${RUN_ID}")
+              if [ "$HTTP" = "204" ]; then
+                DELETED=$((DELETED+1))
+                echo "  ✅ Run supprimé: $RUN_ID"
+              else
+                echo "  ⚠️  Échec ($HTTP): $RUN_ID"
+              fi
+            done
+
+            [ "$COUNT" -lt 100 ] && break
+            PAGE=$((PAGE+1))
+          done
+
+          echo "✅ Terminé — $DELETED ancien(s) run(s) cleanup supprimé(s)"
