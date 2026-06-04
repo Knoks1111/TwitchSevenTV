@@ -1,15 +1,42 @@
 /*
  * TweakSevenTV.m  —  Substrate-FREE version
  *
- * CORRECTIFS v1.2:
- *   Fix A — ROOMSTATE: extraire le room-id directement depuis IRC
- *            (plus fiable que le hook GQL). Twitch envoie ROOMSTATE
- *            immédiatement après JOIN avec room-id=XXXXX.
+ * CORRECTIFS v1.4:
+ *   Fix A — ROOMSTATE: room-id depuis IRC
+ *   Fix B — URLProtocol: swizzle protocolClasses
  *
- *   Fix B — URLProtocol: swizzler protocolClasses sur
- *            NSURLSessionConfiguration pour que SevenTVURLProtocol
- *            intercepte les requêtes de TOUTES les sessions Twitch,
- *            y compris celles avec une config custom.
+ * CORRECTIFS v2.0 (réécriture complète):
+ *
+ *   Fix BADGES — Système de tag sur UIImage
+ *     Avant : s7tv_setImage: traitait TOUTES les UIImageViews (badges,
+ *     avatars, thumbnails…) dont la hauteur était entre 10 et 80pt.
+ *     Il réinitialisait l'attributedText → détruisait et recréait les
+ *     UIImageViews de badges → environ 50% disparaissaient.
+ *     Après : dans s7tv_imageWithData:, on pose un associated object
+ *     kS7TVIsOurEmoteKey sur CHAQUE UIImage décodée depuis un WebP ou
+ *     GIF provenant du CDN 7TV. Dans s7tv_setImage:, on ignore tout
+ *     ce qui n'a pas ce tag → badges et autres assets Twitch intacts.
+ *
+ *   Fix ANIMATIONS (voie UIImageView) — startAnimating
+ *     Avant : CADisplayLink avec selector s7tv_displayLinkTick:. Causait
+ *     un retain cycle (UIImageView ↔ CADisplayLink via associated object)
+ *     ET pouvait planter si la sous-classe concrète de Twitch ne dispatche
+ *     pas le sélecteur depuis la bonne IMP.
+ *     Après : on utilise UIImageView.animationImages + startAnimating.
+ *     UIKit gère l'animation nativement (CAKeyframeAnimation sur
+ *     layer.contents), pas de retain cycle, pas de crash de selector.
+ *
+ *   Fix ANIMATIONS (voie CoreText/NSTextAttachment) — getter + ticker
+ *     CoreText ne crée pas toujours de UIImageView pour les NSTextAttachment
+ *     (dépend de la version iOS et de l'implémentation de Twitch). Pour
+ *     couvrir ce cas, on swizzle :
+ *       • NSTextAttachment.setImage: → détecte les images animées 7TV,
+ *         stocke les frames dans un associated object sur l'attachment.
+ *       • NSTextAttachment.image (getter) → retourne la frame courante
+ *         calculée via CACurrentMediaTime().
+ *     Un CADisplayLink global (S7TVAnimTicker) appelle setNeedsDisplay
+ *     toutes les ~20fps sur les UITextView/UILabel visibles du chat.
+ *     CoreText re-render → appelle attachment.image → frame correcte → ✅
  */
 
 #import <objc/runtime.h>
@@ -21,13 +48,36 @@
 
 
 // ────────────────────────────────────────────────────────────
-// MARK: - Fix animations GIF
+// MARK: - Clés associated objects (adresses uniques = clés)
+// ────────────────────────────────────────────────────────────
+
+// Sur UIImage : marque une image décodée depuis un WebP/GIF 7TV
+static const char kS7TVIsOurEmoteKey  = 0;
+
+// Sur UIImageView : display link restant (pour invalidation au recyclage)
+static const char kS7TVDisplayLinkKey = 1;
+
+// Sur UITextView / UILabel : guard anti-boucle attributedText reset
+static const char kS7TVReloadGuard    = 2;
+
+// Sur NSTextAttachment : frames de l'animation (NSArray<UIImage*>)
+static const char kS7TVAttachFrames   = 3;
+// Sur NSTextAttachment : durée totale de l'animation (NSTimeInterval)
+static const char kS7TVAttachDuration = 4;
+
+
+// ────────────────────────────────────────────────────────────
+// MARK: - UIImage (SevenTVGIF) — Décodage WebP/GIF animé
 //
-// `UIImage imageWithData:` retourne un UIImage statique (1ère frame) même
-// pour un GIF multi-frames. On swizzle cette méthode pour décoder toutes les
-// frames via CGImageSource et retourner un UIImage animé.
-// On swizzle aussi UIImageView.setImage: pour démarrer l'animation quand
-// l'image a des frames (UIImage.animationImages non-vide).
+// Swizzle de [UIImage imageWithData:] pour décoder les WebP et GIF
+// multi-frames provenant du CDN 7TV.
+//
+// Fast path : on vérifie les magic bytes AVANT d'appeler
+// CGImageSourceCreateWithData (coûteux). Pour tout format qui n'est
+// ni WebP ni GIF → appel immédiat à l'original, zéro overhead.
+//
+// Tag : CHAQUE image décodée ici reçoit kS7TVIsOurEmoteKey=@YES.
+// s7tv_setImage: ignore toute image sans ce tag → badges intacts.
 // ────────────────────────────────────────────────────────────
 
 @interface UIImage (SevenTVGIF)
@@ -43,215 +93,353 @@
 
     const uint8_t *b = (const uint8_t *)data.bytes;
 
-    // ⚡️ FAST PATH: vérification des magic bytes UNIQUEMENT (lecture de 12 octets max).
-    // Ce check est fait AVANT tout appel à CGImageSourceCreateWithData.
-    // CGImageSourceCreateWithData est coûteux (parse le header complet) → si on
-    // le faisait pour toutes les images, ça ralentirait badges, avatars, thumbnails,
-    // emotes Twitch natives — tout ce qui passe par [UIImage imageWithData:].
-    // En sortant ici pour les formats non-animés, on n'ajoute aucun overhead visible.
     BOOL isGIF  = (b[0] == 0x47 && b[1] == 0x49 && b[2] == 0x46 && b[3] == 0x38);
     BOOL isWebP = (data.length >= 12 &&
                    b[0] == 0x52 && b[1] == 0x49 && b[2] == 0x46 && b[3] == 0x46 &&
                    b[8] == 0x57 && b[9] == 0x45 && b[10] == 0x42 && b[11] == 0x50);
 
-    // Ni GIF ni WebP → appel original immédiat, zéro overhead sur les assets Twitch natifs
+    // Ni GIF ni WebP → pas une image 7TV → appel original immédiat
     if (!isGIF && !isWebP) {
         return [self s7tv_imageWithData:data];
     }
 
-    if (isGIF || isWebP) {
-        CGImageSourceRef src =
-            CGImageSourceCreateWithData((__bridge CFDataRef)data, NULL);
-        if (src) {
-            size_t count = CGImageSourceGetCount(src);
-
-            if (count > 1) {
-                // ── Image animée (multi-frames) ───────────────────────────
-                NSMutableArray<UIImage *> *frames = [NSMutableArray arrayWithCapacity:count];
-                NSTimeInterval totalDuration = 0;
-
-                for (size_t i = 0; i < count; i++) {
-                    CGImageRef cgImg = CGImageSourceCreateImageAtIndex(src, i, NULL);
-                    if (cgImg) {
-                        // Upscale: les emotes 7TV en 4x WebP font ~112px, les emotes
-                        // Twitch natives affichées dans le chat font ~56pt @2x = 112px.
-                        // On target 56pt = taille d'une emote Twitch standard dans le chat.
-                        // Si l'image est plus petite on la scale up via UIGraphicsImageRenderer.
-                        UIImage *frame = [UIImage imageWithCGImage:cgImg
-                                                             scale:1.0
-                                                       orientation:UIImageOrientationUp];
-                        [frames addObject:frame];
-                        CFRelease(cgImg);
-                    }
-
-                    // Durée de la frame
-                    NSDictionary *props = (__bridge_transfer NSDictionary *)
-                        CGImageSourceCopyPropertiesAtIndex(src, i, NULL);
-                    NSDictionary *gifDict  = props[(__bridge NSString *)kCGImagePropertyGIFDictionary];
-                    NSDictionary *webpDict = props[(__bridge NSString *)kCGImagePropertyWebPDictionary];
-                    NSDictionary *animDict = gifDict ?: webpDict;
-
-                    NSNumber *delay =
-                        animDict[(__bridge NSString *)kCGImagePropertyGIFUnclampedDelayTime]
-                        ?: animDict[(__bridge NSString *)kCGImagePropertyGIFDelayTime];
-                    totalDuration += MAX(delay.doubleValue, 0.01);
-                }
-                CFRelease(src);
-
-                if (frames.count > 1) {
-                    return [UIImage animatedImageWithImages:frames
-                                                  duration:totalDuration];
-                }
-                if (frames.count == 1) return frames[0];
-
-            } else if (count == 1) {
-                // ── Image statique ────────────────────────────────────────
-                CGImageRef cgImg = CGImageSourceCreateImageAtIndex(src, 0, NULL);
-                CFRelease(src);
-                if (cgImg) {
-                    UIImage *img = [UIImage imageWithCGImage:cgImg
-                                                      scale:1.0
-                                                orientation:UIImageOrientationUp];
-                    CFRelease(cgImg);
-                    return img;
-                }
-            } else {
-                CFRelease(src);
-            }
-        }
+    CGImageSourceRef src = CGImageSourceCreateWithData((__bridge CFDataRef)data, NULL);
+    if (!src) {
+        return [self s7tv_imageWithData:data];
     }
 
-    // Fallback: appel de l'original
-    return [self s7tv_imageWithData:data];
+    size_t count = CGImageSourceGetCount(src);
+    UIImage *result = nil;
+
+    if (count > 1) {
+        // ── Image animée (multi-frames) ───────────────────────────────────────
+        NSMutableArray<UIImage *> *frames = [NSMutableArray arrayWithCapacity:count];
+        NSTimeInterval totalDuration = 0.0;
+
+        for (size_t i = 0; i < count; i++) {
+            CGImageRef cgImg = CGImageSourceCreateImageAtIndex(src, i, NULL);
+            if (cgImg) {
+                UIImage *frame = [UIImage imageWithCGImage:cgImg
+                                                     scale:1.0
+                                               orientation:UIImageOrientationUp];
+                [frames addObject:frame];
+                CFRelease(cgImg);
+            }
+
+            // Durée de la frame (même clé pour GIF et WebP)
+            NSDictionary *props = (__bridge_transfer NSDictionary *)
+                CGImageSourceCopyPropertiesAtIndex(src, i, NULL);
+            NSDictionary *gifProps  = props[(__bridge NSString *)kCGImagePropertyGIFDictionary];
+            NSDictionary *webpProps = props[(__bridge NSString *)kCGImagePropertyWebPDictionary];
+            NSDictionary *animProps = gifProps ?: webpProps;
+
+            NSNumber *unclampedDelay =
+                animProps[(__bridge NSString *)kCGImagePropertyGIFUnclampedDelayTime];
+            NSNumber *clampedDelay =
+                animProps[(__bridge NSString *)kCGImagePropertyGIFDelayTime];
+
+            double frameDelay = (unclampedDelay ?: clampedDelay).doubleValue;
+            totalDuration += (frameDelay > 0.01) ? frameDelay : 0.1; // sécurité: min 100ms/frame
+        }
+        CFRelease(src);
+
+        if (frames.count > 1) {
+            result = [UIImage animatedImageWithImages:frames
+                                            duration:totalDuration];
+        } else if (frames.count == 1) {
+            result = frames[0];
+        }
+
+    } else if (count == 1) {
+        // ── Image statique (single frame WebP) ───────────────────────────────
+        CGImageRef cgImg = CGImageSourceCreateImageAtIndex(src, 0, NULL);
+        CFRelease(src);
+        if (cgImg) {
+            result = [UIImage imageWithCGImage:cgImg scale:1.0
+                                   orientation:UIImageOrientationUp];
+            CFRelease(cgImg);
+        }
+    } else {
+        CFRelease(src);
+    }
+
+    if (!result) {
+        return [self s7tv_imageWithData:data];
+    }
+
+    // ── TAG 7TV : marque cette image comme provenant de notre décodeur ────────
+    // s7tv_setImage: vérifie ce tag → ignore tout ce qui ne vient pas de 7TV.
+    // Garantit que les badges, avatars et autres images Twitch ne sont jamais
+    // modifiés par notre code de redimensionnement/animation.
+    objc_setAssociatedObject(result, &kS7TVIsOurEmoteKey,
+                             @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+    [[SevenTVManager sharedManager]
+        log:@"🖼 imageWithData: WebP/GIF décodé — %zu frame(s), dur=%.2fs",
+        (size_t)(result.images.count ?: 1), result.duration];
+
+    return result;
 }
 
 @end
 
+
+// ────────────────────────────────────────────────────────────
+// MARK: - S7TVAnimTicker — Ticker global pour l'animation NSTextAttachment
+//
+// CADisplayLink 20fps qui appelle setNeedsDisplay sur toutes les
+// UITextView et UILabel visibles dans la zone de chat.
+// CoreText redessine → appelle NSTextAttachment.image (getter swizzlé)
+// → reçoit la frame courante → emote animée. ✅
+//
+// Démarre automatiquement quand noteAnimatedAttachment est appelé.
+// Ne démarre PAS si showAnimated est désactivé.
+// ────────────────────────────────────────────────────────────
+
+@interface S7TVAnimTicker : NSObject
++ (instancetype)shared;
+- (void)noteAnimatedAttachment;  // called when an animated attachment is registered
+- (void)stop;
+@end
+
+@implementation S7TVAnimTicker {
+    CADisplayLink *_link;
+}
+
++ (instancetype)shared {
+    static S7TVAnimTicker *s = nil;
+    static dispatch_once_t t;
+    dispatch_once(&t, ^{ s = [[S7TVAnimTicker alloc] init]; });
+    return s;
+}
+
+- (void)noteAnimatedAttachment {
+    if (![SevenTVManager sharedManager].showAnimated) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (self->_link) return;
+        self->_link = [CADisplayLink displayLinkWithTarget:self
+                                                  selector:@selector(tick:)];
+        self->_link.preferredFramesPerSecond = 20;
+        [self->_link addToRunLoop:[NSRunLoop mainRunLoop]
+                          forMode:NSRunLoopCommonModes];
+        [[SevenTVManager sharedManager] log:@"🎬 AnimTicker démarré (20fps)"];
+    });
+}
+
+- (void)stop {
+    [_link invalidate];
+    _link = nil;
+}
+
+- (void)tick:(CADisplayLink *)dl {
+    // Trouver la clé window
+    UIWindow *keyWindow = nil;
+    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+        if ([scene isKindOfClass:[UIWindowScene class]]) {
+            for (UIWindow *w in ((UIWindowScene *)scene).windows) {
+                if (w.isKeyWindow) { keyWindow = w; break; }
+            }
+        }
+    }
+    if (!keyWindow) keyWindow = [UIApplication sharedApplication].windows.firstObject;
+    if (!keyWindow) return;
+
+    // Trouver le plus grand UIScrollView avec overflow = chat
+    UIScrollView *chatView = nil;
+    CGFloat bestArea = 0;
+    NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:keyWindow];
+    while (queue.count > 0) {
+        UIView *v = queue.firstObject; [queue removeObjectAtIndex:0];
+        if ([v isKindOfClass:[UIScrollView class]] && !v.isHidden && v.alpha > 0.01) {
+            UIScrollView *sv = (UIScrollView *)v;
+            CGFloat area    = sv.bounds.size.width * sv.bounds.size.height;
+            CGFloat overflow = sv.contentSize.height - sv.bounds.size.height;
+            if (area > bestArea && overflow > 100) { bestArea = area; chatView = sv; }
+        }
+        for (UIView *s in v.subviews) if (!s.isHidden) [queue addObject:s];
+    }
+    if (!chatView) return;
+
+    // BFS : setNeedsDisplay sur UITextView et UILabel dans le chat
+    // CoreText redessine → appelle attachment.image → frame courante
+    NSMutableArray<UIView *> *bfs = [NSMutableArray arrayWithArray:chatView.subviews];
+    while (bfs.count > 0) {
+        UIView *v = bfs.firstObject; [bfs removeObjectAtIndex:0];
+        if ([v isKindOfClass:[UITextView class]] || [v isKindOfClass:[UILabel class]]) {
+            [v setNeedsDisplay];
+            // Ne pas descendre dans les sous-vues du texte
+            continue;
+        }
+        for (UIView *s in v.subviews) if (!s.isHidden) [bfs addObject:s];
+    }
+}
+
+@end
+
+
+// ────────────────────────────────────────────────────────────
+// MARK: - NSTextAttachment (SevenTVAnim)
+//
+// Deux swizzles sur NSTextAttachment :
+//
+//   setImage: → si l'image est une 7TV animée (kS7TVIsOurEmoteKey + images.count>1),
+//               stocker les frames + durée dans des associated objects.
+//               Démarre le S7TVAnimTicker.
+//
+//   image (getter) → si des frames sont stockées, retourner la frame
+//               courante calculée via CACurrentMediaTime(). Sinon, appel
+//               original. Coût : ~1 associated object lookup + fmod + indexing.
+//
+// SÉCURITÉ : ne modifie le comportement QUE pour les attachments 7TV animés.
+// Tous les autres attachments (emotes Twitch natives, images inline…)
+// passent directement par le getter original.
+// ────────────────────────────────────────────────────────────
+
+@interface NSTextAttachment (SevenTVAnim)
+- (void)s7tv_setAttachImage:(UIImage *)image;
+- (UIImage *)s7tv_getAttachImage;
+@end
+
+@implementation NSTextAttachment (SevenTVAnim)
+
+- (void)s7tv_setAttachImage:(UIImage *)image {
+    [self s7tv_setAttachImage:image]; // appel original
+
+    // Vérifier si c'est une image animée 7TV
+    if (image
+        && objc_getAssociatedObject(image, &kS7TVIsOurEmoteKey)
+        && image.images.count > 1)
+    {
+        NSTimeInterval dur = image.duration > 0 ? image.duration : 1.0;
+        objc_setAssociatedObject(self, &kS7TVAttachFrames,
+                                 image.images, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(self, &kS7TVAttachDuration,
+                                 @(dur), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        // Démarrer le ticker global
+        [S7TVAnimTicker.shared noteAnimatedAttachment];
+        [[SevenTVManager sharedManager]
+            log:@"🎭 NSTextAttachment animé enregistré — %lu frames %.2fs",
+            (unsigned long)image.images.count, dur];
+    } else {
+        // Effacer les frames si l'image change pour une image statique
+        objc_setAssociatedObject(self, &kS7TVAttachFrames,
+                                 nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+}
+
+- (UIImage *)s7tv_getAttachImage {
+    NSArray<UIImage *> *frames = objc_getAssociatedObject(self, &kS7TVAttachFrames);
+    if (!frames.count) {
+        return [self s7tv_getAttachImage]; // original getter
+    }
+
+    NSNumber *durNum = objc_getAssociatedObject(self, &kS7TVAttachDuration);
+    NSTimeInterval dur = durNum.doubleValue;
+    if (dur <= 0) return frames[0];
+
+    // Calculer la frame courante sans aucun état stocké
+    CFTimeInterval t    = fmod(CACurrentMediaTime(), dur);
+    NSInteger      idx  = (NSInteger)((t / dur) * (double)frames.count);
+    if (idx < 0)                        idx = 0;
+    if (idx >= (NSInteger)frames.count) idx = (NSInteger)frames.count - 1;
+    return frames[idx];
+}
+
+@end
+
+
+// ────────────────────────────────────────────────────────────
+// MARK: - UIImageView (SevenTVAnimation) — Animation et redimensionnement
+//
+// Swizzle de UIImageView.setImage: pour :
+//   1. GARDER uniquement les images 7TV (kS7TVIsOurEmoteKey) →
+//      badges, avatars, thumbnails ignorés.
+//   2. Démarrer l'animation UIKit (animationImages + startAnimating)
+//      pour les images multi-frames.
+//   3. Corriger les dimensions de la UIImageView et du NSTextAttachment
+//      pour les images statiques (ratio correct, pas de tronquage).
+//   4. Forcer CoreText à recalculer le layout via attributedText reset.
+// ────────────────────────────────────────────────────────────
 
 @interface UIImageView (SevenTVAnimation)
 - (void)s7tv_setImage:(UIImage *)image;
 @end
 
-// Clés pour les associated objects sur UIImageView (l'adresse est la clé, pas la valeur)
-static const char kS7TVDisplayLinkKey = 1;
-static const char kS7TVFramesKey      = 2;
-static const char kS7TVDurationKey    = 3;
-static const char kS7TVStartTimeKey   = 4;
-
 @implementation UIImageView (SevenTVAnimation)
 
-// Clé pour le guard anti-boucle infinie (par cellule)
-static const char kS7TVReloadGuard = 0;
-
-// ── Ticker CADisplayLink ─────────────────────────────────────────────────────
-// Appelé ~60fps. Calcule la frame courante selon le temps écoulé et l'affiche
-// directement via layer.contents → bypasse complètement UIImageView.image
-// et NSTextAttachment → CoreText ne voit jamais ce changement → l'animation
-// n'est JAMAIS tuée par un reset de attributedText.
-- (void)s7tv_displayLinkTick:(CADisplayLink *)link {
-    NSArray<UIImage *> *frames = objc_getAssociatedObject(self, &kS7TVFramesKey);
-    NSNumber *durationNum      = objc_getAssociatedObject(self, &kS7TVDurationKey);
-    NSNumber *startTimeNum     = objc_getAssociatedObject(self, &kS7TVStartTimeKey);
-    if (!frames.count || !durationNum || !startTimeNum) return;
-
-    CFTimeInterval elapsed  = link.timestamp - startTimeNum.doubleValue;
-    CFTimeInterval duration = durationNum.doubleValue;
-    if (duration <= 0) return;
-
-    CFTimeInterval t   = fmod(elapsed, duration);
-    CFTimeInterval perFrame = duration / frames.count;
-    NSInteger frameIdx = (NSInteger)(t / perFrame) % frames.count;
-
-    UIImage *frame = frames[frameIdx];
-    // Écriture directe dans CALayer.contents → ne déclenche PAS setImage:
-    // → pas de boucle → pas d'appel à attributedText reset
-    self.layer.contents = (__bridge id)frame.CGImage;
-}
-
 - (void)s7tv_setImage:(UIImage *)image {
-    [self s7tv_setImage:image]; // original
+    [self s7tv_setImage:image]; // appel original
 
+    // ── GUARD 1: image nulle → rien à faire ──────────────────────────────────
     if (!image) return;
 
-    // ── Animations 7TV via CADisplayLink ─────────────────────────────────────
-    if (image.images.count > 1) {
-        // Annuler l'ancien display link si existant (recyclage de cellule)
-        CADisplayLink *oldLink = objc_getAssociatedObject(self, &kS7TVDisplayLinkKey);
+    // ── GUARD 2: TAG — n'agir que sur les images décodées par s7tv_imageWithData:
+    // Cela exclut badges, avatars, miniatures, emotes Twitch natives, etc.
+    // SEULES les images WebP/GIF provenant du CDN 7TV ont ce tag.
+    if (!objc_getAssociatedObject(image, &kS7TVIsOurEmoteKey)) return;
+
+    // ── Invalider un éventuel ancien display link (recyclage de cellule) ─────
+    CADisplayLink *oldLink = objc_getAssociatedObject(self, &kS7TVDisplayLinkKey);
+    if (oldLink) {
         [oldLink invalidate];
-
-        // Stocker les frames et métadonnées
-        objc_setAssociatedObject(self, &kS7TVFramesKey, image.images,
+        objc_setAssociatedObject(self, &kS7TVDisplayLinkKey, nil,
                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        objc_setAssociatedObject(self, &kS7TVDurationKey,
-                                 @(image.duration > 0 ? image.duration : 1.0),
-                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        objc_setAssociatedObject(self, &kS7TVStartTimeKey, @(CACurrentMediaTime()),
-                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
 
-        // Créer le CADisplayLink sur le main run loop
-        CADisplayLink *link = [CADisplayLink displayLinkWithTarget:self
-                                                          selector:@selector(s7tv_displayLinkTick:)];
-        link.preferredFramesPerSecond = 30; // économie batterie
-        [link addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
-        objc_setAssociatedObject(self, &kS7TVDisplayLinkKey, link,
-                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    // ── PATH A : IMAGE ANIMÉE → UIKit native animation ────────────────────────
+    if (image.images.count > 1) {
+        // UIImageView.animationImages + startAnimating utilise une CAKeyframeAnimation
+        // sur layer.contents → géré par UIKit, pas de retain cycle, pas de crash
+        // de selector, fonctionne quelle que soit la sous-classe UIImageView.
+        self.animationImages  = image.images;
+        self.animationDuration = image.duration > 0 ? image.duration : 1.0;
+        self.animationRepeatCount = 0; // infini
+        [self startAnimating];
 
-        // Afficher la première frame immédiatement
-        self.layer.contents = (__bridge id)image.images.firstObject.CGImage;
+        [[SevenTVManager sharedManager]
+            log:@"▶️ startAnimating — %lu frames %.2fs sur %@",
+            (unsigned long)image.images.count, self.animationDuration,
+            NSStringFromClass([self class])];
 
-        // ⚠️  PAS de reset attributedText ici — le CADisplayLink anime
-        // directement via layer.contents, indépendamment de CoreText.
-        // Un reset tuerait l'animation en rappelant setImage: avec la
-        // frame statique de NSTextAttachment.image.
+        // Pas de reset attributedText pour les animées : setNeedsDisplay
+        // est géré par S7TVAnimTicker via NSTextAttachment getter.
         return;
     }
 
-    // ── Filtres : ne traiter que les emotes ───────────────────────────────────
+    // ── PATH B : IMAGE STATIQUE → redimensionnement + reset CoreText ──────────
+
     CGFloat imgW = image.size.width, imgH = image.size.height;
     if (imgH <= 0 || imgW <= 0) return;
 
+    // Filtrer les contextes qui ne sont pas du chat (barre de navigation, onglets…)
     NSString *superviewClass = NSStringFromClass([self.superview class]);
-    if ([superviewClass containsString:@"TabBar"]      ||
+    if ([superviewClass containsString:@"TabBar"]       ||
         [superviewClass containsString:@"NavigationBar"] ||
-        [superviewClass containsString:@"ToolBar"]) return;
+        [superviewClass containsString:@"ToolBar"])      return;
 
     CGFloat viewH = self.bounds.size.height > 0
         ? self.bounds.size.height : self.frame.size.height;
-    if (viewH < 10 || viewH > 80.0) return;
+    if (viewH < 8 || viewH > 100.0) return;
 
     CGFloat ratio = imgW / imgH;
 
-    // ── Capture du contexte AVANT le dispatch (la cellule peut être recyclée) ─
     UIView  *capturedSuper = self.superview;
-    CGRect   capturedFrame = self.frame;
-    (void)capturedFrame; // utilisé si besoin
 
     void (^doWork)(void) = ^{
 
-        // ── 1. Taille cible depuis les dimensions natives de l'image ──────────
-        //
-        // On charge toujours le 4x.webp depuis cdn.7tv.app.
-        // "4x" = 4 × la taille d'affichage 1x en points.
-        // → targetW = imgW / 4,  targetH = imgH / 4
-        //
-        // Exemples :
-        //   KEKW  112×112px → 28×28pt  (carré, même taille que les emotes Twitch)
-        //   Pog   298×112px → 74×28pt  (large, ratio > 1 → était tronqué avant)
-        //   monkaS 84×84px  → 21×21pt  (petite, garde les proportions)
-        //
-        // Garde-fou : si l'image n'est pas réellement en 4x (emote très petite
-        // dont la "4x" est en fait une 2x), on tombe dans le fallback viewH.
+        // ── Calculer la taille cible (4x.webp → affichage 1x) ────────────────
+        // Les emotes 7TV sont servies en 4x → diviser par 4 pour la taille pt.
         const CGFloat kCDNScale = 4.0;
         CGFloat targetW = ceilf(imgW / kCDNScale);
         CGFloat targetH = ceilf(imgH / kCDNScale);
 
-        // Fallback si le résultat est hors plage raisonnable pour une emote de chat
-        if (targetH < 10 || targetH > 60) {
+        // Garde-fou: si la taille calculée est hors plage, fallback sur viewH
+        if (targetH < 8 || targetH > 60) {
             targetH = viewH > 0 ? viewH : 28.0;
             targetW = ceilf(targetH * ratio);
         }
 
-        // ── Appliquer width ET height (avant: seulement width si ratio > 1.15) ─
+        // ── Ajuster les contraintes / frame ──────────────────────────────────
         BOOL widthFixed = NO, heightFixed = NO;
 
         for (NSLayoutConstraint *c in self.constraints) {
@@ -261,9 +449,10 @@ static const char kS7TVReloadGuard = 0;
         }
         for (NSLayoutConstraint *c in (self.superview.constraints ?: @[])) {
             if (c.firstItem != self && c.secondItem != self) continue;
-            NSLayoutAttribute a1 = c.firstAttribute, a2 = c.secondAttribute;
-            if (a1 == NSLayoutAttributeWidth  || a2 == NSLayoutAttributeWidth)  { c.constant = targetW; widthFixed  = YES; }
-            if (a1 == NSLayoutAttributeHeight || a2 == NSLayoutAttributeHeight) { c.constant = targetH; heightFixed = YES; }
+            if (c.firstAttribute == NSLayoutAttributeWidth  || c.secondAttribute == NSLayoutAttributeWidth)
+                { c.constant = targetW; widthFixed  = YES; }
+            if (c.firstAttribute == NSLayoutAttributeHeight || c.secondAttribute == NSLayoutAttributeHeight)
+                { c.constant = targetH; heightFixed = YES; }
         }
         if (!widthFixed || !heightFixed) {
             CGRect f = self.frame;
@@ -273,11 +462,9 @@ static const char kS7TVReloadGuard = 0;
         }
         self.contentMode = UIViewContentModeScaleAspectFit;
 
-        // ── Corriger les bounds du NSTextAttachment avant le reset ────────────
-        // Si Twitch a mis une taille fixe sur l'attachment (ex: 28×28 par défaut
-        // pour toutes les emotes), on la corrige ICI, avant que CoreText recalcule
-        // le layout au reset de l'attributedText → résultat net: bonne taille dès
-        // le re-render, pas de décalage visible.
+        // ── Corriger les bounds du NSTextAttachment ───────────────────────────
+        // Avant le reset attributedText, on corrige la taille de l'attachment
+        // pour que CoreText calcule le bon layout dès le premier redraw.
         {
             UIView *scan = capturedSuper;
             for (int d = 0; d < 12 && scan; d++, scan = scan.superview) {
@@ -291,10 +478,7 @@ static const char kS7TVReloadGuard = 0;
                                  usingBlock:^(id att, NSRange r, BOOL *stop) {
                     if (![att isKindOfClass:[NSTextAttachment class]]) return;
                     NSTextAttachment *a = (NSTextAttachment *)att;
-                    // Identifier l'attachment par son image (identité d'objet)
                     if (a.image == image) {
-                        // baseline offset: -4pt pour aligner le bas de l'emote
-                        // avec la ligne de texte (convention UIKit standard)
                         a.bounds = CGRectMake(0, -4.0, targetW, targetH);
                         *stop = YES;
                     }
@@ -303,10 +487,10 @@ static const char kS7TVReloadGuard = 0;
             }
         }
 
-        // ── 2. STRATÉGIE A : UITextView → réassigner attributedText ──────────
-        // CoreText ne se redessine que si on lui retire et remet le texte.
+        // ── Reset attributedText pour forcer CoreText à recalculer ───────────
         UIView *v = capturedSuper;
         for (int d = 0; d < 12 && v; d++, v = v.superview) {
+
             if ([v isKindOfClass:[UITextView class]]) {
                 UITextView *tv2 = (UITextView *)v;
                 if (objc_getAssociatedObject(tv2, &kS7TVReloadGuard)) break;
@@ -324,10 +508,9 @@ static const char kS7TVReloadGuard = 0;
                     objc_setAssociatedObject(tv2, &kS7TVReloadGuard, nil,
                                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                 });
-                return; // ← on a trouvé, stop
+                return;
             }
 
-            // ── 2b. UILabel → même traitement ────────────────────────────────
             if ([v isKindOfClass:[UILabel class]]) {
                 UILabel *lbl = (UILabel *)v;
                 if (objc_getAssociatedObject(lbl, &kS7TVReloadGuard)) break;
@@ -348,12 +531,6 @@ static const char kS7TVReloadGuard = 0;
                 return;
             }
         }
-
-        // Stratégies 3 (reloadRows/reloadItems) et 4 (setNeedsDisplay x10) supprimées.
-        // Elles causaient une boucle : reloadRows → Twitch recrée la cellule →
-        // setImage: se redéclenche sur le nouvel objet → guard manqué → freeze UI.
-        // Le système de prefetch garantit que l'image est en cache AVANT la livraison
-        // du message à Twitch → UITextView/UILabel reset (stratégies 1 & 2) suffisent.
     };
 
     if ([NSThread isMainThread]) {
@@ -408,14 +585,6 @@ static void s7tv_swizzle(Class targetClass,
 
 // ────────────────────────────────────────────────────────────
 // MARK: - Fix B: NSURLSessionConfiguration → protocolClasses
-//
-// [NSURLProtocol registerClass:] ne couvre que les sessions
-// utilisant la configuration par défaut du système.
-// Twitch crée ses propres sessions avec des configs custom →
-// notre URLProtocol est ignoré par défaut.
-//
-// Solution: swizzler protocolClasses pour injecter
-// SevenTVURLProtocol dans toutes les configurations.
 // ────────────────────────────────────────────────────────────
 
 @interface NSURLSessionConfiguration (SevenTV)
@@ -425,15 +594,11 @@ static void s7tv_swizzle(Class targetClass,
 @implementation NSURLSessionConfiguration (SevenTV)
 
 - (NSArray *)s7tv_protocolClasses {
-    NSArray *original = [self s7tv_protocolClasses]; // appelle l'original après swizzle
+    NSArray *original = [self s7tv_protocolClasses];
     Class ourClass = [SevenTVURLProtocol class];
-
     if (![original containsObject:ourClass]) {
-        // Mettre notre protocole EN PREMIER pour avoir la priorité
         NSMutableArray *arr = [NSMutableArray arrayWithObject:ourClass];
-        if (original.count > 0) {
-            [arr addObjectsFromArray:original];
-        }
+        if (original.count > 0) [arr addObjectsFromArray:original];
         return [arr copy];
     }
     return original;
@@ -457,37 +622,29 @@ static void s7tv_swizzle(Class targetClass,
 
 - (NSURLSessionDataTask *)s7tv_dataTaskWithRequest:(NSURLRequest *)request
                                  completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completionHandler {
-    NSString *host = request.URL.host ?: @"";
-
-    if ([host isEqualToString:@"gql.twitch.tv"] && completionHandler) {
-        void (^wrappedHandler)(NSData *, NSURLResponse *, NSError *) =
+    if ([request.URL.host isEqualToString:@"gql.twitch.tv"] && completionHandler) {
+        void (^wrapped)(NSData *, NSURLResponse *, NSError *) =
             ^(NSData *data, NSURLResponse *response, NSError *error) {
-                if (data && !error) {
+                if (data && !error)
                     [[SevenTVManager sharedManager] extractAndLoadEmotesFromGQLResponse:data];
-                }
                 completionHandler(data, response, error);
             };
-        return [self s7tv_dataTaskWithRequest:request completionHandler:wrappedHandler];
+        return [self s7tv_dataTaskWithRequest:request completionHandler:wrapped];
     }
-
     return [self s7tv_dataTaskWithRequest:request completionHandler:completionHandler];
 }
 
 - (NSURLSessionDataTask *)s7tv_dataTaskWithURL:(NSURL *)url
                              completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completionHandler {
-    NSString *host = url.host ?: @"";
-
-    if ([host isEqualToString:@"gql.twitch.tv"] && completionHandler) {
-        void (^wrappedHandler)(NSData *, NSURLResponse *, NSError *) =
+    if ([url.host isEqualToString:@"gql.twitch.tv"] && completionHandler) {
+        void (^wrapped)(NSData *, NSURLResponse *, NSError *) =
             ^(NSData *data, NSURLResponse *response, NSError *error) {
-                if (data && !error) {
+                if (data && !error)
                     [[SevenTVManager sharedManager] extractAndLoadEmotesFromGQLResponse:data];
-                }
                 completionHandler(data, response, error);
             };
-        return [self s7tv_dataTaskWithURL:url completionHandler:wrappedHandler];
+        return [self s7tv_dataTaskWithURL:url completionHandler:wrapped];
     }
-
     return [self s7tv_dataTaskWithURL:url completionHandler:completionHandler];
 }
 
@@ -495,45 +652,26 @@ static void s7tv_swizzle(Class targetClass,
 
 
 // ────────────────────────────────────────────────────────────
-// MARK: - Hook NSURLSessionWebSocketTask (chat IRC Twitch)
+// MARK: - Extraction des emote IDs 7TV depuis un message IRC modifié
 // ────────────────────────────────────────────────────────────
 
-// ── Extraction des emote IDs 7TV depuis un message IRC modifié ───────────────
-//
-// Exemple de tag injecté: "emotes=7tv_01FA35:10-17,7tv_01FB22:20-25"
-// Retourne: @[@"01FA35", @"01FB22"] (sans le préfixe "7tv_")
-//
-// On déduplique car une même emote peut apparaître plusieurs fois dans
-// le même message (ex: "KEKW KEKW KEKW" → un seul ID à préfetch).
 static NSArray<NSString *> *s7tv_extractEmoteIDs(NSString *ircMessage) {
     NSMutableArray<NSString *> *result = [NSMutableArray array];
-
     NSRange tagRange = [ircMessage rangeOfString:@"emotes="];
     if (tagRange.location == NSNotFound) return result;
 
-    // Isoler la valeur du tag "emotes=" (jusqu'au prochain espace ou ";")
     NSString *afterTag = [ircMessage substringFromIndex:tagRange.location + 7];
     NSRange endRange = [afterTag rangeOfCharacterFromSet:
                         [NSCharacterSet characterSetWithCharactersInString:@" ;"]];
     NSString *emotesValue = (endRange.location != NSNotFound)
-        ? [afterTag substringToIndex:endRange.location]
-        : afterTag;
-
+        ? [afterTag substringToIndex:endRange.location] : afterTag;
     if (emotesValue.length == 0) return result;
 
-    // Format Twitch: "7tv_ID1:0-5,8-12/7tv_ID2:20-25"
-    //   "/"  sépare les IDs DIFFÉRENTS
-    //   ","  sépare les occurrences du MÊME ID (positions multiples)
-    // On split par "/" d'abord pour isoler chaque bloc ID:positions,
-    // puis on prend la partie avant le premier ":" pour obtenir le fake ID.
-    // Avant ce fix on splitait par "," : "8-12/7tv_ID2:20-25" devenait
-    // idPart="8-12/7tv_ID2" → pas de préfixe "7tv_" → ID manqué → pas de prefetch.
     NSMutableSet<NSString *> *seen = [NSMutableSet set];
     for (NSString *entry in [emotesValue componentsSeparatedByString:@"/"]) {
-        // Prendre seulement la partie avant le premier ":" (= "7tv_ID")
         NSString *idPart = [entry componentsSeparatedByString:@":"].firstObject ?: entry;
         if ([idPart hasPrefix:@"7tv_"]) {
-            NSString *emoteID = [idPart substringFromIndex:4]; // retirer "7tv_"
+            NSString *emoteID = [idPart substringFromIndex:4];
             if (emoteID.length > 0 && ![seen containsObject:emoteID]) {
                 [seen addObject:emoteID];
                 [result addObject:emoteID];
@@ -544,29 +682,24 @@ static NSArray<NSString *> *s7tv_extractEmoteIDs(NSString *ircMessage) {
 }
 
 
-// ── Fix A: fonction C statique pour éviter le crash "unrecognized selector" ──
-// s7tv_handleRoomState: ne peut PAS être une méthode ObjC sur la catégorie car
-// après swizzle, self est __NSURLSessionWebSocketTask (classe concrète) qui ne
-// trouve pas les méthodes de la catégorie abstraite via dispatch ObjC.
-// Une fonction C statique est appelée directement, sans lookup → pas de crash.
+// ────────────────────────────────────────────────────────────
+// MARK: - Fix A: Extraction room-id depuis ROOMSTATE
+// ────────────────────────────────────────────────────────────
+
 static void s7tv_handleRoomState(NSString *ircMessage) {
     NSRange roomIDRange = [ircMessage rangeOfString:@"room-id="];
     if (roomIDRange.location == NSNotFound) return;
 
     NSString *afterRoomID = [ircMessage substringFromIndex:roomIDRange.location + 8];
-
-    // L'ID se termine au prochain ";", espace, ou fin de ligne
     NSMutableString *roomID = [NSMutableString string];
     for (NSUInteger i = 0; i < afterRoomID.length; i++) {
         unichar c = [afterRoomID characterAtIndex:i];
         if (c == ';' || c == ' ' || c == '\r' || c == '\n') break;
         [roomID appendFormat:@"%C", c];
     }
-
     if (roomID.length == 0) return;
 
     [[SevenTVManager sharedManager] log:@"📡 room-id extrait depuis ROOMSTATE: %@", roomID];
-
     SevenTVManager *mgr = [SevenTVManager sharedManager];
 
     if (![roomID isEqualToString:mgr.currentChannelTwitchID]) {
@@ -575,33 +708,25 @@ static void s7tv_handleRoomState(NSString *ircMessage) {
             roomID, mgr.currentChannelTwitchID ?: @"aucun"];
         mgr.currentChannelTwitchID = roomID;
 
-        // ── Fix cache: sauvegarder le mapping channelName → twitchID ─────────
-        // Permet à loadEmotesForChannelName: de démarrer le prefetch
-        // IMMÉDIATEMENT au prochain JOIN, sans attendre le ROOMSTATE.
         if (mgr.currentChannelName.length > 0) {
             NSUserDefaults *prefs = [NSUserDefaults standardUserDefaults];
-            NSMutableDictionary *map = [([prefs dictionaryForKey:@"s7tv_channel_id_map"] ?: @{}) mutableCopy];
+            NSMutableDictionary *map =
+                [([prefs dictionaryForKey:@"s7tv_channel_id_map"] ?: @{}) mutableCopy];
             map[mgr.currentChannelName.lowercaseString] = roomID;
             [prefs setObject:[map copy] forKey:@"s7tv_channel_id_map"];
             [prefs synchronize];
             [[SevenTVManager sharedManager] log:@"💾 Mapping sauvé: %@ → %@",
              mgr.currentChannelName, roomID];
         }
-
         [mgr loadEmotesForChannelTwitchID:roomID];
     }
 }
 
 
-// ── Scroll le chat vers le bas après livraison d'un message retenu ──────────
-//
-// Pendant la hold (~500ms), d'autres messages arrivent et Twitch auto-scrolle
-// pour eux. Notre message est livré APRÈS : il est ajouté en bas de la liste
-// mais Twitch ne scrolle plus → cellule hors écran → image jamais demandée.
-//
-// On cherche le plus grand UIScrollView visible (= le chat) et on scrolle
-// en bas, MAIS seulement si l'utilisateur était déjà proche du bas (< 200pt).
-// Si l'utilisateur a scrollé vers le haut pour lire, on ne le dérange pas.
+// ────────────────────────────────────────────────────────────
+// MARK: - Scroll chat vers le bas après livraison d'un message
+// ────────────────────────────────────────────────────────────
+
 static void s7tv_scrollChatToBottom(void) {
     UIWindow *keyWindow = nil;
     for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
@@ -614,25 +739,18 @@ static void s7tv_scrollChatToBottom(void) {
     if (!keyWindow) keyWindow = [UIApplication sharedApplication].windows.firstObject;
     if (!keyWindow) return;
 
-    // BFS : trouver le plus grand UIScrollView avec contenu qui déborde (= le chat)
-    UIScrollView *chatView  = nil;
-    CGFloat       bestArea  = 0;
+    UIScrollView *chatView = nil;
+    CGFloat bestArea = 0;
     NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:keyWindow];
     while (queue.count > 0) {
-        UIView *v = queue.firstObject;
-        [queue removeObjectAtIndex:0];
+        UIView *v = queue.firstObject; [queue removeObjectAtIndex:0];
         if ([v isKindOfClass:[UIScrollView class]] && !v.isHidden && v.alpha > 0.01) {
-            UIScrollView *sv  = (UIScrollView *)v;
-            CGFloat area      = sv.bounds.size.width * sv.bounds.size.height;
-            CGFloat overflow  = sv.contentSize.height - sv.bounds.size.height;
-            if (area > bestArea && overflow > 100) {
-                bestArea = area;
-                chatView = sv;
-            }
+            UIScrollView *sv = (UIScrollView *)v;
+            CGFloat area    = sv.bounds.size.width * sv.bounds.size.height;
+            CGFloat overflow = sv.contentSize.height - sv.bounds.size.height;
+            if (area > bestArea && overflow > 100) { bestArea = area; chatView = sv; }
         }
-        for (UIView *sub in v.subviews) {
-            if (!sub.isHidden) [queue addObject:sub];
-        }
+        for (UIView *sub in v.subviews) if (!sub.isHidden) [queue addObject:sub];
     }
     if (!chatView) return;
 
@@ -640,22 +758,17 @@ static void s7tv_scrollChatToBottom(void) {
     CGFloat currentY = chatView.contentOffset.y;
     if (maxY <= 0) return;
 
-    // Seulement si on était déjà proche du bas (≤ 200pt d'écart)
     if (maxY - currentY <= 200.0) {
         [chatView setContentOffset:CGPointMake(chatView.contentOffset.x, maxY)
                           animated:NO];
-        [[SevenTVManager sharedManager] log:@"📜 Scroll chat → bas (delta=%.0f)", maxY - currentY];
     }
 }
 
 
-// ── Reload les UITextView/UILabel visibles dans le chat ─────────────────────
-//
-// Appelé depuis le main thread après que le prefetch background a terminé.
-// Les images sont maintenant en cache → on reset l'attributedText des cellules
-// visibles → CoreText recalcule le layout → URLProtocol.startLoading → cache
-// hit synchrone → emote apparaît. Même logique que Stratégie A/B dans
-// s7tv_setImage:, mais appliquée à toutes les cellules visibles d'un coup.
+// ────────────────────────────────────────────────────────────
+// MARK: - Reload les UITextView/UILabel visibles dans le chat
+// ────────────────────────────────────────────────────────────
+
 static void s7tv_reloadVisibleChatCells(void) {
     UIWindow *keyWindow = nil;
     for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
@@ -668,34 +781,25 @@ static void s7tv_reloadVisibleChatCells(void) {
     if (!keyWindow) keyWindow = [UIApplication sharedApplication].windows.firstObject;
     if (!keyWindow) return;
 
-    // BFS : trouver le plus grand UIScrollView avec overflow (= le chat)
     UIScrollView *chatView = nil;
-    CGFloat       bestArea = 0;
+    CGFloat bestArea = 0;
     NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:keyWindow];
     while (queue.count > 0) {
-        UIView *v = queue.firstObject;
-        [queue removeObjectAtIndex:0];
+        UIView *v = queue.firstObject; [queue removeObjectAtIndex:0];
         if ([v isKindOfClass:[UIScrollView class]] && !v.isHidden && v.alpha > 0.01) {
             UIScrollView *sv = (UIScrollView *)v;
-            CGFloat area     = sv.bounds.size.width * sv.bounds.size.height;
+            CGFloat area    = sv.bounds.size.width * sv.bounds.size.height;
             CGFloat overflow = sv.contentSize.height - sv.bounds.size.height;
-            if (area > bestArea && overflow > 100) {
-                bestArea = area;
-                chatView = sv;
-            }
+            if (area > bestArea && overflow > 100) { bestArea = area; chatView = sv; }
         }
-        for (UIView *sub in v.subviews) {
-            if (!sub.isHidden) [queue addObject:sub];
-        }
+        for (UIView *sub in v.subviews) if (!sub.isHidden) [queue addObject:sub];
     }
     if (!chatView) return;
 
-    // BFS dans le chat : reset attributedText de tous les UITextView/UILabel visibles
     NSInteger reloaded = 0;
     NSMutableArray<UIView *> *bfs = [NSMutableArray arrayWithArray:chatView.subviews];
     while (bfs.count > 0) {
-        UIView *v = bfs.firstObject;
-        [bfs removeObjectAtIndex:0];
+        UIView *v = bfs.firstObject; [bfs removeObjectAtIndex:0];
 
         if ([v isKindOfClass:[UITextView class]]) {
             UITextView *tv = (UITextView *)v;
@@ -703,19 +807,14 @@ static void s7tv_reloadVisibleChatCells(void) {
                 objc_setAssociatedObject(tv, &kS7TVReloadGuard, @YES,
                                          OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                 NSAttributedString *saved = tv.attributedText;
-                if (saved.length > 0) {
-                    tv.attributedText = nil;
-                    tv.attributedText = saved;
-                    reloaded++;
-                }
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
-                               (int64_t)(0.8 * NSEC_PER_SEC)),
+                if (saved.length > 0) { tv.attributedText = nil; tv.attributedText = saved; reloaded++; }
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)),
                                dispatch_get_main_queue(), ^{
                     objc_setAssociatedObject(tv, &kS7TVReloadGuard, nil,
                                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                 });
             }
-            continue; // ne pas descendre dans les sous-vues d'un UITextView
+            continue;
         }
 
         if ([v isKindOfClass:[UILabel class]]) {
@@ -724,13 +823,8 @@ static void s7tv_reloadVisibleChatCells(void) {
                 objc_setAssociatedObject(lbl, &kS7TVReloadGuard, @YES,
                                          OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                 NSAttributedString *saved = lbl.attributedText;
-                if (saved.length > 0) {
-                    lbl.attributedText = nil;
-                    lbl.attributedText = saved;
-                    reloaded++;
-                }
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
-                               (int64_t)(0.8 * NSEC_PER_SEC)),
+                if (saved.length > 0) { lbl.attributedText = nil; lbl.attributedText = saved; reloaded++; }
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)),
                                dispatch_get_main_queue(), ^{
                     objc_setAssociatedObject(lbl, &kS7TVReloadGuard, nil,
                                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -739,14 +833,15 @@ static void s7tv_reloadVisibleChatCells(void) {
             continue;
         }
 
-        for (UIView *sub in v.subviews) {
-            if (!sub.isHidden) [bfs addObject:sub];
-        }
+        for (UIView *sub in v.subviews) if (!sub.isHidden) [bfs addObject:sub];
     }
-
     [[SevenTVManager sharedManager] log:@"♻️ Reload %ld cellule(s) visibles", (long)reloaded];
 }
 
+
+// ────────────────────────────────────────────────────────────
+// MARK: - Hook NSURLSessionWebSocketTask (chat IRC Twitch)
+// ────────────────────────────────────────────────────────────
 
 @interface NSURLSessionWebSocketTask (SevenTV)
 - (void)s7tv_receiveMessageWithCompletionHandler:
@@ -757,7 +852,6 @@ static void s7tv_reloadVisibleChatCells(void) {
 
 @implementation NSURLSessionWebSocketTask (SevenTV)
 
-// Messages ENTRANTS : extraire room-id depuis ROOMSTATE + injecter emotes dans PRIVMSG
 - (void)s7tv_receiveMessageWithCompletionHandler:
     (void (^)(NSURLSessionWebSocketMessage *, NSError *))completionHandler {
 
@@ -767,54 +861,33 @@ static void s7tv_reloadVisibleChatCells(void) {
             if (!error && message) {
 
                 NSString *textToProcess = nil;
-
                 if (message.type == NSURLSessionWebSocketMessageTypeString) {
                     textToProcess = message.string;
                 } else if (message.type == NSURLSessionWebSocketMessageTypeData) {
                     textToProcess = [[NSString alloc] initWithData:message.data
                                                           encoding:NSUTF8StringEncoding];
-                    if (textToProcess) {
-                        [[SevenTVManager sharedManager]
-                            log:@"ℹ️  Frame TypeData convertie en texte (%lu octets)",
-                            (unsigned long)message.data.length];
-                    } else {
-                        [[SevenTVManager sharedManager]
-                            log:@"⚠️  Frame TypeData non-UTF8 ignorée (%lu octets)",
-                            (unsigned long)message.data.length];
-                    }
                 }
 
                 if (textToProcess) {
 
-                    // ── Fix A: appel direct en C, pas de dispatch ObjC ───
                     if ([textToProcess containsString:@"ROOMSTATE"]) {
                         s7tv_handleRoomState(textToProcess);
                     }
 
-                    // ── Injection des emotes 7TV dans PRIVMSG ────────────
                     NSString *modified = [[SevenTVManager sharedManager]
                                           injectSevenTVEmotesIntoIRCMessage:textToProcess];
 
                     if (modified && ![modified isEqualToString:textToProcess]) {
 
-                        // ── Livraison IMMÉDIATE — comme 7TV PC ────────────────
-                        // Pas de hold. Le message apparaît dans le chat sans délai,
-                        // emote vide pendant ~2s le temps du download, puis reload.
                         completionHandler(
                             [[NSURLSessionWebSocketMessage alloc] initWithString:modified],
                             nil
                         );
 
-                        // Emotes absentes du cache → prefetch en background.
-                        // Quand TOUTES les images sont prêtes → reload des cellules
-                        // visibles sur le main thread → CoreText recalcule →
-                        // URLProtocol cache hit sync → emote apparaît. ✅
                         NSArray<NSString *> *emoteIDs = s7tv_extractEmoteIDs(modified);
                         NSMutableArray<NSString *> *uncached = [NSMutableArray array];
                         for (NSString *eid in emoteIDs) {
-                            if (![SevenTVURLProtocol isEmoteIDCached:eid]) {
-                                [uncached addObject:eid];
-                            }
+                            if (![SevenTVURLProtocol isEmoteIDCached:eid]) [uncached addObject:eid];
                         }
 
                         if (uncached.count > 0) {
@@ -839,11 +912,11 @@ static void s7tv_reloadVisibleChatCells(void) {
                         return;
                     }
 
-                    // Frame TypeData convertie → renvoyer en String
                     if (message.type == NSURLSessionWebSocketMessageTypeData && textToProcess) {
-                        NSURLSessionWebSocketMessage *asText =
-                            [[NSURLSessionWebSocketMessage alloc] initWithString:textToProcess];
-                        completionHandler(asText, nil);
+                        completionHandler(
+                            [[NSURLSessionWebSocketMessage alloc] initWithString:textToProcess],
+                            nil
+                        );
                         return;
                     }
                 }
@@ -854,7 +927,6 @@ static void s7tv_reloadVisibleChatCells(void) {
     [self s7tv_receiveMessageWithCompletionHandler:wrappedHandler];
 }
 
-// Messages SORTANTS : détecter "JOIN #channel"
 - (void)s7tv_sendMessage:(NSURLSessionWebSocketMessage *)message
        completionHandler:(void (^)(NSError *))completionHandler {
 
@@ -868,7 +940,6 @@ static void s7tv_reloadVisibleChatCells(void) {
             [[SevenTVManager sharedManager] loadEmotesForChannelName:channel];
         }
     }
-
     [self s7tv_sendMessage:message completionHandler:completionHandler];
 }
 
@@ -880,13 +951,10 @@ static void s7tv_reloadVisibleChatCells(void) {
 // ────────────────────────────────────────────────────────────
 
 static void s7tv_swizzle_protocol_classes(void) {
-    // Obtenir la classe concrète via une instance sonde
     NSURLSessionConfiguration *probe = [NSURLSessionConfiguration defaultSessionConfiguration];
     Class configClass = object_getClass(probe);
-
     [[SevenTVManager sharedManager] log:@"🔍 NSURLSessionConfiguration classe: %@",
      NSStringFromClass(configClass)];
-
     s7tv_swizzle(configClass,
                  [NSURLSessionConfiguration class],
                  @selector(protocolClasses),
@@ -909,7 +977,6 @@ static void s7tv_swizzle_session(void) {
     Class classStd = object_getClass(probeStd);
     [[SevenTVManager sharedManager] log:@"🔍 NSURLSession standard: %@",
      NSStringFromClass(classStd)];
-
     s7tv_swizzle(classStd, [NSURLSession class], selRequest, swizRequest);
     s7tv_swizzle(classStd, [NSURLSession class], selURL, swizURL);
 
@@ -932,72 +999,85 @@ static void s7tv_swizzle_session(void) {
 static void s7tv_swizzle_websocket(void) {
     Class wsAbstractClass = NSClassFromString(@"NSURLSessionWebSocketTask");
     if (!wsAbstractClass) {
-        [[SevenTVManager sharedManager] log:@"⚠️  NSURLSessionWebSocketTask introuvable (iOS < 13?)"];
+        [[SevenTVManager sharedManager] log:@"⚠️  NSURLSessionWebSocketTask introuvable"];
         return;
     }
 
     NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration ephemeralSessionConfiguration];
     NSURLSession *probeSession = [NSURLSession sessionWithConfiguration:cfg];
     NSURL *probeURL = [NSURL URLWithString:@"wss://irc-ws.chat.twitch.tv/irc"];
-
     NSURLSessionWebSocketTask *probeTask = [probeSession webSocketTaskWithURL:probeURL];
     Class realWSClass = object_getClass(probeTask);
     [probeTask cancel];
 
-    [[SevenTVManager sharedManager] log:@"🔍 NSURLSessionWebSocketTask classe concrète: %@",
+    [[SevenTVManager sharedManager] log:@"🔍 WebSocketTask classe concrète: %@",
      NSStringFromClass(realWSClass)];
 
-    if (realWSClass != wsAbstractClass) {
-        [[SevenTVManager sharedManager] log:@"ℹ️  Classe abstraite: %@ → classe concrète: %@",
-         NSStringFromClass(wsAbstractClass), NSStringFromClass(realWSClass)];
-    }
-
-    s7tv_swizzle(realWSClass,
-                 wsAbstractClass,
+    s7tv_swizzle(realWSClass, wsAbstractClass,
                  @selector(receiveMessageWithCompletionHandler:),
                  @selector(s7tv_receiveMessageWithCompletionHandler:));
-
-    s7tv_swizzle(realWSClass,
-                 wsAbstractClass,
+    s7tv_swizzle(realWSClass, wsAbstractClass,
                  @selector(sendMessage:completionHandler:),
                  @selector(s7tv_sendMessage:completionHandler:));
 }
 
 
 // ────────────────────────────────────────────────────────────
-// MARK: - Point d'entrée
+// MARK: - Swizzle NSTextAttachment (setImage: + image getter)
+// ────────────────────────────────────────────────────────────
+
+static void s7tv_swizzle_attachment(void) {
+    Class cls = [NSTextAttachment class];
+
+    // setter : setImage:
+    s7tv_swizzle(cls, cls,
+                 @selector(setImage:),
+                 @selector(s7tv_setAttachImage:));
+
+    // getter : image
+    // On doit swizzler la méthode d'instance du getter de la propriété "image"
+    s7tv_swizzle(cls, cls,
+                 @selector(image),
+                 @selector(s7tv_getAttachImage));
+}
+
+
+// ────────────────────────────────────────────────────────────
+// MARK: - Point d'entrée __attribute__((constructor))
 // ────────────────────────────────────────────────────────────
 
 __attribute__((constructor))
 static void TwitchSevenTVInit(void) {
     SevenTVManager *mgr = [SevenTVManager sharedManager];
-    [mgr log:@"🔌 Chargement TwitchSevenTV v1.3 (substrate-free)..."];
+    [mgr log:@"🔌 Chargement TwitchSevenTV v2.0 (substrate-free)..."];
 
-    // ── Swizzle UIImage imageWithData: pour décoder les GIFs animés ──
-    s7tv_swizzle(object_getClass([UIImage class]),   // meta-classe (méthode de classe)
+    // ── Swizzle UIImage imageWithData: (décodage WebP/GIF + tag) ──────────────
+    s7tv_swizzle(object_getClass([UIImage class]),
                  object_getClass([UIImage class]),
                  @selector(imageWithData:),
                  @selector(s7tv_imageWithData:));
 
-    // ── Swizzle UIImageView setImage: pour démarrer l'animation ──
+    // ── Swizzle UIImageView setImage: (animation + resize, 7TV seulement) ─────
     s7tv_swizzle([UIImageView class],
                  [UIImageView class],
                  @selector(setImage:),
                  @selector(s7tv_setImage:));
 
-    // ── Fix B: protocolClasses swizzle (avant la création de sessions) ──
+    // ── Swizzle NSTextAttachment (animation CoreText path) ────────────────────
+    s7tv_swizzle_attachment();
+
+    // ── Fix B: protocolClasses swizzle (avant la création de sessions) ────────
     s7tv_swizzle_protocol_classes();
 
-    // ── Swizzle NSURLSession (réponses GQL Twitch) ──
+    // ── Swizzle NSURLSession (réponses GQL Twitch) ────────────────────────────
     s7tv_swizzle_session();
 
-    // ── Swizzle NSURLSessionWebSocketTask (chat IRC) ──
+    // ── Swizzle NSURLSessionWebSocketTask (chat IRC) ──────────────────────────
     s7tv_swizzle_websocket();
 
-    // ── Initialiser le gestionnaire 7TV sur le main thread ──
+    // ── Setup sur le main thread ──────────────────────────────────────────────
     dispatch_async(dispatch_get_main_queue(), ^{
         [[SevenTVManager sharedManager] setup];
-        // registerClass reste utile pour les sessions "système" non swizzlées
         [NSURLProtocol registerClass:[SevenTVURLProtocol class]];
         [[SevenTVManager sharedManager] log:@"✅ SevenTVManager prêt, URLProtocol enregistré"];
 
