@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: 🗑️ Supprimer les artifacts de "Build TwitchSevenTV + Inject into IPA"
+      - name: 🗑️ Supprimer les anciens runs de "Build TwitchSevenTV + Inject into IPA"
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -39,13 +39,13 @@ jobs:
           fi
 
           echo "✅ Workflow trouvé — ID: $WORKFLOW_ID"
-          echo "🗑️  Suppression des artifacts en cours..."
+          echo "🗑️  Suppression des anciens runs (sauf le plus récent)..."
 
           PAGE=1
           DELETED=0
+          FIRST=true
 
           while true; do
-            # Récupérer les runs du workflow (page par page)
             RUNS=$(curl --silent \
               --header "Authorization: Bearer $GH_TOKEN" \
               --header "Accept: application/vnd.github+json" \
@@ -63,31 +63,25 @@ jobs:
             COUNT=$(echo "$RUNS" | wc -l | tr -d ' ')
 
             for RUN_ID in $RUNS; do
-              # Récupérer les artifacts de ce run
-              ARTIFACTS=$(curl --silent \
+              # Garder le tout premier run (le plus récent, retourné en premier par l'API)
+              if [ "$FIRST" = "true" ]; then
+                echo "  ⭐ Conservé (plus récent): $RUN_ID"
+                FIRST=false
+                continue
+              fi
+
+              HTTP=$(curl --silent --output /dev/null --write-out "%{http_code}" \
+                --request DELETE \
                 --header "Authorization: Bearer $GH_TOKEN" \
                 --header "Accept: application/vnd.github+json" \
-                "https://api.github.com/repos/${REPO}/actions/runs/${RUN_ID}/artifacts?per_page=100" | python3 -c "
-          import sys, json
-          data = json.load(sys.stdin)
-          for a in data.get('artifacts', []):
-              print(a['id'])
-          ")
+                "https://api.github.com/repos/${REPO}/actions/runs/${RUN_ID}")
 
-              for ART_ID in $ARTIFACTS; do
-                HTTP=$(curl --silent --output /dev/null --write-out "%{http_code}" \
-                  --request DELETE \
-                  --header "Authorization: Bearer $GH_TOKEN" \
-                  --header "Accept: application/vnd.github+json" \
-                  "https://api.github.com/repos/${REPO}/actions/artifacts/${ART_ID}")
-
-                if [ "$HTTP" = "204" ]; then
-                  DELETED=$((DELETED+1))
-                  echo "  ✅ Supprimé: $ART_ID (run $RUN_ID)"
-                else
-                  echo "  ⚠️  Échec ($HTTP): $ART_ID (run $RUN_ID)"
-                fi
-              done
+              if [ "$HTTP" = "204" ]; then
+                DELETED=$((DELETED+1))
+                echo "  ✅ Run supprimé: $RUN_ID"
+              else
+                echo "  ⚠️  Échec ($HTTP): $RUN_ID"
+              fi
             done
 
             [ "$COUNT" -lt 100 ] && break
@@ -95,4 +89,4 @@ jobs:
           done
 
           echo ""
-          echo "✅ Terminé — $DELETED artifact(s) supprimé(s)"
+          echo "✅ Terminé — $DELETED run(s) supprimé(s) (artifacts inclus)"
