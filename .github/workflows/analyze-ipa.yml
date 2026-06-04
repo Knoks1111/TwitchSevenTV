@@ -1,4 +1,4 @@
-name: 🔍 Analyser l'IPA modifiée
+name: 🔍 Analyser TwitchControl (strings)
 
 on:
   workflow_dispatch:
@@ -11,7 +11,7 @@ jobs:
     runs-on: macos-14
 
     steps:
-      - name: 📥 Télécharger l'IPA depuis les Releases
+      - name: 📥 Télécharger l'IPA
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -19,62 +19,22 @@ jobs:
             --repo "${{ github.repository }}" \
             --pattern "Twitch29.6.7TV.01.ipa" \
             --output Twitch_modded.ipa
-          echo "✅ Taille: $(du -sh Twitch_modded.ipa | cut -f1)"
-
-      - name: 🔎 Extraire et analyser
-        run: |
-          # Extraire l'IPA
           unzip -q Twitch_modded.ipa -d IPA_extracted
 
-          APP_PATH=$(find IPA_extracted/Payload -maxdepth 1 -name "*.app" -type d | head -1)
-          echo "📂 App: $APP_PATH"
-
-          # Trouver le binaire principal
-          APP_NAME=$(basename "$APP_PATH" .app)
-          BINARY="$APP_PATH/$APP_NAME"
-
+      - name: 🔎 Strings TwitchControl
+        run: |
+          DYLIB="IPA_extracted/Payload/Twitch.app/Frameworks/TwitchControl0.0.5.dylib"
+          echo "==== URLs / domaines ===="
+          strings "$DYLIB" | grep -iE "(http|cdn|domain|url|host|7tv|emote|animated|webp|gif|block|filter|deny)" | sort -u
           echo ""
-          echo "========================================"
-          echo "  📦 DYLIBS INJECTÉS DANS LE BINAIRE"
-          echo "========================================"
-          otool -L "$BINARY"
+          echo "==== Toutes les strings ===="
+          strings "$DYLIB"
 
+      - name: 🔎 Strings MadeByMohkg
+        run: |
+          DYLIB="IPA_extracted/Payload/Twitch.app/Frameworks/MadeByMohkg.dylib"
+          echo "==== URLs / domaines ===="
+          strings "$DYLIB" | grep -iE "(http|cdn|domain|url|host|7tv|emote|animated|webp|gif|block|filter|deny)" | sort -u
           echo ""
-          echo "========================================"
-          echo "  📁 DYLIBS CUSTOM (hors Apple/système)"
-          echo "========================================"
-          otool -L "$BINARY" | grep -vE "(/usr/lib|/System|Frameworks/|dyld)" | grep -v "$APP_NAME" || echo "Aucun"
-
-          echo ""
-          echo "========================================"
-          echo "  📁 CONTENU DE Frameworks/"
-          echo "========================================"
-          ls -lah "$APP_PATH/Frameworks/" 2>/dev/null || echo "Pas de dossier Frameworks/"
-
-          echo ""
-          echo "========================================"
-          echo "  📁 DYLIBS LIBRES DANS LE .app"
-          echo "========================================"
-          find "$APP_PATH" -maxdepth 1 -name "*.dylib" | while read f; do
-            echo "  → $(basename $f) ($(du -sh "$f" | cut -f1))"
-          done
-
-          echo ""
-          echo "========================================"
-          echo "  📋 INFO.PLIST — clés modifiées"
-          echo "========================================"
-          plutil -p "$APP_PATH/Info.plist" | grep -iE "(bundle|version|name|exec)" | head -20
-
-          echo ""
-          echo "========================================"
-          echo "  🔍 ANALYSE DE CHAQUE DYLIB CUSTOM"
-          echo "========================================"
-          find "$APP_PATH" -name "*.dylib" | while read dylib; do
-            echo ""
-            echo "--- $(basename $dylib) ---"
-            echo "Taille: $(du -sh "$dylib" | cut -f1)"
-            echo "Dépendances:"
-            otool -L "$dylib" | grep -vE "(/usr/lib|/System)" | head -10
-            echo "Symboles exportés (top 20):"
-            nm -gU "$dylib" 2>/dev/null | grep -iE "(sevent|animated|emote|chat|ad|block)" | head -20 || echo "  Aucun symbole pertinent trouvé"
-          done
+          echo "==== Toutes les strings ===="
+          strings "$DYLIB"
