@@ -544,116 +544,149 @@ static const char kS7TVAttachDuration = 4;
 
 
 // ────────────────────────────────────────────────────────────
-// MARK: - Hook UITextField — bouton 7TV dans la barre de saisie
+// MARK: - Injection bouton 7TV dans la barre de saisie Twitch
 //
-// Twitch utilise un UITextField pour la barre "Envoyer un message".
-// On swizzle becomeFirstResponder pour détecter quand ce champ
-// devient actif, et on y injecte un bouton 7TV en rightView.
-//
-// Critères de détection du bon UITextField :
-//   • placeholder contient "message" ou "chat" (insensible à la casse)
-//   • OU le TextField est dans une vue dont la classe contient "Chat" ou "Input"
-//
-// Le bouton est identique visuellement à l'icône "7ᵥ" visible dans le
-// screen de référence (couleur violette, SF Symbol ou texte "7TV").
+// Stratégie: scan périodique (CADisplayLink ~2fps) de TOUS les
+// UITextField visibles. On injecte le bouton dès qu'on trouve un
+// champ qui ressemble à la barre de chat (critères larges).
+// Une fois injecté (kS7TVTextFieldTagged), on ne le retraite plus.
 // ────────────────────────────────────────────────────────────
 
-// Clé pour marquer un UITextField déjà équipé du bouton
 static const char kS7TVTextFieldTagged = 5;
 
-@interface UITextField (SevenTVChatBar)
-- (BOOL)s7tv_becomeFirstResponder;
-@end
-
-@implementation UITextField (SevenTVChatBar)
-
-- (BOOL)s7tv_becomeFirstResponder {
-    BOOL result = [self s7tv_becomeFirstResponder];
-
-    // Eviter de traiter plusieurs fois le même field
-    if (objc_getAssociatedObject(self, &kS7TVTextFieldTagged)) return result;
-
-    // Détecter si c'est la barre de chat Twitch
-    BOOL isChatBar = NO;
-
-    NSString *placeholder = self.placeholder.lowercaseString ?: @"";
-    if ([placeholder containsString:@"message"] ||
-        [placeholder containsString:@"chat"] ||
-        [placeholder containsString:@"envoyer"]) {
-        isChatBar = YES;
+// Trouve récursivement tous les UITextField dans une vue
+static void s7tv_findTextFields(UIView *view, NSMutableArray<UITextField *> *result) {
+    if (!view || view.isHidden || view.alpha < 0.01) return;
+    if ([view isKindOfClass:[UITextField class]]) {
+        [result addObject:(UITextField *)view];
     }
+    for (UIView *sub in view.subviews) {
+        s7tv_findTextFields(sub, result);
+    }
+}
 
-    if (!isChatBar) {
-        // Remonter la hiérarchie des vues pour chercher "Chat" ou "Input"
-        UIView *v = self.superview;
-        for (int i = 0; i < 8 && v; i++, v = v.superview) {
-            NSString *cn = NSStringFromClass([v class]).lowercaseString;
-            if ([cn containsString:@"chat"] || [cn containsString:@"input"] ||
-                [cn containsString:@"compose"] || [cn containsString:@"message"]) {
-                isChatBar = YES;
-                break;
-            }
+static BOOL s7tv_isChatTextField(UITextField *tf) {
+    // Critère 1: placeholder (toutes langues)
+    NSString *ph = tf.placeholder.lowercaseString ?: @"";
+    if ([ph containsString:@"message"] || [ph containsString:@"chat"] ||
+        [ph containsString:@"envoyer"] || [ph containsString:@"send"] ||
+        [ph containsString:@"say"] || [ph containsString:@"type"]) {
+        return YES;
+    }
+    // Critère 2: hiérarchie de vues
+    UIView *v = tf.superview;
+    for (int i = 0; i < 10 && v; i++, v = v.superview) {
+        NSString *cn = NSStringFromClass([v class]).lowercaseString;
+        if ([cn containsString:@"chat"]    || [cn containsString:@"input"] ||
+            [cn containsString:@"compose"] || [cn containsString:@"message"] ||
+            [cn containsString:@"bottom"]  || [cn containsString:@"bar"]) {
+            return YES;
         }
     }
+    // Critère 3: le TextField est en bas de l'écran (y > 60% hauteur)
+    UIWindow *w = [UIApplication sharedApplication].windows.firstObject;
+    CGRect frame = [tf convertRect:tf.bounds toView:w];
+    CGFloat screenH = [UIScreen mainScreen].bounds.size.height;
+    if (frame.origin.y > screenH * 0.6 && tf.bounds.size.height < 60) {
+        return YES;
+    }
+    return NO;
+}
 
-    if (!isChatBar) return result;
+static void s7tv_injectButtonInTextField(UITextField *tf) {
+    if (objc_getAssociatedObject(tf, &kS7TVTextFieldTagged)) return;
+    if (!s7tv_isChatTextField(tf)) return;
 
-    // Marquer comme traité
-    objc_setAssociatedObject(self, &kS7TVTextFieldTagged, @YES,
+    objc_setAssociatedObject(tf, &kS7TVTextFieldTagged, @YES,
                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
-    // Construire le bouton 7TV
-    UIButton *s7tvBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    s7tvBtn.frame = CGRectMake(0, 0, 36, 36);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
+        btn.frame = CGRectMake(0, 0, 32, 32);
 
-    // Icône : utilise SF Symbol "sparkles" si dispo, sinon texte "7ᵥ"
-    UIImage *icon = [UIImage systemImageNamed:@"sparkles"];
-    if (icon) {
-        UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration
-            configurationWithPointSize:16 weight:UIImageSymbolWeightMedium];
-        icon = [UIImage systemImageNamed:@"sparkles"
-                       withConfiguration:cfg];
-        [s7tvBtn setImage:icon forState:UIControlStateNormal];
-        s7tvBtn.tintColor = [UIColor colorWithRed:0.55 green:0.25 blue:0.95 alpha:1.0];
-    } else {
-        // Fallback texte
-        [s7tvBtn setTitle:@"7ᵥ" forState:UIControlStateNormal];
-        [s7tvBtn setTitleColor:[UIColor colorWithRed:0.55 green:0.25 blue:0.95 alpha:1.0]
+        // Icône SF Symbol "sparkles" violet — identique au screen de référence
+        UIImageSymbolConfiguration *symCfg = [UIImageSymbolConfiguration
+            configurationWithPointSize:15 weight:UIImageSymbolWeightMedium];
+        UIImage *icon = [UIImage systemImageNamed:@"sparkles" withConfiguration:symCfg];
+        if (icon) {
+            [btn setImage:icon forState:UIControlStateNormal];
+            btn.tintColor = [UIColor colorWithRed:0.55 green:0.25 blue:0.95 alpha:1.0];
+        } else {
+            [btn setTitle:@"7ᵥ" forState:UIControlStateNormal];
+            [btn setTitleColor:[UIColor colorWithRed:0.55 green:0.25 blue:0.95 alpha:1.0]
                       forState:UIControlStateNormal];
-        s7tvBtn.titleLabel.font = [UIFont boldSystemFontOfSize:14];
-    }
+            btn.titleLabel.font = [UIFont boldSystemFontOfSize:13];
+        }
 
-    // Stocker une référence forte au TextField pour le callback
-    UITextField *capturedField = self;
+        // Stocker le TextField sur le bouton pour le callback
+        objc_setAssociatedObject(btn, &kS7TVTextFieldTagged, tf,
+                                 OBJC_ASSOCIATION_ASSIGN);
 
-    [s7tvBtn addTarget:[SevenTVManager sharedManager]
-                action:@selector(_emotePickerCloseTapped) // placeholder, remplacé ci-dessous
-      forControlEvents:UIControlEventTouchUpInside];
-
-    // On utilise un bloc via objc associated object pour passer le textField
-    // au tap (impossible directement avec addTarget:action: sans paramètre custom)
-    objc_setAssociatedObject(s7tvBtn, &kS7TVTextFieldTagged, capturedField,
-                             OBJC_ASSOCIATION_ASSIGN); // assign: tf vivant tant que la vue est visible
-
-    [s7tvBtn removeTarget:nil action:nil forControlEvents:UIControlEventTouchUpInside];
-    [s7tvBtn addTarget:[SevenTVManager sharedManager]
+        [btn addTarget:[SevenTVManager sharedManager]
                 action:@selector(s7tv_emoteButtonTappedForButton:)
       forControlEvents:UIControlEventTouchUpInside];
 
-    // Wrapper pour le padding droit
-    UIView *wrapper = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 40, 36)];
-    s7tvBtn.center = CGPointMake(18, 18);
-    [wrapper addSubview:s7tvBtn];
+        // Wrapper avec padding
+        UIView *wrapper = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 36, 32)];
+        btn.center = CGPointMake(18, 16);
+        [wrapper addSubview:btn];
 
-    self.rightView     = wrapper;
-    self.rightViewMode = UITextFieldViewModeAlways;
+        tf.rightView     = wrapper;
+        tf.rightViewMode = UITextFieldViewModeAlways;
 
-    [[SevenTVManager sharedManager] log:@"🎹 Bouton 7TV injecté dans la barre de saisie"];
-
-    return result;
+        [[SevenTVManager sharedManager] log:@"🎹 Bouton 7TV injecté (placeholder: \"%@\")",
+         tf.placeholder ?: @"(vide)"];
+    });
 }
 
-@end
+// Timer de scan — tourne à ~2fps, s'arrête après 60s sans trouver de champ
+// (évite de tourner indéfiniment en dehors du chat)
+static CADisplayLink *s_chatScanLink = nil;
+static NSInteger      s_chatScanMiss = 0;
+
+static void s7tv_startChatBarScan(void) {
+    if (s_chatScanLink) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        s_chatScanLink = [CADisplayLink displayLinkWithTarget:[NSBlockOperation blockOperationWithBlock:^{
+            UIWindow *keyWindow = nil;
+            for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+                if ([scene isKindOfClass:[UIWindowScene class]])
+                    for (UIWindow *w in ((UIWindowScene *)scene).windows)
+                        if (w.isKeyWindow) { keyWindow = w; break; }
+            }
+            if (!keyWindow) keyWindow = [UIApplication sharedApplication].windows.firstObject;
+            if (!keyWindow) return;
+
+            NSMutableArray<UITextField *> *fields = [NSMutableArray array];
+            s7tv_findTextFields(keyWindow, fields);
+
+            BOOL found = NO;
+            for (UITextField *tf in fields) {
+                if (s7tv_isChatTextField(tf)) {
+                    s7tv_injectButtonInTextField(tf);
+                    found = YES;
+                    s_chatScanMiss = 0;
+                }
+            }
+            if (!found) {
+                s_chatScanMiss++;
+                // Après 120 ticks sans trouver (~60s à 2fps) → pause
+                if (s_chatScanMiss > 120) {
+                    [s_chatScanLink invalidate];
+                    s_chatScanLink = nil;
+                    s_chatScanMiss = 0;
+                    // Relancer après 10s (l'utilisateur navigue peut-être)
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 10LL * NSEC_PER_SEC),
+                                   dispatch_get_main_queue(), ^{
+                        s7tv_startChatBarScan();
+                    });
+                }
+            }
+        }] selector:@selector(main)];
+        s_chatScanLink.preferredFramesPerSecond = 2;
+        [s_chatScanLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+    });
+}
 
 
 // ────────────────────────────────────────────────────────────
@@ -668,12 +701,6 @@ static const char kS7TVTextFieldTagged = 5;
 
 - (void)s7tv_emoteButtonTappedForButton:(UIButton *)sender {
     UITextField *tf = objc_getAssociatedObject(sender, &kS7TVTextFieldTagged);
-    if (!tf) {
-        // Fallback: trouver le premier responder UITextField
-        UIWindow *w = [UIApplication sharedApplication].windows.firstObject;
-        UIView *fr = [w performSelector:@selector(firstResponder)];
-        if ([fr isKindOfClass:[UITextField class]]) tf = (UITextField *)fr;
-    }
     [self toggleEmotePickerForTextField:tf];
 }
 
@@ -1187,11 +1214,12 @@ static void TwitchSevenTVInit(void) {
     SevenTVManager *mgr = [SevenTVManager sharedManager];
     [mgr log:@"🔌 Chargement TwitchSevenTV v2.0 (substrate-free)..."];
 
-    // ── Swizzle UITextField becomeFirstResponder (bouton 7TV barre de saisie) ─
-    s7tv_swizzle([UITextField class],
-                 [UITextField class],
-                 @selector(becomeFirstResponder),
-                 @selector(s7tv_becomeFirstResponder));
+    // ── Scan périodique pour injecter le bouton 7TV dans la barre de saisie ────
+    // Démarré après 3s pour laisser Twitch construire son UI
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        s7tv_startChatBarScan();
+    });
 
     // ── Swizzle UIImage imageWithData: (décodage WebP/GIF + tag) ──────────────
     s7tv_swizzle(object_getClass([UIImage class]),
