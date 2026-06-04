@@ -97,6 +97,10 @@ extern NSString *const S7TVLogsDidUpdateNotification;
 // --- UI ---
 - (void)addSettingsButton;
 
+// Affiche/masque le picker d'emotes 7TV au-dessus de la barre de saisie.
+// textField: la UITextField de la barre de chat Twitch (pour insérer le nom).
+- (void)toggleEmotePickerForTextField:(UITextField *)textField;
+
 // --- Logs ---
 // log: est TOUJOURS enregistré dans le buffer in-app (indépendamment de debugLogging).
 // Si debugLogging == YES, la ligne est aussi envoyée à NSLog / Console.

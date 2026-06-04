@@ -74,6 +74,14 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
 // Fenêtre dédiée au bouton flottant (strong = reste en vie toute la session)
 @property (nonatomic, strong) UIWindow *floatingWindow;
 
+// Picker d'emotes inline (affiché au-dessus de la barre de saisie)
+@property (nonatomic, strong) UIView              *emotePickerView;
+@property (nonatomic, weak)   UITextField         *emotePickerTextField;
+@property (nonatomic, strong) UICollectionView    *emoteCollectionView;
+@property (nonatomic, strong) UITextField         *emoteSearchField;
+@property (nonatomic, strong) NSArray<SevenTVEmote *> *emotePickerEmotes;
+@property (nonatomic, strong) NSArray<SevenTVEmote *> *emotePickerAllEmotes;
+
 // Buffer de logs in-app
 @property (nonatomic, strong) NSMutableArray<NSString *> *logBuffer;
 @property (nonatomic, strong) NSLock *logLock;
@@ -1045,6 +1053,301 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
     if (!emote) return nil;
     return [NSURL URLWithString:
             [NSString stringWithFormat:@"%@/%@/4x.webp", S7TV_CDN_BASE, emote.emoteID]];
+}
+
+
+// ============================================================
+// MARK: - Picker d'emotes 7TV
+//
+// Affiché au-dessus de la barre de saisie Twitch quand l'utilisateur
+// tape sur le bouton 7TV intégré dans la barre.
+// Interface : grille de cellules (emoji-like) + barre de recherche.
+// Tap sur une emote → insère le nom dans le TextField.
+// ============================================================
+
+// ID de cellule pour la collection
+static NSString *const kEmoteCellID = @"S7TVEmoteCell";
+
+// Hauteur du picker
+static const CGFloat kPickerHeight  = 220.0;
+// Taille de chaque cellule (carré)
+static const CGFloat kCellSize      = 52.0;
+
+- (void)toggleEmotePickerForTextField:(UITextField *)textField {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        // ── Si le picker est déjà visible → le fermer ─────────────────────────
+        if (self.emotePickerView && !self.emotePickerView.isHidden) {
+            [self _hideEmotePicker];
+            return;
+        }
+        self.emotePickerTextField = textField;
+        [self _buildAndShowEmotePickerForTextField:textField];
+    });
+}
+
+- (void)_hideEmotePicker {
+    [UIView animateWithDuration:0.2 animations:^{
+        self.emotePickerView.alpha = 0;
+        self.emotePickerView.transform = CGAffineTransformMakeTranslation(0, 20);
+    } completion:^(BOOL done) {
+        self.emotePickerView.hidden = YES;
+        self.emotePickerView.alpha = 1;
+        self.emotePickerView.transform = CGAffineTransformIdentity;
+    }];
+}
+
+- (void)_buildAndShowEmotePickerForTextField:(UITextField *)textField {
+    // ── Rassembler toutes les emotes (channel d'abord, puis globales) ──────
+    __block NSDictionary *global, *channel;
+    dispatch_sync(self.emoteQueue, ^{
+        global  = self.globalEmotes  ?: @{};
+        channel = self.channelEmotes ?: @{};
+    });
+
+    NSMutableArray<SevenTVEmote *> *all = [NSMutableArray array];
+    // Channel en premier (plus pertinent)
+    for (NSString *key in [channel.allKeys sortedArrayUsingSelector:@selector(caseInsensitiveCompare:)])
+        [all addObject:channel[key]];
+    for (NSString *key in [global.allKeys sortedArrayUsingSelector:@selector(caseInsensitiveCompare:)]) {
+        if (!channel[key]) [all addObject:global[key]]; // pas de doublons
+    }
+    self.emotePickerAllEmotes = [all copy];
+    self.emotePickerEmotes    = self.emotePickerAllEmotes;
+
+    // ── Trouver la fenêtre clé ─────────────────────────────────────────────
+    UIWindow *keyWindow = nil;
+    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+        if ([scene isKindOfClass:[UIWindowScene class]])
+            for (UIWindow *w in ((UIWindowScene *)scene).windows)
+                if (w.isKeyWindow) { keyWindow = w; break; }
+    }
+    if (!keyWindow) keyWindow = [UIApplication sharedApplication].windows.firstObject;
+    if (!keyWindow) return;
+
+    CGRect screenBounds = keyWindow.bounds;
+
+    // ── Trouver la position Y du TextField dans la fenêtre ────────────────
+    CGRect tfFrame = [textField convertRect:textField.bounds toView:keyWindow];
+    CGFloat pickerY = tfFrame.origin.y - kPickerHeight - 4.0;
+    if (pickerY < 0) pickerY = 0;
+
+    CGRect pickerFrame = CGRectMake(0, pickerY, screenBounds.size.width, kPickerHeight);
+
+    // ── Créer ou réutiliser le picker ─────────────────────────────────────
+    if (!self.emotePickerView) {
+        [self _createEmotePickerViewWithFrame:pickerFrame inWindow:keyWindow];
+    } else {
+        self.emotePickerView.frame = pickerFrame;
+        [keyWindow addSubview:self.emotePickerView]; // re-attacher si nécessaire
+    }
+
+    // Reset la recherche
+    self.emoteSearchField.text = @"";
+    self.emotePickerEmotes = self.emotePickerAllEmotes;
+    [self.emoteCollectionView reloadData];
+    [self.emoteCollectionView setContentOffset:CGPointZero animated:NO];
+
+    // ── Afficher avec animation ────────────────────────────────────────────
+    self.emotePickerView.hidden    = NO;
+    self.emotePickerView.alpha     = 0;
+    self.emotePickerView.transform = CGAffineTransformMakeTranslation(0, 20);
+    [UIView animateWithDuration:0.22
+                          delay:0
+         usingSpringWithDamping:0.85
+          initialSpringVelocity:0
+                        options:UIViewAnimationOptionCurveEaseOut
+                     animations:^{
+        self.emotePickerView.alpha     = 1;
+        self.emotePickerView.transform = CGAffineTransformIdentity;
+    } completion:nil];
+}
+
+- (void)_createEmotePickerViewWithFrame:(CGRect)frame inWindow:(UIWindow *)window {
+    // ── Conteneur principal ────────────────────────────────────────────────
+    UIView *picker = [[UIView alloc] initWithFrame:frame];
+    picker.backgroundColor = [UIColor systemBackgroundColor];
+    // Séparateur/ombre en haut
+    picker.layer.shadowColor   = [UIColor blackColor].CGColor;
+    picker.layer.shadowOffset  = CGSizeMake(0, -2);
+    picker.layer.shadowRadius  = 6;
+    picker.layer.shadowOpacity = 0.12;
+    self.emotePickerView = picker;
+
+    // ── Barre de titre + recherche ─────────────────────────────────────────
+    UIView *headerView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, frame.size.width, 44)];
+    headerView.backgroundColor = [UIColor secondarySystemBackgroundColor];
+
+    // Séparateur bas du header
+    UIView *sep = [[UIView alloc] initWithFrame:CGRectMake(0, 43.5, frame.size.width, 0.5)];
+    sep.backgroundColor = [UIColor separatorColor];
+    sep.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    [headerView addSubview:sep];
+
+    // Label "7TV" à gauche (avec icône violette)
+    UILabel *titleLbl = [[UILabel alloc] initWithFrame:CGRectMake(12, 0, 80, 44)];
+    titleLbl.text = @"🟣 7TV";
+    titleLbl.font = [UIFont boldSystemFontOfSize:13];
+    titleLbl.textColor = [UIColor labelColor];
+    [headerView addSubview:titleLbl];
+
+    // Champ de recherche centré
+    UITextField *search = [[UITextField alloc] initWithFrame:
+        CGRectMake(90, 7, frame.size.width - 90 - 52, 30)];
+    search.placeholder        = @"Rechercher…";
+    search.font               = [UIFont systemFontOfSize:13];
+    search.returnKeyType      = UIReturnKeyDone;
+    search.clearButtonMode    = UITextFieldViewModeWhileEditing;
+    search.backgroundColor    = [UIColor tertiarySystemBackgroundColor];
+    search.layer.cornerRadius = 8;
+    search.leftView = [[UIView alloc] initWithFrame:CGRectMake(0,0,8,1)];
+    search.leftViewMode = UITextFieldViewModeAlways;
+    search.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    [search addTarget:self action:@selector(_emoteSearchChanged:)
+     forControlEvents:UIControlEventEditingChanged];
+    self.emoteSearchField = search;
+    [headerView addSubview:search];
+
+    // Bouton fermer (×) à droite
+    UIButton *closeBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    closeBtn.frame = CGRectMake(frame.size.width - 44, 0, 44, 44);
+    closeBtn.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
+    [closeBtn setImage:[UIImage systemImageNamed:@"xmark"] forState:UIControlStateNormal];
+    closeBtn.tintColor = [UIColor secondaryLabelColor];
+    [closeBtn addTarget:self action:@selector(_emotePickerCloseTapped)
+       forControlEvents:UIControlEventTouchUpInside];
+    [headerView addSubview:closeBtn];
+
+    headerView.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    [picker addSubview:headerView];
+
+    // ── Collection View ────────────────────────────────────────────────────
+    UICollectionViewFlowLayout *layout = [[UICollectionViewFlowLayout alloc] init];
+    layout.itemSize         = CGSizeMake(kCellSize, kCellSize);
+    layout.minimumInteritemSpacing = 2;
+    layout.minimumLineSpacing      = 2;
+    layout.sectionInset = UIEdgeInsetsMake(6, 8, 6, 8);
+
+    UICollectionView *cv = [[UICollectionView alloc]
+        initWithFrame:CGRectMake(0, 44, frame.size.width, kPickerHeight - 44)
+ collectionViewLayout:layout];
+    cv.backgroundColor     = [UIColor systemBackgroundColor];
+    cv.autoresizingMask    = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    cv.dataSource          = (id<UICollectionViewDataSource>)self;
+    cv.delegate            = (id<UICollectionViewDelegate>)self;
+    cv.alwaysBounceHorizontal = YES;
+    cv.alwaysBounceVertical   = NO;
+    [cv registerClass:[UICollectionViewCell class] forCellWithReuseIdentifier:kEmoteCellID];
+    self.emoteCollectionView = cv;
+    [picker addSubview:cv];
+
+    [window addSubview:picker];
+}
+
+// ── Recherche ──────────────────────────────────────────────────────────────
+
+- (void)_emoteSearchChanged:(UITextField *)field {
+    NSString *query = [field.text stringByTrimmingCharactersInSet:
+                       [NSCharacterSet whitespaceCharacterSet]];
+    if (query.length == 0) {
+        self.emotePickerEmotes = self.emotePickerAllEmotes;
+    } else {
+        NSString *lower = query.lowercaseString;
+        self.emotePickerEmotes = [self.emotePickerAllEmotes filteredArrayUsingPredicate:
+            [NSPredicate predicateWithBlock:^BOOL(SevenTVEmote *e, NSDictionary *_) {
+                return [e.emoteName.lowercaseString containsString:lower];
+            }]];
+    }
+    [self.emoteCollectionView reloadData];
+    [self.emoteCollectionView setContentOffset:CGPointZero animated:NO];
+}
+
+- (void)_emotePickerCloseTapped {
+    [self _hideEmotePicker];
+}
+
+// ── UICollectionViewDataSource ─────────────────────────────────────────────
+
+- (NSInteger)collectionView:(UICollectionView *)cv numberOfItemsInSection:(NSInteger)section {
+    return (NSInteger)self.emotePickerEmotes.count;
+}
+
+- (UICollectionViewCell *)collectionView:(UICollectionView *)cv
+                  cellForItemAtIndexPath:(NSIndexPath *)indexPath {
+    UICollectionViewCell *cell = [cv dequeueReusableCellWithReuseIdentifier:kEmoteCellID
+                                                                forIndexPath:indexPath];
+    cell.backgroundColor = [UIColor clearColor];
+
+    // Nettoyer la cellule recyclée
+    for (UIView *sub in cell.contentView.subviews) [sub removeFromSuperview];
+
+    SevenTVEmote *emote = self.emotePickerEmotes[(NSUInteger)indexPath.item];
+
+    // Image de l'emote
+    UIImageView *iv = [[UIImageView alloc] initWithFrame:CGRectMake(4, 4, 36, 36)];
+    iv.contentMode = UIViewContentModeScaleAspectFit;
+    iv.center = CGPointMake(kCellSize/2, kCellSize/2 - 6);
+
+    // Charger depuis le cache URL
+    NSURL *emoteURL = [self cdnURLForEmote:emote];
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:emoteURL];
+    req.cachePolicy = NSURLRequestReturnCacheDataDontLoad;
+
+    // On utilise la session partagée pour lire depuis le cache 7TV
+    // Si pas en cache → requête réseau légère
+    NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration ephemeralSessionConfiguration];
+    cfg.URLCache = [NSURLCache sharedURLCache];
+    NSURLSession *sess = [NSURLSession sessionWithConfiguration:cfg];
+    [sess dataTaskWithURL:emoteURL completionHandler:^(NSData *data, NSURLResponse *r, NSError *e) {
+        if (!data) return;
+        UIImage *img = [UIImage imageWithData:data];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            // Vérifier que la cellule est encore pour la même emote
+            NSInteger currentItem = [cv indexPathForCell:cell].item;
+            if (currentItem == indexPath.item || currentItem == NSNotFound) {
+                iv.image = img;
+            }
+        });
+    }] resume];
+
+    [cell.contentView addSubview:iv];
+
+    // Label nom
+    UILabel *lbl = [[UILabel alloc] initWithFrame:
+        CGRectMake(0, kCellSize - 16, kCellSize, 14)];
+    lbl.text          = emote.emoteName;
+    lbl.font          = [UIFont systemFontOfSize:9];
+    lbl.textAlignment = NSTextAlignmentCenter;
+    lbl.textColor     = [UIColor secondaryLabelColor];
+    lbl.lineBreakMode = NSLineBreakByTruncatingTail;
+    [cell.contentView addSubview:lbl];
+
+    return cell;
+}
+
+// ── UICollectionViewDelegate ───────────────────────────────────────────────
+
+- (void)collectionView:(UICollectionView *)cv didSelectItemAtIndexPath:(NSIndexPath *)indexPath {
+    SevenTVEmote *emote = self.emotePickerEmotes[(NSUInteger)indexPath.item];
+
+    // Insérer le nom de l'emote dans le TextField
+    UITextField *tf = self.emotePickerTextField;
+    if (tf) {
+        NSString *current = tf.text ?: @"";
+        // Ajouter un espace avant si le champ n'est pas vide et ne finit pas par un espace
+        NSString *prefix = (current.length > 0 &&
+                            ![current hasSuffix:@" "]) ? @" " : @"";
+        tf.text = [NSString stringWithFormat:@"%@%@%@ ", current, prefix, emote.emoteName];
+
+        // Notifier UITextField du changement (pour que Twitch détecte la modif)
+        [tf sendActionsForControlEvents:UIControlEventEditingChanged];
+    }
+
+    // Feedback haptique léger
+    UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc]
+        initWithStyle:UIImpactFeedbackStyleLight];
+    [haptic impactOccurred];
+
+    [self _hideEmotePicker];
 }
 
 
