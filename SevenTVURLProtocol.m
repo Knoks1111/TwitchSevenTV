@@ -73,14 +73,16 @@ static dispatch_once_t  s_cdnSessionOnce;
 
 static NSURLSession *SevenTVGetCDNSession(void) {
     dispatch_once(&s_cdnSessionOnce, ^{
+        // ephemeralSessionConfiguration : configuration VIERGE, sans héritage
+        // du sharedURLCache ni des hooks de TwitchControl (setRequestCachePolicy:,
+        // removeAllCachedResponses). defaultSessionConfiguration hérite du
+        // sharedURLCache que TwitchControl vide périodiquement → cache miss
+        // systématique sur toutes les emotes → re-téléchargement à chaque fois.
         NSURLSessionConfiguration *cfg =
-            [NSURLSessionConfiguration defaultSessionConfiguration];
-        cfg.URLCache           = SevenTVGetSharedCache();
+            [NSURLSessionConfiguration ephemeralSessionConfiguration];
+        cfg.URLCache           = SevenTVGetSharedCache(); // notre cache isolé
         cfg.requestCachePolicy = NSURLRequestReturnCacheDataElseLoad;
-        // Vider protocolClasses : SevenTVURLProtocol n'est pas dans cette
-        // session → pas de boucle d'interception → kHandledKey inutile →
-        // les requêtes sont cachées sous la clé URL brute.
-        cfg.protocolClasses    = @[];
+        cfg.protocolClasses    = @[]; // pas de boucle d'interception
         s_cdnSession = [NSURLSession sessionWithConfiguration:cfg];
     });
     return s_cdnSession;
@@ -92,8 +94,10 @@ static dispatch_once_t  s_prefetchSessionOnce;
 
 static NSURLSession *SevenTVGetPrefetchSession(void) {
     dispatch_once(&s_prefetchSessionOnce, ^{
+        // Même raison qu'au-dessus : ephemeral isole du sharedURLCache
+        // et des hooks TwitchControl. Même cache partagé s_emoteCache.
         NSURLSessionConfiguration *cfg =
-            [NSURLSessionConfiguration defaultSessionConfiguration];
+            [NSURLSessionConfiguration ephemeralSessionConfiguration];
         cfg.URLCache           = SevenTVGetSharedCache();
         cfg.requestCachePolicy = NSURLRequestReturnCacheDataElseLoad;
         cfg.protocolClasses    = @[];
@@ -113,8 +117,9 @@ static dispatch_once_t  s_urgentSessionOnce;
 
 static NSURLSession *SevenTVGetUrgentSession(void) {
     dispatch_once(&s_urgentSessionOnce, ^{
+        // Même raison : ephemeral pour isolation totale.
         NSURLSessionConfiguration *cfg =
-            [NSURLSessionConfiguration defaultSessionConfiguration];
+            [NSURLSessionConfiguration ephemeralSessionConfiguration];
         cfg.URLCache           = SevenTVGetSharedCache(); // même cache que bulk
         cfg.requestCachePolicy = NSURLRequestReturnCacheDataElseLoad;
         cfg.protocolClasses    = @[];

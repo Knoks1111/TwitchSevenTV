@@ -138,6 +138,13 @@ static const char kS7TVReloadGuard = 0;
         self.animationDuration    = image.duration > 0 ? image.duration : 1.0;
         self.animationRepeatCount = 0;
         [self startAnimating];
+        // ⚠️  NE PAS faire le reset attributedText pour une image animée.
+        // Le reset appelle setImage: avec l'image statique (NSTextAttachment.image
+        // = première frame) → tue l'animation immédiatement. L'image animée est
+        // déjà affichée dans la UIImageView grâce au startAnimating ci-dessus.
+        // TwitchControl vide le sharedURLCache → nos sessions sont maintenant en
+        // ephemeral → plus jamais de re-fetch statique. Pas besoin du reset ici.
+        return;
     }
 
     // ── Filtres : ne traiter que les emotes ───────────────────────────────────
