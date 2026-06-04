@@ -94,12 +94,35 @@ static NSURLSession *SevenTVGetPrefetchSession(void) {
     dispatch_once(&s_prefetchSessionOnce, ^{
         NSURLSessionConfiguration *cfg =
             [NSURLSessionConfiguration defaultSessionConfiguration];
-        cfg.URLCache           = SevenTVGetSharedCache(); // même cache que CDN
+        cfg.URLCache           = SevenTVGetSharedCache();
         cfg.requestCachePolicy = NSURLRequestReturnCacheDataElseLoad;
-        cfg.protocolClasses    = @[];                     // pas de URLProtocol
+        cfg.protocolClasses    = @[];
+        // 4 connexions max pour le bulk — laisse de la place à l'urgent session
+        cfg.HTTPMaximumConnectionsPerHost = 4;
         s_prefetchSession = [NSURLSession sessionWithConfiguration:cfg];
     });
     return s_prefetchSession;
+}
+
+// Session urgente — utilisée UNIQUEMENT par prefetchEmoteID:completion:
+// (déclenché quand une emote apparaît dans le chat).
+// Complètement séparée de la bulk session → pas de contention HTTP/2.
+// Même NSURLCache partagé → les deux écrivent au même endroit.
+static NSURLSession    *s_urgentSession     = nil;
+static dispatch_once_t  s_urgentSessionOnce;
+
+static NSURLSession *SevenTVGetUrgentSession(void) {
+    dispatch_once(&s_urgentSessionOnce, ^{
+        NSURLSessionConfiguration *cfg =
+            [NSURLSessionConfiguration defaultSessionConfiguration];
+        cfg.URLCache           = SevenTVGetSharedCache(); // même cache que bulk
+        cfg.requestCachePolicy = NSURLRequestReturnCacheDataElseLoad;
+        cfg.protocolClasses    = @[];
+        // 3 connexions dédiées aux emotes urgentes — jamais bloquées par le bulk
+        cfg.HTTPMaximumConnectionsPerHost = 3;
+        s_urgentSession = [NSURLSession sessionWithConfiguration:cfg];
+    });
+    return s_urgentSession;
 }
 
 // ── URL CDN pour un emote ID ─────────────────────────────────────────────────
@@ -304,7 +327,10 @@ static NSURL *SevenTVCDNURLForEmoteID(NSString *emoteID) {
     req.cachePolicy     = NSURLRequestReturnCacheDataElseLoad;
     req.timeoutInterval = 30.0;
 
-    [[SevenTVGetPrefetchSession() dataTaskWithRequest:req
+    // Session URGENTE — indépendante du bulk prefetch.
+    // Garantit que ce download n'est jamais mis en queue derrière les 335
+    // downloads du prefetch massif qui tournent en arrière-plan.
+    [[SevenTVGetUrgentSession() dataTaskWithRequest:req
                completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
         [[SevenTVManager sharedManager] log:@"📦 Préfetch %@ → %@", emoteID,
             err ? err.localizedDescription : @"OK"];
