@@ -14,55 +14,11 @@ on:
 env:
   THEOS: ${{ github.workspace }}/theos
 
-permissions:
-  actions: write   # supprimer les artifacts
-  contents: read   # checkout du repo
-
 jobs:
   build:
     runs-on: macos-14
 
     steps:
-
-      - name: 🧹 Supprimer tous les anciens artifacts
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          echo "🗑️  Suppression des anciens artifacts..."
-          REPO="${{ github.repository }}"
-
-          # Récupérer tous les artifacts (max 100 par page, on boucle)
-          PAGE=1
-          DELETED=0
-          while true; do
-            RESPONSE=$(curl --silent \
-              --header "Authorization: Bearer $GH_TOKEN" \
-              --header "Accept: application/vnd.github+json" \
-              "https://api.github.com/repos/${REPO}/actions/artifacts?per_page=100&page=${PAGE}")
-
-            IDS=$(echo "$RESPONSE" | python3 -c "
-          import sys, json
-          data = json.load(sys.stdin)
-          for a in data.get('artifacts', []):
-              print(a['id'])
-          ")
-            COUNT=$(echo "$IDS" | grep -c . || true)
-            [ "$COUNT" -eq 0 ] && break
-
-            for ID in $IDS; do
-              curl --silent --request DELETE \
-                --header "Authorization: Bearer $GH_TOKEN" \
-                --header "Accept: application/vnd.github+json" \
-                "https://api.github.com/repos/${REPO}/actions/artifacts/${ID}" \
-                && DELETED=$((DELETED+1)) || true
-            done
-
-            # Si moins de 100 résultats → dernière page
-            [ "$COUNT" -lt 100 ] && break
-            PAGE=$((PAGE+1))
-          done
-
-          echo "✅ $DELETED artifact(s) supprimé(s)"
 
       - name: 📥 Récupérer le code du tweak
         uses: actions/checkout@v4
