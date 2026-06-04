@@ -14,6 +14,9 @@ on:
 env:
   THEOS: ${{ github.workspace }}/theos
 
+permissions:
+  actions: write   # nécessaire pour supprimer les artifacts via l'API
+
 jobs:
   build:
     runs-on: macos-14
