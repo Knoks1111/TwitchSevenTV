@@ -40,7 +40,7 @@ TwitchSevenTV_LDFLAGS = \
     -Wl,-w
 
 # ── Frameworks Apple ──
-TwitchSevenTV_FRAMEWORKS = UIKit Foundation
+TwitchSevenTV_FRAMEWORKS = UIKit Foundation QuartzCore ImageIO
 
 # ── Pas de bundle ID cible (injection via IPA patching) ──
 

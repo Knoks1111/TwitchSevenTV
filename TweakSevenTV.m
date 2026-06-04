@@ -43,11 +43,21 @@
 
     const uint8_t *b = (const uint8_t *)data.bytes;
 
-    // Détecter GIF (47 49 46 38 = "GIF8") ou WebP (52 49 46 46 = "RIFF" + offset 8: "57 45 42 50" = "WEBP")
+    // ⚡️ FAST PATH: vérification des magic bytes UNIQUEMENT (lecture de 12 octets max).
+    // Ce check est fait AVANT tout appel à CGImageSourceCreateWithData.
+    // CGImageSourceCreateWithData est coûteux (parse le header complet) → si on
+    // le faisait pour toutes les images, ça ralentirait badges, avatars, thumbnails,
+    // emotes Twitch natives — tout ce qui passe par [UIImage imageWithData:].
+    // En sortant ici pour les formats non-animés, on n'ajoute aucun overhead visible.
     BOOL isGIF  = (b[0] == 0x47 && b[1] == 0x49 && b[2] == 0x46 && b[3] == 0x38);
     BOOL isWebP = (data.length >= 12 &&
                    b[0] == 0x52 && b[1] == 0x49 && b[2] == 0x46 && b[3] == 0x46 &&
                    b[8] == 0x57 && b[9] == 0x45 && b[10] == 0x42 && b[11] == 0x50);
+
+    // Ni GIF ni WebP → appel original immédiat, zéro overhead sur les assets Twitch natifs
+    if (!isGIF && !isWebP) {
+        return [self s7tv_imageWithData:data];
+    }
 
     if (isGIF || isWebP) {
         CGImageSourceRef src =
@@ -122,28 +132,77 @@
 - (void)s7tv_setImage:(UIImage *)image;
 @end
 
+// Clés pour les associated objects sur UIImageView (l'adresse est la clé, pas la valeur)
+static const char kS7TVDisplayLinkKey = 1;
+static const char kS7TVFramesKey      = 2;
+static const char kS7TVDurationKey    = 3;
+static const char kS7TVStartTimeKey   = 4;
+
 @implementation UIImageView (SevenTVAnimation)
 
 // Clé pour le guard anti-boucle infinie (par cellule)
 static const char kS7TVReloadGuard = 0;
+
+// ── Ticker CADisplayLink ─────────────────────────────────────────────────────
+// Appelé ~60fps. Calcule la frame courante selon le temps écoulé et l'affiche
+// directement via layer.contents → bypasse complètement UIImageView.image
+// et NSTextAttachment → CoreText ne voit jamais ce changement → l'animation
+// n'est JAMAIS tuée par un reset de attributedText.
+- (void)s7tv_displayLinkTick:(CADisplayLink *)link {
+    NSArray<UIImage *> *frames = objc_getAssociatedObject(self, &kS7TVFramesKey);
+    NSNumber *durationNum      = objc_getAssociatedObject(self, &kS7TVDurationKey);
+    NSNumber *startTimeNum     = objc_getAssociatedObject(self, &kS7TVStartTimeKey);
+    if (!frames.count || !durationNum || !startTimeNum) return;
+
+    CFTimeInterval elapsed  = link.timestamp - startTimeNum.doubleValue;
+    CFTimeInterval duration = durationNum.doubleValue;
+    if (duration <= 0) return;
+
+    CFTimeInterval t   = fmod(elapsed, duration);
+    CFTimeInterval perFrame = duration / frames.count;
+    NSInteger frameIdx = (NSInteger)(t / perFrame) % frames.count;
+
+    UIImage *frame = frames[frameIdx];
+    // Écriture directe dans CALayer.contents → ne déclenche PAS setImage:
+    // → pas de boucle → pas d'appel à attributedText reset
+    self.layer.contents = (__bridge id)frame.CGImage;
+}
 
 - (void)s7tv_setImage:(UIImage *)image {
     [self s7tv_setImage:image]; // original
 
     if (!image) return;
 
-    // ── Animations ───────────────────────────────────────────────────────────
+    // ── Animations 7TV via CADisplayLink ─────────────────────────────────────
     if (image.images.count > 1) {
-        self.animationImages      = image.images;
-        self.animationDuration    = image.duration > 0 ? image.duration : 1.0;
-        self.animationRepeatCount = 0;
-        [self startAnimating];
-        // ⚠️  NE PAS faire le reset attributedText pour une image animée.
-        // Le reset appelle setImage: avec l'image statique (NSTextAttachment.image
-        // = première frame) → tue l'animation immédiatement. L'image animée est
-        // déjà affichée dans la UIImageView grâce au startAnimating ci-dessus.
-        // TwitchControl vide le sharedURLCache → nos sessions sont maintenant en
-        // ephemeral → plus jamais de re-fetch statique. Pas besoin du reset ici.
+        // Annuler l'ancien display link si existant (recyclage de cellule)
+        CADisplayLink *oldLink = objc_getAssociatedObject(self, &kS7TVDisplayLinkKey);
+        [oldLink invalidate];
+
+        // Stocker les frames et métadonnées
+        objc_setAssociatedObject(self, &kS7TVFramesKey, image.images,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(self, &kS7TVDurationKey,
+                                 @(image.duration > 0 ? image.duration : 1.0),
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(self, &kS7TVStartTimeKey, @(CACurrentMediaTime()),
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+        // Créer le CADisplayLink sur le main run loop
+        CADisplayLink *link = [CADisplayLink displayLinkWithTarget:self
+                                                          selector:@selector(s7tv_displayLinkTick:)];
+        link.preferredFramesPerSecond = 30; // économie batterie
+        [link addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+        objc_setAssociatedObject(self, &kS7TVDisplayLinkKey, link,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+        // Afficher la première frame immédiatement
+        self.layer.contents = (__bridge id)image.images.firstObject.CGImage;
+
+        // ⚠️  PAS de reset attributedText ici — le CADisplayLink anime
+        // directement via layer.contents, indépendamment de CoreText.
+        // Un reset tuerait l'animation en rappelant setImage: avec la
+        // frame statique de NSTextAttachment.image.
         return;
     }
 
