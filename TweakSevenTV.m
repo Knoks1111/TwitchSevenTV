@@ -1244,6 +1244,73 @@ static void s7tv_swizzle_attachment(void) {
 }
 
 
+
+// ────────────────────────────────────────────────────────────
+// MARK: - Tap Logger — log la hiérarchie au point touché
+//
+// À chaque tap dans l'app, on logue :
+//   • Les coordonnées du tap
+//   • La vue "hit" (hitTest)
+//   • Toute la chaîne de superviews avec leur classe + frame
+//
+// Désactivé automatiquement après 30 taps pour ne pas polluer
+// les logs une fois le diagnostic terminé.
+// Peut être réactivé en touchant l'écran 5x rapidement (TODO).
+// ────────────────────────────────────────────────────────────
+
+static NSInteger s_tapLogCount = 0;
+static const NSInteger kTapLogMax = 30;
+
+@interface UIWindow (S7TVTapLogger)
+- (void)s7tv_sendEvent:(UIEvent *)event;
+@end
+
+@implementation UIWindow (S7TVTapLogger)
+
+- (void)s7tv_sendEvent:(UIEvent *)event {
+    [self s7tv_sendEvent:event];
+
+    if (s_tapLogCount >= kTapLogMax) return;
+    if (event.type != UIEventTypeTouches) return;
+
+    UITouch *touch = event.allTouches.anyObject;
+    if (!touch || touch.phase != UITouchPhaseBegan) return;
+
+    s_tapLogCount++;
+    CGPoint pt = [touch locationInView:self];
+
+    SevenTVManager *mgr = [SevenTVManager sharedManager];
+    [mgr log:@"👆 TAP #%ld @ (%.0f, %.0f) — hiérarchie:",
+     (long)s_tapLogCount, pt.x, pt.y];
+
+    // Vue touchée
+    UIView *hit = [self hitTest:pt withEvent:nil];
+    [mgr log:@"  HIT: %@ frame=(%.0f,%.0f,%.0f,%.0f) tag=%ld ph='%@'",
+     NSStringFromClass([hit class]),
+     hit.frame.origin.x, hit.frame.origin.y, hit.frame.size.width, hit.frame.size.height,
+     (long)hit.tag,
+     ([hit isKindOfClass:[UITextField class]] ? ((UITextField *)hit).placeholder : @"")];
+
+    // Chaîne de superviews (max 12 niveaux)
+    UIView *v = hit.superview;
+    for (int d = 1; d <= 12 && v; d++, v = v.superview) {
+        NSString *extra = @"";
+        if ([v isKindOfClass:[UITextField class]])
+            extra = [NSString stringWithFormat:@" ph='%@'", ((UITextField *)v).placeholder ?: @""];
+        [mgr log:@"  [%d] %@ frame=(%.0f,%.0f,%.0f,%.0f)%@",
+         d, NSStringFromClass([v class]),
+         v.frame.origin.x, v.frame.origin.y, v.frame.size.width, v.frame.size.height,
+         extra];
+    }
+
+    if (s_tapLogCount == kTapLogMax) {
+        [mgr log:@"👆 Tap logger désactivé après %ld taps — ouvre les logs pour analyser",
+         (long)kTapLogMax];
+    }
+}
+
+@end
+
 // ────────────────────────────────────────────────────────────
 // MARK: - Point d'entrée __attribute__((constructor))
 // ────────────────────────────────────────────────────────────
@@ -1252,6 +1319,12 @@ __attribute__((constructor))
 static void TwitchSevenTVInit(void) {
     SevenTVManager *mgr = [SevenTVManager sharedManager];
     [mgr log:@"🔌 Chargement TwitchSevenTV v2.0 (substrate-free)..."];
+
+    // ── Swizzle UIWindow sendEvent: (tap logger diagnostic) ─────────────────────
+    s7tv_swizzle([UIWindow class],
+                 [UIWindow class],
+                 @selector(sendEvent:),
+                 @selector(s7tv_sendEvent:));
 
     // ── Scan périodique pour injecter le bouton 7TV dans la barre de saisie ────
     // Démarré après 3s pour laisser Twitch construire son UI

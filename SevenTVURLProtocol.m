@@ -333,12 +333,13 @@ static NSURL *SevenTVCDNURLForEmoteID(NSString *emoteID) {
     req.timeoutInterval = 30.0;
 
     // Session URGENTE — indépendante du bulk prefetch.
-    // Garantit que ce download n'est jamais mis en queue derrière les 335
-    // downloads du prefetch massif qui tournent en arrière-plan.
     [[SevenTVGetUrgentSession() dataTaskWithRequest:req
                completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
-        [[SevenTVManager sharedManager] log:@"📦 Préfetch %@ → %@", emoteID,
-            err ? err.localizedDescription : @"OK"];
+        // Log uniquement en cas d'erreur — supprime le spam "📦 Préfetch → OK"
+        if (err) {
+            [[SevenTVManager sharedManager] log:@"⚠️ Préfetch %@ → %@",
+             emoteID, err.localizedDescription];
+        }
         if (completion) completion();
     }] resume];
 }
