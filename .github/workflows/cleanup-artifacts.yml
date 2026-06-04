@@ -1,0 +1,61 @@
+name: 🧹 Supprimer tous les artifacts
+
+on:
+  workflow_dispatch:   # lancement manuel uniquement
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 🗑️ Supprimer tous les artifacts du repo
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "🗑️  Suppression des anciens artifacts..."
+          REPO="${{ github.repository }}"
+
+          PAGE=1
+          DELETED=0
+
+          while true; do
+            RESPONSE=$(curl --silent \
+              --header "Authorization: Bearer $GH_TOKEN" \
+              --header "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${REPO}/actions/artifacts?per_page=100&page=${PAGE}")
+
+            IDS=$(echo "$RESPONSE" | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          for a in data.get('artifacts', []):
+              print(a['id'])
+          ")
+
+            COUNT=$(echo "$IDS" | grep -c . 2>/dev/null || echo 0)
+            [ "$COUNT" -eq 0 ] && break
+
+            for ID in $IDS; do
+              HTTP=$(curl --silent --output /dev/null --write-out "%{http_code}" \
+                --request DELETE \
+                --header "Authorization: Bearer $GH_TOKEN" \
+                --header "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/${REPO}/actions/artifacts/${ID}")
+
+              if [ "$HTTP" = "204" ]; then
+                DELETED=$((DELETED+1))
+                echo "  ✅ Supprimé: $ID"
+              else
+                echo "  ⚠️  Échec ($HTTP): $ID"
+              fi
+            done
+
+            [ "$COUNT" -lt 100 ] && break
+            PAGE=$((PAGE+1))
+          done
+
+          echo ""
+          echo "✅ Terminé — $DELETED artifact(s) supprimé(s)"
