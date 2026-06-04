@@ -429,8 +429,27 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
     // Démarrer (ou redémarrer) le heartbeat pour garder la connexion vivante.
     [self startCDNHeartbeat];
 
-    // Attendre le ROOMSTATE (qui arrive ~100ms après le JOIN)
-    // pour avoir le twitchID. Timeout de sécurité à 5s.
+    // ── Fix cache: lookup immédiat du twitchID depuis le mapping sauvé ───────
+    // Première visite : pas de mapping → attend le ROOMSTATE (< 200ms).
+    // Visites suivantes : l'ID est connu → prefetch et cache démarre AVANT
+    // le ROOMSTATE, les emotes sont prêtes dès le 1er message du chat.
+    NSUserDefaults *prefs = [NSUserDefaults standardUserDefaults];
+    NSDictionary *channelIDMap = [prefs dictionaryForKey:@"s7tv_channel_id_map"];
+    NSString *cachedTwitchID = channelIDMap[channelName.lowercaseString];
+
+    if (cachedTwitchID.length > 0) {
+        [self log:@"⚡️ twitchID en cache pour %@: %@ → prefetch immédiat",
+         channelName, cachedTwitchID];
+        self.currentChannelTwitchID = cachedTwitchID;
+        [self loadEmotesForChannelTwitchID:cachedTwitchID];
+        // Pas de dispatch_after nécessaire : le ROOMSTATE confirmera (ou corrigera)
+        // l'ID quelques ms plus tard via s7tv_handleRoomState.
+        return;
+    }
+
+    // Première visite : pas de mapping → attendre le ROOMSTATE.
+    // Timeout de sécurité à 5s au cas où le ROOMSTATE n'arriverait pas.
+    [self log:@"⏳ Pas de twitchID en cache pour %@, attente ROOMSTATE...", channelName];
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)),
                    dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         if (self.currentChannelTwitchID) {

@@ -409,11 +409,16 @@ static NSArray<NSString *> *s7tv_extractEmoteIDs(NSString *ircMessage) {
 
     if (emotesValue.length == 0) return result;
 
-    // Format: "7tv_ID1:0-5/7tv_ID1:8-12,7tv_ID2:20-25"
-    // Séparateur entre emotes différentes: ","
+    // Format Twitch: "7tv_ID1:0-5,8-12/7tv_ID2:20-25"
+    //   "/"  sépare les IDs DIFFÉRENTS
+    //   ","  sépare les occurrences du MÊME ID (positions multiples)
+    // On split par "/" d'abord pour isoler chaque bloc ID:positions,
+    // puis on prend la partie avant le premier ":" pour obtenir le fake ID.
+    // Avant ce fix on splitait par "," : "8-12/7tv_ID2:20-25" devenait
+    // idPart="8-12/7tv_ID2" → pas de préfixe "7tv_" → ID manqué → pas de prefetch.
     NSMutableSet<NSString *> *seen = [NSMutableSet set];
-    for (NSString *entry in [emotesValue componentsSeparatedByString:@","]) {
-        // Prendre seulement la partie avant ":" (= "7tv_ID")
+    for (NSString *entry in [emotesValue componentsSeparatedByString:@"/"]) {
+        // Prendre seulement la partie avant le premier ":" (= "7tv_ID")
         NSString *idPart = [entry componentsSeparatedByString:@":"].firstObject ?: entry;
         if ([idPart hasPrefix:@"7tv_"]) {
             NSString *emoteID = [idPart substringFromIndex:4]; // retirer "7tv_"
@@ -457,6 +462,20 @@ static void s7tv_handleRoomState(NSString *ircMessage) {
             log:@"📡 Nouveau broadcaster ID (ROOMSTATE): %@ (ancien: %@)",
             roomID, mgr.currentChannelTwitchID ?: @"aucun"];
         mgr.currentChannelTwitchID = roomID;
+
+        // ── Fix cache: sauvegarder le mapping channelName → twitchID ─────────
+        // Permet à loadEmotesForChannelName: de démarrer le prefetch
+        // IMMÉDIATEMENT au prochain JOIN, sans attendre le ROOMSTATE.
+        if (mgr.currentChannelName.length > 0) {
+            NSUserDefaults *prefs = [NSUserDefaults standardUserDefaults];
+            NSMutableDictionary *map = [([prefs dictionaryForKey:@"s7tv_channel_id_map"] ?: @{}) mutableCopy];
+            map[mgr.currentChannelName.lowercaseString] = roomID;
+            [prefs setObject:[map copy] forKey:@"s7tv_channel_id_map"];
+            [prefs synchronize];
+            [[SevenTVManager sharedManager] log:@"💾 Mapping sauvé: %@ → %@",
+             mgr.currentChannelName, roomID];
+        }
+
         [mgr loadEmotesForChannelTwitchID:roomID];
     }
 }
