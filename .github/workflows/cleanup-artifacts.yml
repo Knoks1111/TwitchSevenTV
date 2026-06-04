@@ -12,49 +12,82 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: 🗑️ Supprimer tous les artifacts du repo
+      - name: 🗑️ Supprimer les artifacts de "Build TwitchSevenTV + Inject into IPA"
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          echo "🗑️  Suppression des anciens artifacts..."
+          echo "🔍 Recherche du workflow cible..."
           REPO="${{ github.repository }}"
+          TARGET_WORKFLOW="Build TwitchSevenTV + Inject into IPA"
+
+          # Récupérer l'ID du workflow par son nom
+          WORKFLOW_ID=$(curl --silent \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${REPO}/actions/workflows" | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          for w in data.get('workflows', []):
+              if w['name'] == '${TARGET_WORKFLOW}':
+                  print(w['id'])
+                  break
+          ")
+
+          if [ -z "$WORKFLOW_ID" ]; then
+            echo "❌ Workflow introuvable : ${TARGET_WORKFLOW}"
+            exit 1
+          fi
+
+          echo "✅ Workflow trouvé — ID: $WORKFLOW_ID"
+          echo "🗑️  Suppression des artifacts en cours..."
 
           PAGE=1
           DELETED=0
 
           while true; do
-            RESPONSE=$(curl --silent \
+            # Récupérer les runs du workflow (page par page)
+            RUNS=$(curl --silent \
               --header "Authorization: Bearer $GH_TOKEN" \
               --header "Accept: application/vnd.github+json" \
-              "https://api.github.com/repos/${REPO}/actions/artifacts?per_page=100&page=${PAGE}")
+              "https://api.github.com/repos/${REPO}/actions/workflows/${WORKFLOW_ID}/runs?per_page=100&page=${PAGE}" | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          for r in data.get('workflow_runs', []):
+              print(r['id'])
+          ")
 
-            IDS=$(echo "$RESPONSE" | python3 -c "
+            if [ -z "$(echo "$RUNS" | tr -d '[:space:]')" ]; then
+              break
+            fi
+
+            COUNT=$(echo "$RUNS" | wc -l | tr -d ' ')
+
+            for RUN_ID in $RUNS; do
+              # Récupérer les artifacts de ce run
+              ARTIFACTS=$(curl --silent \
+                --header "Authorization: Bearer $GH_TOKEN" \
+                --header "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/${REPO}/actions/runs/${RUN_ID}/artifacts?per_page=100" | python3 -c "
           import sys, json
           data = json.load(sys.stdin)
           for a in data.get('artifacts', []):
               print(a['id'])
           ")
 
-            # Si aucun ID retourné, on arrête
-            if [ -z "$(echo "$IDS" | tr -d '[:space:]')" ]; then
-              break
-            fi
+              for ART_ID in $ARTIFACTS; do
+                HTTP=$(curl --silent --output /dev/null --write-out "%{http_code}" \
+                  --request DELETE \
+                  --header "Authorization: Bearer $GH_TOKEN" \
+                  --header "Accept: application/vnd.github+json" \
+                  "https://api.github.com/repos/${REPO}/actions/artifacts/${ART_ID}")
 
-            COUNT=$(echo "$IDS" | wc -l | tr -d ' ')
-
-            for ID in $IDS; do
-              HTTP=$(curl --silent --output /dev/null --write-out "%{http_code}" \
-                --request DELETE \
-                --header "Authorization: Bearer $GH_TOKEN" \
-                --header "Accept: application/vnd.github+json" \
-                "https://api.github.com/repos/${REPO}/actions/artifacts/${ID}")
-
-              if [ "$HTTP" = "204" ]; then
-                DELETED=$((DELETED+1))
-                echo "  ✅ Supprimé: $ID"
-              else
-                echo "  ⚠️  Échec ($HTTP): $ID"
-              fi
+                if [ "$HTTP" = "204" ]; then
+                  DELETED=$((DELETED+1))
+                  echo "  ✅ Supprimé: $ART_ID (run $RUN_ID)"
+                else
+                  echo "  ⚠️  Échec ($HTTP): $ART_ID (run $RUN_ID)"
+                fi
+              done
             done
 
             [ "$COUNT" -lt 100 ] && break
