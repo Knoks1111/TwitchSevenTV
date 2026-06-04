@@ -440,6 +440,13 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
     if (cachedTwitchID.length > 0) {
         [self log:@"⚡️ twitchID en cache pour %@: %@ → prefetch immédiat",
          channelName, cachedTwitchID];
+        // Vider les emotes du channel précédent AVANT de charger les nouvelles.
+        // Sans ce reset, un message ultra-rapide pourrait injecter une emote
+        // de l'ancien channel pendant les ~100ms avant que loadEmotesForChannelTwitchID:
+        // ne soit terminé.
+        dispatch_barrier_async(self.emoteQueue, ^{
+            self.channelEmotes = @{};
+        });
         self.currentChannelTwitchID = cachedTwitchID;
         [self loadEmotesForChannelTwitchID:cachedTwitchID];
         // Pas de dispatch_after nécessaire : le ROOMSTATE confirmera (ou corrigera)
