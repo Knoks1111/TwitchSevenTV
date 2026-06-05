@@ -1144,6 +1144,22 @@ static const char kS7TVTaskKey = 0;
     return s;
 }
 
+// ── Queue série pour le décodage des animations ───────────────────────────────
+//
+// CRITIQUE : ne PAS utiliser dispatch_get_global_queue pour les animations.
+// Chaque frame WebP 4x décodée = ~160 KB RAM non compressée.
+// 30 frames × 20 emotes visibles × threads concurrent = spike ~100 MB → OOM kill.
+// Une queue SÉRIE garantit qu'un seul décodage tourne à la fois.
+//
+- (dispatch_queue_t)_animationDecodeQueue {
+    static dispatch_queue_t q = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        q = dispatch_queue_create("tv.s7tv.anim-decode", DISPATCH_QUEUE_SERIAL);
+    });
+    return q;
+}
+
 // ── Décodage image pour le picker ─────────────────────────────────────────────
 //
 // wantsAnimated=YES ET showPickerAnimations=YES → UIImage animée (toutes frames)
@@ -1159,26 +1175,32 @@ static const char kS7TVTaskKey = 0;
     if (wantsAnimated) {
         NSUInteger count = CGImageSourceGetCount(src);
         if (count > 1) {
-            NSMutableArray<UIImage *> *frames = [NSMutableArray arrayWithCapacity:count];
+            // Cap à 24 frames — au-delà les gains visuels sont nuls mais
+            // la RAM explose (chaque frame 4x ≈ 160 KB décompressé).
+            NSUInteger maxFrames = MIN(count, 24);
+            NSMutableArray<UIImage *> *frames = [NSMutableArray arrayWithCapacity:maxFrames];
             NSTimeInterval duration = 0.0;
 
-            for (NSUInteger i = 0; i < count; i++) {
-                CGImageRef cgImg = CGImageSourceCreateImageAtIndex(src, i, NULL);
-                if (!cgImg) continue;
+            for (NSUInteger i = 0; i < maxFrames; i++) {
+                // @autoreleasepool : libère le CGImage immédiatement après
+                // chaque itération → pic mémoire = 1 frame, pas N frames.
+                @autoreleasepool {
+                    CGImageRef cgImg = CGImageSourceCreateImageAtIndex(src, i, NULL);
+                    if (!cgImg) continue;
 
-                [frames addObject:[UIImage imageWithCGImage:cgImg]];
-                CGImageRelease(cgImg);
+                    [frames addObject:[UIImage imageWithCGImage:cgImg]];
+                    CGImageRelease(cgImg);
 
-                // Récupérer le délai de la frame (GIF ou WebP)
-                NSDictionary *props = CFBridgingRelease(
-                    CGImageSourceCopyPropertiesAtIndex(src, i, NULL));
-                NSDictionary *gifProps  = props[@"{GIF}"];
-                NSDictionary *webpProps = props[@"{WebP}"];
-                NSNumber *delay = gifProps[@"UnclampedDelayTime"]
-                               ?: gifProps[@"DelayTime"]
-                               ?: webpProps[@"DelayTime"];
-                duration += (delay && delay.doubleValue > 0.01)
-                            ? delay.doubleValue : 0.1;
+                    NSDictionary *props = CFBridgingRelease(
+                        CGImageSourceCopyPropertiesAtIndex(src, i, NULL));
+                    NSDictionary *gifProps  = props[@"{GIF}"];
+                    NSDictionary *webpProps = props[@"{WebP}"];
+                    NSNumber *delay = gifProps[@"UnclampedDelayTime"]
+                                   ?: gifProps[@"DelayTime"]
+                                   ?: webpProps[@"DelayTime"];
+                    duration += (delay && delay.doubleValue > 0.01)
+                                ? delay.doubleValue : 0.1;
+                }
             }
 
             CFRelease(src);
@@ -1810,12 +1832,15 @@ referenceSizeForHeaderInSection:(NSInteger)section {
     // chat → disponible immédiatement dans le picker, et vice versa.
     NSCachedURLResponse *cached = [[SevenTVURLProtocol sharedEmoteCache] cachedResponseForRequest:req];
     if (cached.data) {
-        // Décodage CGImage sur un thread background pour ne pas bloquer le scroll
+        // Animé → queue SÉRIE (1 decode à la fois → pas de spike RAM)
+        // Statique → queue concurrent (rapide, pas de risque mémoire)
+        dispatch_queue_t decodeQ = wantsAnimated
+            ? [self _animationDecodeQueue]
+            : dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0);
         NSData *imgData = cached.data;
-        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        dispatch_async(decodeQ, ^{
             UIImage *img = [self _decodePickerImageData:imgData wantsAnimated:wantsAnimated];
             dispatch_async(dispatch_get_main_queue(), ^{
-                // Vérifier que la cellule n'a pas été recyclée entre temps
                 NSIndexPath *nowPath = [cv indexPathForCell:cell];
                 if (nowPath && nowPath.section == indexPath.section
                             && nowPath.item   == indexPath.item) {
@@ -1827,19 +1852,23 @@ referenceSizeForHeaderInSection:(NSInteger)section {
     }
 
     // ── Étape 2 : image absente du cache → fetch réseau (session partagée) ─
-    // Se produit lors de la première ouverture du picker avant que le prefetch
-    // n'ait terminé, ou après une purge du cache par iOS.
     NSURLSessionDataTask *task = [[self _pickerImageSession]
         dataTaskWithURL:emoteURL
       completionHandler:^(NSData *data, NSURLResponse *r, NSError *e) {
         if (!data || e.code == NSURLErrorCancelled) return;
-        UIImage *img = [self _decodePickerImageData:data wantsAnimated:wantsAnimated];
-        dispatch_async(dispatch_get_main_queue(), ^{
-            NSIndexPath *nowPath = [cv indexPathForCell:cell];
-            if (nowPath && nowPath.section == indexPath.section
-                        && nowPath.item   == indexPath.item) {
-                iv.image = img;
-            }
+        // Même logique : série pour animé, concurrent pour statique
+        dispatch_queue_t decodeQ = wantsAnimated
+            ? [self _animationDecodeQueue]
+            : dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0);
+        dispatch_async(decodeQ, ^{
+            UIImage *img = [self _decodePickerImageData:data wantsAnimated:wantsAnimated];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                NSIndexPath *nowPath = [cv indexPathForCell:cell];
+                if (nowPath && nowPath.section == indexPath.section
+                            && nowPath.item   == indexPath.item) {
+                    iv.image = img;
+                }
+            });
         });
     }];
 
