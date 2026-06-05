@@ -636,22 +636,48 @@ static const char kS7TVBitsHijacked    = 6;
                 }
             }
 
-            // 2. Remplacer l'image par l'icône 7TV (sparkles violet)
-            UIImageSymbolConfiguration *symCfg = [UIImageSymbolConfiguration
-                configurationWithPointSize:16 weight:UIImageSymbolWeightMedium];
-            UIImage *icon7tv = [UIImage systemImageNamed:@"sparkles"
-                                        withConfiguration:symCfg];
+            // 2. Remplacer l'image par le texte "7TV" stylé (blanc gras, fond transparent)
+            //    → on crée une UIImage à partir d'un label rendu en bitmap
             UIColor *purple = [UIColor colorWithRed:0.55 green:0.25 blue:0.95 alpha:1.0];
 
+            // Générer une image "7TV" texte blanc gras sur fond transparent
+            CGFloat iconSize = 28.0;
+            UIGraphicsBeginImageContextWithOptions(CGSizeMake(iconSize, iconSize), NO, 0);
+            // Fond arrondi très sombre (optionnel, comme dans le screenshot)
+            UIBezierPath *bg = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(1,4,iconSize-2,iconSize-8)
+                                                          cornerRadius:4];
+            [[UIColor colorWithWhite:0 alpha:0.0] setFill];
+            [bg fill];
+            // Texte "7TV" — "7" légèrement plus petit, "TV" normal
+            NSMutableAttributedString *aStr = [[NSMutableAttributedString alloc]
+                initWithString:@"7"
+                    attributes:@{
+                        NSFontAttributeName: [UIFont boldSystemFontOfSize:13],
+                        NSForegroundColorAttributeName: [UIColor whiteColor]
+                    }];
+            [aStr appendAttributedString:[[NSAttributedString alloc]
+                initWithString:@"TV"
+                    attributes:@{
+                        NSFontAttributeName: [UIFont boldSystemFontOfSize:11],
+                        NSForegroundColorAttributeName: [UIColor whiteColor]
+                    }]];
+            CGSize textSize = [aStr size];
+            CGRect textRect = CGRectMake((iconSize - textSize.width) / 2.0,
+                                         (iconSize - textSize.height) / 2.0,
+                                         textSize.width, textSize.height);
+            [aStr drawInRect:textRect];
+            UIImage *icon7tv = UIGraphicsGetImageFromCurrentImageContext();
+            UIGraphicsEndImageContext();
+
             if (icon7tv) {
-                // Remplacer pour tous les états
                 for (NSNumber *stateNum in @[@(UIControlStateNormal),
                                              @(UIControlStateHighlighted),
                                              @(UIControlStateSelected),
                                              @(UIControlStateDisabled)]) {
                     [bitsBtn setImage:icon7tv forState:stateNum.unsignedIntegerValue];
                 }
-                bitsBtn.tintColor = purple;
+                // Pas de tint (l'image est déjà en couleur native)
+                bitsBtn.tintColor = [UIColor whiteColor];
             }
 
             // 3. Accessibilité

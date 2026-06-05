@@ -389,7 +389,14 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
 
 - (void)setIsEnabled:(BOOL)v    { _isEnabled    = v; [self savePreferences]; }
 - (void)setShowAnimated:(BOOL)v { _showAnimated  = v; [self savePreferences]; }
-- (void)setDebugLogging:(BOOL)v { _debugLogging  = v; [self savePreferences]; }
+- (void)setDebugLogging:(BOOL)v {
+    _debugLogging  = v;
+    [self savePreferences];
+    // Synchroniser le tap logger avec l'état des logs
+    extern BOOL s_tapLogEnabled;
+    s_tapLogEnabled = v;
+    [self log:@"👆 Tap logger %@", v ? @"activé" : @"désactivé"];
+}
 
 
 // ============================================================
@@ -1068,10 +1075,10 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
 // ID de cellule pour la collection
 static NSString *const kEmoteCellID = @"S7TVEmoteCell";
 
-// Hauteur du picker
-static const CGFloat kPickerHeight  = 220.0;
+// Hauteur du picker (plus grand pour voir plus d'emotes)
+static const CGFloat kPickerHeight  = 280.0;
 // Taille de chaque cellule (carré)
-static const CGFloat kCellSize      = 52.0;
+static const CGFloat kCellSize      = 72.0;
 
 - (void)toggleEmotePickerForChatInputView:(UIView *)chatInputView {
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -1166,79 +1173,117 @@ static const CGFloat kCellSize      = 52.0;
 }
 
 - (void)_createEmotePickerViewWithFrame:(CGRect)frame inWindow:(UIWindow *)window {
+
+    // ── Couleurs dans le style Twitch dark ─────────────────────────────────
+    UIColor *bgColor     = [UIColor colorWithRed:0.13 green:0.13 blue:0.15 alpha:1.0]; // #211F26
+    UIColor *headerColor = [UIColor colorWithRed:0.10 green:0.10 blue:0.12 alpha:1.0]; // plus sombre
+    UIColor *sepColor    = [UIColor colorWithRed:0.25 green:0.25 blue:0.28 alpha:1.0];
+    UIColor *textColor   = [UIColor whiteColor];
+    UIColor *subColor    = [UIColor colorWithRed:0.60 green:0.60 blue:0.65 alpha:1.0];
+    UIColor *searchBg    = [UIColor colorWithRed:0.20 green:0.20 blue:0.23 alpha:1.0];
+
     // ── Conteneur principal ────────────────────────────────────────────────
     UIView *picker = [[UIView alloc] initWithFrame:frame];
-    picker.backgroundColor = [UIColor systemBackgroundColor];
-    // Séparateur/ombre en haut
-    picker.layer.shadowColor   = [UIColor blackColor].CGColor;
-    picker.layer.shadowOffset  = CGSizeMake(0, -2);
-    picker.layer.shadowRadius  = 6;
-    picker.layer.shadowOpacity = 0.12;
+    picker.backgroundColor    = bgColor;
+    picker.layer.shadowColor  = [UIColor blackColor].CGColor;
+    picker.layer.shadowOffset = CGSizeMake(0, -3);
+    picker.layer.shadowRadius = 8;
+    picker.layer.shadowOpacity = 0.35;
+    // Coins arrondis en haut uniquement
+    picker.layer.cornerRadius = 12;
+    picker.layer.maskedCorners = kCALayerMinXMinYCorner | kCALayerMaxXMinYCorner;
+    picker.clipsToBounds = YES;
     self.emotePickerView = picker;
 
-    // ── Barre de titre + recherche ─────────────────────────────────────────
-    UIView *headerView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, frame.size.width, 44)];
-    headerView.backgroundColor = [UIColor secondarySystemBackgroundColor];
+    // ── Header ─────────────────────────────────────────────────────────────
+    CGFloat headerH = 48.0;
+    UIView *headerView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, frame.size.width, headerH)];
+    headerView.backgroundColor = headerColor;
+    headerView.autoresizingMask = UIViewAutoresizingFlexibleWidth;
 
     // Séparateur bas du header
-    UIView *sep = [[UIView alloc] initWithFrame:CGRectMake(0, 43.5, frame.size.width, 0.5)];
-    sep.backgroundColor = [UIColor separatorColor];
+    UIView *sep = [[UIView alloc] initWithFrame:CGRectMake(0, headerH - 0.5, frame.size.width, 0.5)];
+    sep.backgroundColor = sepColor;
     sep.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     [headerView addSubview:sep];
 
-    // Label "7TV" à gauche (avec icône violette)
-    UILabel *titleLbl = [[UILabel alloc] initWithFrame:CGRectMake(12, 0, 80, 44)];
-    titleLbl.text = @"🟣 7TV";
-    titleLbl.font = [UIFont boldSystemFontOfSize:13];
-    titleLbl.textColor = [UIColor labelColor];
+    // Icône + label "7TV Emotes"
+    UILabel *titleLbl = [[UILabel alloc] initWithFrame:CGRectMake(14, 0, 110, headerH)];
+    // Texte "7TV" stylé : gras blanc
+    NSMutableAttributedString *titleStr = [[NSMutableAttributedString alloc]
+        initWithString:@"7TV  "
+            attributes:@{
+                NSFontAttributeName: [UIFont boldSystemFontOfSize:15],
+                NSForegroundColorAttributeName: [UIColor colorWithRed:0.60 green:0.35 blue:1.0 alpha:1.0]
+            }];
+    [titleStr appendAttributedString:[[NSAttributedString alloc]
+        initWithString:@"Emotes"
+            attributes:@{
+                NSFontAttributeName: [UIFont systemFontOfSize:14 weight:UIFontWeightMedium],
+                NSForegroundColorAttributeName: textColor
+            }]];
+    titleLbl.attributedText = titleStr;
     [headerView addSubview:titleLbl];
 
-    // Champ de recherche centré
+    // Champ de recherche
     UITextField *search = [[UITextField alloc] initWithFrame:
-        CGRectMake(90, 7, frame.size.width - 90 - 52, 30)];
-    search.placeholder        = @"Rechercher…";
-    search.font               = [UIFont systemFontOfSize:13];
-    search.returnKeyType      = UIReturnKeyDone;
-    search.clearButtonMode    = UITextFieldViewModeWhileEditing;
-    search.backgroundColor    = [UIColor tertiarySystemBackgroundColor];
+        CGRectMake(120, 9, frame.size.width - 120 - 48, 30)];
+    search.placeholder     = @"Rechercher une emote…";
+    search.font            = [UIFont systemFontOfSize:13];
+    search.returnKeyType   = UIReturnKeyDone;
+    search.clearButtonMode = UITextFieldViewModeWhileEditing;
+    search.backgroundColor = searchBg;
+    search.textColor       = textColor;
     search.layer.cornerRadius = 8;
-    search.leftView = [[UIView alloc] initWithFrame:CGRectMake(0,0,8,1)];
+    search.clipsToBounds   = YES;
+    // Padding gauche
+    search.leftView = [[UIView alloc] initWithFrame:CGRectMake(0,0,10,1)];
     search.leftViewMode = UITextFieldViewModeAlways;
+    search.attributedPlaceholder = [[NSAttributedString alloc]
+        initWithString:@"Rechercher…"
+            attributes:@{NSForegroundColorAttributeName: subColor}];
     search.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     [search addTarget:self action:@selector(_emoteSearchChanged:)
      forControlEvents:UIControlEventEditingChanged];
     self.emoteSearchField = search;
     [headerView addSubview:search];
 
-    // Bouton fermer (×) à droite
+    // Bouton fermer ×
     UIButton *closeBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    closeBtn.frame = CGRectMake(frame.size.width - 44, 0, 44, 44);
+    closeBtn.frame = CGRectMake(frame.size.width - 44, 0, 44, headerH);
     closeBtn.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
-    [closeBtn setImage:[UIImage systemImageNamed:@"xmark"] forState:UIControlStateNormal];
-    closeBtn.tintColor = [UIColor secondaryLabelColor];
+    UIImageSymbolConfiguration *xCfg = [UIImageSymbolConfiguration
+        configurationWithPointSize:14 weight:UIImageSymbolWeightMedium];
+    [closeBtn setImage:[UIImage systemImageNamed:@"xmark" withConfiguration:xCfg]
+              forState:UIControlStateNormal];
+    closeBtn.tintColor = subColor;
     [closeBtn addTarget:self action:@selector(_emotePickerCloseTapped)
        forControlEvents:UIControlEventTouchUpInside];
     [headerView addSubview:closeBtn];
 
-    headerView.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     [picker addSubview:headerView];
 
-    // ── Collection View ────────────────────────────────────────────────────
+    // ── Collection View — SCROLL VERTICAL UNIQUEMENT ───────────────────────
     UICollectionViewFlowLayout *layout = [[UICollectionViewFlowLayout alloc] init];
-    layout.itemSize         = CGSizeMake(kCellSize, kCellSize);
-    layout.minimumInteritemSpacing = 2;
-    layout.minimumLineSpacing      = 2;
-    layout.sectionInset = UIEdgeInsetsMake(6, 8, 6, 8);
+    layout.scrollDirection        = UICollectionViewScrollDirectionVertical;
+    layout.itemSize               = CGSizeMake(kCellSize, kCellSize);
+    layout.minimumInteritemSpacing = 4;
+    layout.minimumLineSpacing      = 4;
+    layout.sectionInset = UIEdgeInsetsMake(8, 8, 8, 8);
 
     UICollectionView *cv = [[UICollectionView alloc]
-        initWithFrame:CGRectMake(0, 44, frame.size.width, kPickerHeight - 44)
+        initWithFrame:CGRectMake(0, headerH, frame.size.width, kPickerHeight - headerH)
  collectionViewLayout:layout];
-    cv.backgroundColor     = [UIColor systemBackgroundColor];
-    cv.autoresizingMask    = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    cv.dataSource          = (id<UICollectionViewDataSource>)self;
-    cv.delegate            = (id<UICollectionViewDelegate>)self;
-    cv.alwaysBounceHorizontal = YES;
-    cv.alwaysBounceVertical   = NO;
+    cv.backgroundColor        = bgColor;
+    cv.autoresizingMask       = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    cv.dataSource             = (id<UICollectionViewDataSource>)self;
+    cv.delegate               = (id<UICollectionViewDelegate>)self;
+    // SCROLL VERTICAL — pas d'horizontal
+    cv.alwaysBounceVertical   = YES;
+    cv.alwaysBounceHorizontal = NO;
+    cv.showsHorizontalScrollIndicator = NO;
+    cv.showsVerticalScrollIndicator   = YES;
+
     [cv registerClass:[UICollectionViewCell class] forCellWithReuseIdentifier:kEmoteCellID];
     self.emoteCollectionView = cv;
     [picker addSubview:cv];
@@ -1278,51 +1323,66 @@ static const CGFloat kCellSize      = 52.0;
                   cellForItemAtIndexPath:(NSIndexPath *)indexPath {
     UICollectionViewCell *cell = [cv dequeueReusableCellWithReuseIdentifier:kEmoteCellID
                                                                 forIndexPath:indexPath];
-    cell.backgroundColor = [UIColor clearColor];
+
+    // Fond sombre style Twitch, coins arrondis légers
+    cell.backgroundColor = [UIColor colorWithRed:0.18 green:0.18 blue:0.21 alpha:1.0];
+    cell.layer.cornerRadius = 6;
+    cell.clipsToBounds = YES;
 
     // Nettoyer la cellule recyclée
     for (UIView *sub in cell.contentView.subviews) [sub removeFromSuperview];
 
     SevenTVEmote *emote = self.emotePickerEmotes[(NSUInteger)indexPath.item];
 
-    // Image de l'emote
-    UIImageView *iv = [[UIImageView alloc] initWithFrame:CGRectMake(4, 4, 36, 36)];
+    // Image — centrée, occupe ~75% de la cellule
+    CGFloat imgSize = kCellSize * 0.62;
+    CGFloat imgX = (kCellSize - imgSize) / 2.0;
+    CGFloat imgY = 4.0;
+    UIImageView *iv = [[UIImageView alloc] initWithFrame:CGRectMake(imgX, imgY, imgSize, imgSize)];
     iv.contentMode = UIViewContentModeScaleAspectFit;
-    iv.center = CGPointMake(kCellSize/2, kCellSize/2 - 6);
+    [cell.contentView addSubview:iv];
 
-    // Charger depuis le cache URL
+    // Label nom — en bas de la cellule
+    CGFloat lblH = 14.0;
+    CGFloat lblY = kCellSize - lblH - 3.0;
+    UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(2, lblY, kCellSize - 4, lblH)];
+    lbl.text          = emote.emoteName;
+    lbl.font          = [UIFont systemFontOfSize:8.5];
+    lbl.textAlignment = NSTextAlignmentCenter;
+    lbl.textColor     = [UIColor colorWithRed:0.70 green:0.70 blue:0.75 alpha:1.0];
+    lbl.lineBreakMode = NSLineBreakByTruncatingTail;
+    [cell.contentView addSubview:lbl];
+
+    // Charger l'image STATIQUEMENT (pas d'animation dans le picker → pas de lag)
     NSURL *emoteURL = [self cdnURLForEmote:emote];
-    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:emoteURL];
-    req.cachePolicy = NSURLRequestReturnCacheDataDontLoad;
-
-    // On utilise la session partagée pour lire depuis le cache 7TV
-    // Si pas en cache → requête réseau légère
     NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration ephemeralSessionConfiguration];
     cfg.URLCache = [NSURLCache sharedURLCache];
     NSURLSession *sess = [NSURLSession sessionWithConfiguration:cfg];
+
     [[sess dataTaskWithURL:emoteURL completionHandler:^(NSData *data, NSURLResponse *r, NSError *e) {
         if (!data) return;
-        UIImage *img = [UIImage imageWithData:data];
+
+        // Décoder en IMAGE STATIQUE seulement (frame 0 si GIF/WebP animé)
+        UIImage *img = nil;
+        CGImageSourceRef src = CGImageSourceCreateWithData((__bridge CFDataRef)data, NULL);
+        if (src) {
+            // Toujours prendre uniquement la frame 0 → pas d'animation
+            CGImageRef cgImg = CGImageSourceCreateImageAtIndex(src, 0, NULL);
+            if (cgImg) {
+                img = [UIImage imageWithCGImage:cgImg];
+                CGImageRelease(cgImg);
+            }
+            CFRelease(src);
+        }
+        if (!img) img = [UIImage imageWithData:data]; // fallback
+
         dispatch_async(dispatch_get_main_queue(), ^{
-            // Vérifier que la cellule est encore pour la même emote
-            NSInteger currentItem = [cv indexPathForCell:cell].item;
-            if (currentItem == indexPath.item || currentItem == NSNotFound) {
+            NSIndexPath *currentPath = [cv indexPathForCell:cell];
+            if (!currentPath || currentPath.item == (NSInteger)indexPath.item) {
                 iv.image = img;
             }
         });
     }] resume];
-
-    [cell.contentView addSubview:iv];
-
-    // Label nom
-    UILabel *lbl = [[UILabel alloc] initWithFrame:
-        CGRectMake(0, kCellSize - 16, kCellSize, 14)];
-    lbl.text          = emote.emoteName;
-    lbl.font          = [UIFont systemFontOfSize:9];
-    lbl.textAlignment = NSTextAlignmentCenter;
-    lbl.textColor     = [UIColor secondaryLabelColor];
-    lbl.lineBreakMode = NSLineBreakByTruncatingTail;
-    [cell.contentView addSubview:lbl];
 
     return cell;
 }

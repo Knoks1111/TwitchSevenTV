@@ -109,7 +109,7 @@ static NSString *const kActionCell = @"ActionCell";
         case 0: return 1; // Activer 7TV
         case 1: return 1; // Emotes animées
         case 2: return 4; // Stats: channel, global, channel emotes, total
-        case 3: return 4; // Logs console + Tap logger + Voir les logs + Recharger emotes
+        case 3: return 3; // Logs console + Voir les logs + Recharger emotes
         case 4: return 2; // Version + Info API
         default: return 0;
     }
@@ -187,19 +187,8 @@ static NSString *const kActionCell = @"ActionCell";
                     return cell;
                 }
 
-                // Ligne 1: toggle tap logger (log hiérarchie à chaque tap)
+                // Ligne 1: ouvrir le viewer de logs in-app
                 case 1: {
-                    // s_tapLogEnabled est défini dans TweakSevenTV.m
-                    extern BOOL s_tapLogEnabled;
-                    UITableViewCell *cell = [self switchCellWithTitle:@"Tap logger (log chaque tap)"
-                                                                 icon:@"👆"
-                                                               isOn:s_tapLogEnabled
-                                                               action:@selector(toggleTapLogger:)];
-                    return cell;
-                }
-
-                // Ligne 2: ouvrir le viewer de logs in-app
-                case 2: {
                     UITableViewCell *cell = [[UITableViewCell alloc]
                         initWithStyle:UITableViewCellStyleValue1
                        reuseIdentifier:kInfoCell];
@@ -216,8 +205,8 @@ static NSString *const kActionCell = @"ActionCell";
                     return cell;
                 }
 
-                // Ligne 3: recharger les emotes
-                case 3: {
+                // Ligne 2: recharger les emotes
+                case 2: {
                     UITableViewCell *cell = [[UITableViewCell alloc]
                         initWithStyle:UITableViewCellStyleDefault
                        reuseIdentifier:kActionCell];
@@ -264,10 +253,10 @@ static NSString *const kActionCell = @"ActionCell";
 
     if (indexPath.section == 3) {
         switch (indexPath.row) {
-            case 2: // "Voir les logs"
+            case 1: // "Voir les logs"
                 [self openLogsViewer];
                 break;
-            case 3: // "Recharger les emotes"
+            case 2: // "Recharger les emotes"
                 [self reloadEmotes];
                 break;
         }
@@ -309,11 +298,6 @@ static NSString *const kActionCell = @"ActionCell";
 }
 - (void)toggleDebug:(UISwitch *)sw {
     [SevenTVManager sharedManager].debugLogging = sw.isOn;
-}
-- (void)toggleTapLogger:(UISwitch *)sw {
-    extern BOOL s_tapLogEnabled;
-    s_tapLogEnabled = sw.isOn;
-    [[SevenTVManager sharedManager] log:@"👆 Tap logger %@", sw.isOn ? @"activé" : @"désactivé"];
 }
 
 
