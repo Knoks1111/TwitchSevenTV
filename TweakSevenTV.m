@@ -1524,51 +1524,62 @@ static UIViewController *s7tv_vcForView(UIView *v) {
 // strictement identique aux autres lignes Twitch.
 // ────────────────────────────────────────────────────────────
 
+// ────────────────────────────────────────────────────────────
+// MARK: - Swizzle AccountMenuViewController (100% runtime, pas de ref statique)
+//
+// On NE déclare PAS @interface _TtC6Twitch25AccountMenuViewController
+// car la classe Swift n'existe pas au link-time → linker error.
+// On crée une classe proxy S7TVAccountMenuProxy : NSObject dont on
+// attache les IMPs sur la classe Twitch via class_addMethod au runtime.
+// ────────────────────────────────────────────────────────────
+
 // Clé pour stocker le nombre original de sections (associated object)
 static const char kS7TVOrigSectionCount = 7;
 
-@interface _TtC6Twitch25AccountMenuViewController : UITableViewController
-@end
+// ── IMP implémentations (plain C, pas de category ObjC) ──────────────────
 
-@interface _TtC6Twitch25AccountMenuViewController (S7TVSettings)
-- (NSInteger)s7tv_numberOfSectionsInTableView:(UITableView *)tableView;
-- (NSInteger)s7tv_tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)section;
-- (NSString *)s7tv_tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)section;
-- (UIView *)s7tv_tableView:(UITableView *)tv viewForHeaderInSection:(NSInteger)section;
-- (CGFloat)s7tv_tableView:(UITableView *)tv heightForHeaderInSection:(NSInteger)section;
-- (UITableViewCell *)s7tv_tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip;
-- (void)s7tv_tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip;
-@end
-
-@implementation _TtC6Twitch25AccountMenuViewController (S7TVSettings)
-
-- (NSInteger)s7tv_numberOfSectionsInTableView:(UITableView *)tv {
-    NSInteger orig = [self s7tv_numberOfSectionsInTableView:tv]; // swizzle → appel original
-    // Mémoriser le count original pour que les autres méthodes connaissent l'index de notre section
+static NSInteger s7tv_imp_numberOfSections(id self, SEL _cmd, UITableView *tv) {
+    // Appel de l'originale (swizzlée sous s7tv_numberOfSectionsInTableView:)
+    SEL origSel = NSSelectorFromString(@"s7tv_numberOfSectionsInTableView:");
+    NSInteger (*origIMP)(id, SEL, UITableView *) =
+        (NSInteger (*)(id, SEL, UITableView *))
+        [self methodForSelector:origSel];
+    NSInteger orig = origIMP(self, origSel, tv);
     objc_setAssociatedObject(self, &kS7TVOrigSectionCount,
                              @(orig), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     return orig + 1;
 }
 
-- (NSInteger)s7tv_tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)section {
+static NSInteger s7tv_imp_numberOfRows(id self, SEL _cmd, UITableView *tv, NSInteger section) {
     NSInteger ourSection = [objc_getAssociatedObject(self, &kS7TVOrigSectionCount) integerValue];
     if (section == ourSection) return 1;
-    return [self s7tv_tableView:tv numberOfRowsInSection:section];
+    SEL origSel = NSSelectorFromString(@"s7tv_tableView:numberOfRowsInSection:");
+    NSInteger (*origIMP)(id, SEL, UITableView *, NSInteger) =
+        (NSInteger (*)(id, SEL, UITableView *, NSInteger))
+        [self methodForSelector:origSel];
+    return origIMP(self, origSel, tv, section);
 }
 
-- (NSString *)s7tv_tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)section {
+static NSString *s7tv_imp_titleForHeader(id self, SEL _cmd, UITableView *tv, NSInteger section) {
     NSInteger ourSection = [objc_getAssociatedObject(self, &kS7TVOrigSectionCount) integerValue];
-    if (section == ourSection) return nil; // header géré par viewForHeaderInSection
-    return [self s7tv_tableView:tv titleForHeaderInSection:section];
+    if (section == ourSection) return nil;
+    SEL origSel = NSSelectorFromString(@"s7tv_tableView:titleForHeaderInSection:");
+    NSString *(*origIMP)(id, SEL, UITableView *, NSInteger) =
+        (NSString *(*)(id, SEL, UITableView *, NSInteger))
+        [self methodForSelector:origSel];
+    return origIMP(self, origSel, tv, section);
 }
 
-- (UIView *)s7tv_tableView:(UITableView *)tv viewForHeaderInSection:(NSInteger)section {
+static UIView *s7tv_imp_viewForHeader(id self, SEL _cmd, UITableView *tv, NSInteger section) {
     NSInteger ourSection = [objc_getAssociatedObject(self, &kS7TVOrigSectionCount) integerValue];
     if (section != ourSection) {
-        return [self s7tv_tableView:tv viewForHeaderInSection:section];
+        SEL origSel = NSSelectorFromString(@"s7tv_tableView:viewForHeaderInSection:");
+        UIView *(*origIMP)(id, SEL, UITableView *, NSInteger) =
+            (UIView *(*)(id, SEL, UITableView *, NSInteger))
+            [self methodForSelector:origSel];
+        return origIMP(self, origSel, tv, section);
     }
 
-    // ── Header avec logo 7TV + label "7TV SETTINGS" ──────────────────────────
     UIView *container = [[UIView alloc] init];
     container.backgroundColor = [UIColor clearColor];
 
@@ -1601,22 +1612,29 @@ static const char kS7TVOrigSectionCount = 7;
     return container;
 }
 
-- (CGFloat)s7tv_tableView:(UITableView *)tv heightForHeaderInSection:(NSInteger)section {
+static CGFloat s7tv_imp_heightForHeader(id self, SEL _cmd, UITableView *tv, NSInteger section) {
     NSInteger ourSection = [objc_getAssociatedObject(self, &kS7TVOrigSectionCount) integerValue];
     if (section == ourSection) return 38.0;
-    return [self s7tv_tableView:tv heightForHeaderInSection:section];
+    SEL origSel = NSSelectorFromString(@"s7tv_tableView:heightForHeaderInSection:");
+    CGFloat (*origIMP)(id, SEL, UITableView *, NSInteger) =
+        (CGFloat (*)(id, SEL, UITableView *, NSInteger))
+        [self methodForSelector:origSel];
+    return origIMP(self, origSel, tv, section);
 }
 
-- (UITableViewCell *)s7tv_tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
+static UITableViewCell *s7tv_imp_cellForRow(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
     NSInteger ourSection = [objc_getAssociatedObject(self, &kS7TVOrigSectionCount) integerValue];
     if (ip.section != ourSection) {
-        return [self s7tv_tableView:tv cellForRowAtIndexPath:ip];
+        SEL origSel = NSSelectorFromString(@"s7tv_tableView:cellForRowAtIndexPath:");
+        UITableViewCell *(*origIMP)(id, SEL, UITableView *, NSIndexPath *) =
+            (UITableViewCell *(*)(id, SEL, UITableView *, NSIndexPath *))
+            [self methodForSelector:origSel];
+        return origIMP(self, origSel, tv, ip);
     }
 
     static NSString *rID = @"S7TVSettingsCell";
     UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:rID];
     if (!cell) {
-        // Tenter de réutiliser le type natif Twitch.SettingsDisclosureCell
         Class disclosureClass = NSClassFromString(@"Twitch.SettingsDisclosureCell")
                               ?: NSClassFromString(@"_TtC6Twitch22SettingsDisclosureCell");
         if (disclosureClass) {
@@ -1632,7 +1650,6 @@ static const char kS7TVOrigSectionCount = 7;
 
     cell.textLabel.text = @"7TV Settings";
 
-    // Logo 7TV comme imageView de la cellule
     NSData *logoData = [[NSData alloc]
         initWithBase64EncodedString:kS7TVLogoBase64
                             options:NSDataBase64DecodingIgnoreUnknownCharacters];
@@ -1644,24 +1661,25 @@ static const char kS7TVOrigSectionCount = 7;
     return cell;
 }
 
-- (void)s7tv_tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
+static void s7tv_imp_didSelect(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
     NSInteger ourSection = [objc_getAssociatedObject(self, &kS7TVOrigSectionCount) integerValue];
     if (ip.section != ourSection) {
-        [self s7tv_tableView:tv didSelectRowAtIndexPath:ip];
+        SEL origSel = NSSelectorFromString(@"s7tv_tableView:didSelectRowAtIndexPath:");
+        void (*origIMP)(id, SEL, UITableView *, NSIndexPath *) =
+            (void (*)(id, SEL, UITableView *, NSIndexPath *))
+            [self methodForSelector:origSel];
+        origIMP(self, origSel, tv, ip);
         return;
     }
 
     [tv deselectRowAtIndexPath:ip animated:YES];
 
-    // Push directement dans la nav Twitch existante — pas de modal
     SevenTVSettingsController *vc = [[SevenTVSettingsController alloc] init];
-    [self.navigationController pushViewController:vc animated:YES];
+    UINavigationController *nav = ((UIViewController *)self).navigationController;
+    [nav pushViewController:vc animated:YES];
 
     [[SevenTVManager sharedManager] log:@"✅ 7TV Settings ouvert depuis les paramètres Twitch"];
 }
-
-@end
-
 
 // ────────────────────────────────────────────────────────────
 // MARK: - Swizzle AccountMenuViewController
@@ -1674,29 +1692,61 @@ static void s7tv_swizzle_account_menu(void) {
             log:@"⚠️ _TtC6Twitch25AccountMenuViewController introuvable — swizzle ignoré"];
         return;
     }
-    Class source = [_TtC6Twitch25AccountMenuViewController class];
 
-    s7tv_swizzle(target, source,
-                 @selector(numberOfSectionsInTableView:),
-                 @selector(s7tv_numberOfSectionsInTableView:));
-    s7tv_swizzle(target, source,
-                 @selector(tableView:numberOfRowsInSection:),
-                 @selector(s7tv_tableView:numberOfRowsInSection:));
-    s7tv_swizzle(target, source,
-                 @selector(tableView:titleForHeaderInSection:),
-                 @selector(s7tv_tableView:titleForHeaderInSection:));
-    s7tv_swizzle(target, source,
-                 @selector(tableView:viewForHeaderInSection:),
-                 @selector(s7tv_tableView:viewForHeaderInSection:));
-    s7tv_swizzle(target, source,
-                 @selector(tableView:heightForHeaderInSection:),
-                 @selector(s7tv_tableView:heightForHeaderInSection:));
-    s7tv_swizzle(target, source,
-                 @selector(tableView:cellForRowAtIndexPath:),
-                 @selector(s7tv_tableView:cellForRowAtIndexPath:));
-    s7tv_swizzle(target, source,
-                 @selector(tableView:didSelectRowAtIndexPath:),
-                 @selector(s7tv_tableView:didSelectRowAtIndexPath:));
+    // Helper macro-like inline pour swizzler via IMP C pure (pas de catégorie statique)
+    void (^swizzleWithIMP)(SEL, SEL, IMP, const char *) =
+        ^(SEL origSel, SEL newSel, IMP newIMP, const char *types) {
+            Method origMethod = class_getInstanceMethod(target, origSel);
+            if (!origMethod) return;
+            // Ajoute la nouvelle méthode (s7tv_*) sur la target
+            class_addMethod(target, newSel, newIMP, types);
+            // Récupère l'IMP fraîchement ajoutée
+            Method newMethod = class_getInstanceMethod(target, newSel);
+            if (newMethod) method_exchangeImplementations(origMethod, newMethod);
+        };
+
+    swizzleWithIMP(
+        @selector(numberOfSectionsInTableView:),
+        NSSelectorFromString(@"s7tv_numberOfSectionsInTableView:"),
+        (IMP)s7tv_imp_numberOfSections,
+        "q@:@"
+    );
+    swizzleWithIMP(
+        @selector(tableView:numberOfRowsInSection:),
+        NSSelectorFromString(@"s7tv_tableView:numberOfRowsInSection:"),
+        (IMP)s7tv_imp_numberOfRows,
+        "q@:@q"
+    );
+    swizzleWithIMP(
+        @selector(tableView:titleForHeaderInSection:),
+        NSSelectorFromString(@"s7tv_tableView:titleForHeaderInSection:"),
+        (IMP)s7tv_imp_titleForHeader,
+        "@@:@q"
+    );
+    swizzleWithIMP(
+        @selector(tableView:viewForHeaderInSection:),
+        NSSelectorFromString(@"s7tv_tableView:viewForHeaderInSection:"),
+        (IMP)s7tv_imp_viewForHeader,
+        "@@:@q"
+    );
+    swizzleWithIMP(
+        @selector(tableView:heightForHeaderInSection:),
+        NSSelectorFromString(@"s7tv_tableView:heightForHeaderInSection:"),
+        (IMP)s7tv_imp_heightForHeader,
+        "d@:@q"
+    );
+    swizzleWithIMP(
+        @selector(tableView:cellForRowAtIndexPath:),
+        NSSelectorFromString(@"s7tv_tableView:cellForRowAtIndexPath:"),
+        (IMP)s7tv_imp_cellForRow,
+        "@@:@@"
+    );
+    swizzleWithIMP(
+        @selector(tableView:didSelectRowAtIndexPath:),
+        NSSelectorFromString(@"s7tv_tableView:didSelectRowAtIndexPath:"),
+        (IMP)s7tv_imp_didSelect,
+        "v@:@@"
+    );
 
     [[SevenTVManager sharedManager]
         log:@"✅ AccountMenuViewController swizzlé — section 7TV Settings injectée"];
