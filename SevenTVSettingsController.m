@@ -62,6 +62,7 @@ static UIImageView *S7TVIcon(NSString *sfName, UIColor *tint) {
 }
 
 // Cellule standard avec icône + titre + (optionnel) sous-titre + chevron
+// Style taille police identique Twitch natif : titre 17pt Regular, sous-titre 12pt Regular gris
 static UITableViewCell *S7TVNavCell(NSString *title,
                                      NSString *subtitle,
                                      NSString *sfName,
@@ -79,58 +80,57 @@ static UITableViewCell *S7TVNavCell(NSString *title,
 
     UILabel *titleLbl = [[UILabel alloc] init];
     titleLbl.text = title;
-    titleLbl.font = [UIFont systemFontOfSize:16 weight:UIFontWeightRegular];
+    // Twitch natif : 17pt Regular (même poids que les cellules Settings iOS)
+    titleLbl.font = [UIFont systemFontOfSize:17 weight:UIFontWeightRegular];
     titleLbl.textColor = [UIColor whiteColor];
-    titleLbl.numberOfLines = 0;
+    titleLbl.numberOfLines = 1;
     titleLbl.translatesAutoresizingMaskIntoConstraints = NO;
-
-    NSMutableArray *constraints = [NSMutableArray array];
-
-    [cell.contentView addSubview:titleLbl];
 
     if (subtitle.length > 0) {
         UILabel *subLbl = [[UILabel alloc] init];
         subLbl.text = subtitle;
-        subLbl.font = [UIFont systemFontOfSize:13];
+        // Sous-titre : 12pt Regular gris (identique Twitch)
+        subLbl.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
         subLbl.textColor = S7TVGray();
-        subLbl.numberOfLines = 0;
+        subLbl.numberOfLines = 1;
         subLbl.translatesAutoresizingMaskIntoConstraints = NO;
-        [cell.contentView addSubview:subLbl];
 
+        // Stack vertical centré dans la cellule
         UIStackView *stack = [[UIStackView alloc]
             initWithArrangedSubviews:@[titleLbl, subLbl]];
-        stack.axis    = UILayoutConstraintAxisVertical;
-        stack.spacing = 2;
+        stack.axis      = UILayoutConstraintAxisVertical;
+        stack.spacing   = 2;
+        stack.alignment = UIStackViewAlignmentLeading;
         stack.translatesAutoresizingMaskIntoConstraints = NO;
         [cell.contentView addSubview:stack];
 
-        // Retire les labels du contentView directs (ils sont dans le stack)
-        [titleLbl removeFromSuperview];
-        [subLbl removeFromSuperview];
-
-        [constraints addObjectsFromArray:@[
-            [icon.leadingAnchor  constraintEqualToAnchor:cell.contentView.leadingAnchor constant:16],
-            [icon.centerYAnchor  constraintEqualToAnchor:cell.contentView.centerYAnchor],
-            [stack.leadingAnchor constraintEqualToAnchor:icon.trailingAnchor constant:14],
-            [stack.centerYAnchor constraintEqualToAnchor:cell.contentView.centerYAnchor],
+        [NSLayoutConstraint activateConstraints:@[
+            [icon.leadingAnchor   constraintEqualToAnchor:cell.contentView.leadingAnchor constant:16],
+            [icon.centerYAnchor   constraintEqualToAnchor:cell.contentView.centerYAnchor],
+            [stack.leadingAnchor  constraintEqualToAnchor:icon.trailingAnchor constant:14],
+            [stack.centerYAnchor  constraintEqualToAnchor:cell.contentView.centerYAnchor],
             [stack.trailingAnchor constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-8],
-            [stack.topAnchor     constraintGreaterThanOrEqualToAnchor:cell.contentView.topAnchor constant:10],
-            [stack.bottomAnchor  constraintLessThanOrEqualToAnchor:cell.contentView.bottomAnchor constant:-10],
+            // Assure que le stack ne déborde pas verticalement
+            [stack.topAnchor      constraintGreaterThanOrEqualToAnchor:cell.contentView.topAnchor constant:8],
+            [stack.bottomAnchor   constraintLessThanOrEqualToAnchor:cell.contentView.bottomAnchor constant:-8],
         ]];
     } else {
-        [constraints addObjectsFromArray:@[
-            [icon.leadingAnchor    constraintEqualToAnchor:cell.contentView.leadingAnchor constant:16],
-            [icon.centerYAnchor    constraintEqualToAnchor:cell.contentView.centerYAnchor],
-            [titleLbl.leadingAnchor constraintEqualToAnchor:icon.trailingAnchor constant:14],
-            [titleLbl.centerYAnchor constraintEqualToAnchor:cell.contentView.centerYAnchor],
+        [cell.contentView addSubview:titleLbl];
+        [NSLayoutConstraint activateConstraints:@[
+            [icon.leadingAnchor     constraintEqualToAnchor:cell.contentView.leadingAnchor constant:16],
+            [icon.centerYAnchor     constraintEqualToAnchor:cell.contentView.centerYAnchor],
+            [titleLbl.leadingAnchor  constraintEqualToAnchor:icon.trailingAnchor constant:14],
             [titleLbl.trailingAnchor constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-8],
+            // CRITIQUE : top+bottom pour que le label ait une hauteur résolue
+            [titleLbl.topAnchor      constraintEqualToAnchor:cell.contentView.topAnchor constant:10],
+            [titleLbl.bottomAnchor   constraintEqualToAnchor:cell.contentView.bottomAnchor constant:-10],
         ]];
     }
-    [NSLayoutConstraint activateConstraints:constraints];
     return cell;
 }
 
 // Cellule avec UISwitch
+// Titre 17pt Regular (identique Twitch natif), switch violet 7TV
 static UITableViewCell *S7TVSwitchCell(NSString *title,
                                         NSString *sfName,
                                         UIColor  *iconTint,
@@ -147,14 +147,15 @@ static UITableViewCell *S7TVSwitchCell(NSString *title,
 
     UILabel *lbl = [[UILabel alloc] init];
     lbl.text = title;
-    lbl.font = [UIFont systemFontOfSize:16 weight:UIFontWeightRegular];
+    // 17pt Regular = taille standard iOS Settings / Twitch natif
+    lbl.font = [UIFont systemFontOfSize:17 weight:UIFontWeightRegular];
     lbl.textColor = [UIColor whiteColor];
-    lbl.numberOfLines = 0;
+    lbl.numberOfLines = 1;
     lbl.translatesAutoresizingMaskIntoConstraints = NO;
     [cell.contentView addSubview:lbl];
 
     UISwitch *sw = [[UISwitch alloc] init];
-    sw.on         = isOn;
+    sw.on          = isOn;
     sw.onTintColor = S7TVAccent();
     [sw addTarget:target action:action forControlEvents:UIControlEventValueChanged];
     sw.translatesAutoresizingMaskIntoConstraints = NO;
@@ -164,9 +165,10 @@ static UITableViewCell *S7TVSwitchCell(NSString *title,
         [icon.leadingAnchor  constraintEqualToAnchor:cell.contentView.leadingAnchor constant:16],
         [icon.centerYAnchor  constraintEqualToAnchor:cell.contentView.centerYAnchor],
 
+        // CRITIQUE top+bottom : résout la hauteur du label et centre verticalement
         [lbl.leadingAnchor   constraintEqualToAnchor:icon.trailingAnchor constant:14],
-        [lbl.topAnchor       constraintEqualToAnchor:cell.contentView.topAnchor constant:12],
-        [lbl.bottomAnchor    constraintEqualToAnchor:cell.contentView.bottomAnchor constant:-12],
+        [lbl.topAnchor       constraintEqualToAnchor:cell.contentView.topAnchor constant:13],
+        [lbl.bottomAnchor    constraintEqualToAnchor:cell.contentView.bottomAnchor constant:-13],
 
         [sw.leadingAnchor    constraintGreaterThanOrEqualToAnchor:lbl.trailingAnchor constant:12],
         [sw.trailingAnchor   constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-16],
@@ -358,18 +360,19 @@ typedef NS_ENUM(NSInteger, S7TVHomeRow) {
 
         UILabel *lbl = [[UILabel alloc] init];
         lbl.text = @"Recharger les emotes";
-        lbl.font = [UIFont systemFontOfSize:16];
+        lbl.font = [UIFont systemFontOfSize:17 weight:UIFontWeightRegular];
         lbl.textColor = [UIColor whiteColor];
-        lbl.numberOfLines = 0;
+        lbl.numberOfLines = 1;
         lbl.translatesAutoresizingMaskIntoConstraints = NO;
         [cell.contentView addSubview:lbl];
 
         [NSLayoutConstraint activateConstraints:@[
-            [icon.leadingAnchor constraintEqualToAnchor:cell.contentView.leadingAnchor constant:16],
-            [icon.centerYAnchor constraintEqualToAnchor:cell.contentView.centerYAnchor],
-            [lbl.leadingAnchor  constraintEqualToAnchor:icon.trailingAnchor constant:14],
-            [lbl.centerYAnchor  constraintEqualToAnchor:cell.contentView.centerYAnchor],
-            [lbl.trailingAnchor constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-8],
+            [icon.leadingAnchor  constraintEqualToAnchor:cell.contentView.leadingAnchor constant:16],
+            [icon.centerYAnchor  constraintEqualToAnchor:cell.contentView.centerYAnchor],
+            [lbl.leadingAnchor   constraintEqualToAnchor:icon.trailingAnchor constant:14],
+            [lbl.trailingAnchor  constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-8],
+            [lbl.topAnchor       constraintEqualToAnchor:cell.contentView.topAnchor constant:10],
+            [lbl.bottomAnchor    constraintEqualToAnchor:cell.contentView.bottomAnchor constant:-10],
         ]];
         return cell;
     }
@@ -601,16 +604,16 @@ typedef NS_ENUM(NSInteger, S7TVHomeRow) {
         titleLbl.text = mgr.currentChannelName ?: @"Aucun channel";
         titleLbl.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
         titleLbl.textColor = [UIColor whiteColor];
-        titleLbl.numberOfLines = 0;
+        titleLbl.numberOfLines = 1;
         titleLbl.translatesAutoresizingMaskIntoConstraints = NO;
 
         UILabel *subLbl = [[UILabel alloc] init];
         subLbl.text = mgr.currentChannelTwitchID
             ? [NSString stringWithFormat:@"ID : %@", mgr.currentChannelTwitchID]
             : @"Rejoins un stream pour charger les emotes";
-        subLbl.font = [UIFont systemFontOfSize:12];
+        subLbl.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
         subLbl.textColor = S7TVGray();
-        subLbl.numberOfLines = 0;
+        subLbl.numberOfLines = 1;
         subLbl.translatesAutoresizingMaskIntoConstraints = NO;
 
         UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[titleLbl, subLbl]];
@@ -647,9 +650,9 @@ typedef NS_ENUM(NSInteger, S7TVHomeRow) {
     nameLbl.text = label;
     nameLbl.font = ip.row == 2
         ? [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold]
-        : [UIFont systemFontOfSize:15];
+        : [UIFont systemFontOfSize:15 weight:UIFontWeightRegular];
     nameLbl.textColor = [UIColor whiteColor];
-    nameLbl.numberOfLines = 0;
+    nameLbl.numberOfLines = 1;
     nameLbl.translatesAutoresizingMaskIntoConstraints = NO;
     [cell.contentView addSubview:nameLbl];
 
@@ -664,8 +667,10 @@ typedef NS_ENUM(NSInteger, S7TVHomeRow) {
     [NSLayoutConstraint activateConstraints:@[
         [icon.leadingAnchor    constraintEqualToAnchor:cell.contentView.leadingAnchor constant:16],
         [icon.centerYAnchor    constraintEqualToAnchor:cell.contentView.centerYAnchor],
+        // CRITIQUE : top+bottom pour résoudre la hauteur du label
         [nameLbl.leadingAnchor  constraintEqualToAnchor:icon.trailingAnchor constant:14],
-        [nameLbl.centerYAnchor  constraintEqualToAnchor:cell.contentView.centerYAnchor],
+        [nameLbl.topAnchor      constraintEqualToAnchor:cell.contentView.topAnchor constant:10],
+        [nameLbl.bottomAnchor   constraintEqualToAnchor:cell.contentView.bottomAnchor constant:-10],
         [valLbl.trailingAnchor  constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-16],
         [valLbl.centerYAnchor   constraintEqualToAnchor:cell.contentView.centerYAnchor],
     ]];
@@ -758,9 +763,9 @@ typedef NS_ENUM(NSInteger, S7TVHomeRow) {
 
         UILabel *nameLbl = [[UILabel alloc] init];
         nameLbl.text = @"Voir les logs";
-        nameLbl.font = [UIFont systemFontOfSize:16];
+        nameLbl.font = [UIFont systemFontOfSize:17 weight:UIFontWeightRegular];
         nameLbl.textColor = [UIColor whiteColor];
-        nameLbl.numberOfLines = 0;
+        nameLbl.numberOfLines = 1;
         nameLbl.translatesAutoresizingMaskIntoConstraints = NO;
         [cell.contentView addSubview:nameLbl];
 
@@ -776,7 +781,9 @@ typedef NS_ENUM(NSInteger, S7TVHomeRow) {
             [icon.leadingAnchor    constraintEqualToAnchor:cell.contentView.leadingAnchor constant:16],
             [icon.centerYAnchor    constraintEqualToAnchor:cell.contentView.centerYAnchor],
             [nameLbl.leadingAnchor  constraintEqualToAnchor:icon.trailingAnchor constant:14],
-            [nameLbl.centerYAnchor  constraintEqualToAnchor:cell.contentView.centerYAnchor],
+            // CRITIQUE : top+bottom pour que nameLbl soit visible
+            [nameLbl.topAnchor      constraintEqualToAnchor:cell.contentView.topAnchor constant:10],
+            [nameLbl.bottomAnchor   constraintEqualToAnchor:cell.contentView.bottomAnchor constant:-10],
             [nameLbl.trailingAnchor constraintLessThanOrEqualToAnchor:badge.leadingAnchor constant:-8],
             [badge.trailingAnchor   constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-8],
             [badge.centerYAnchor    constraintEqualToAnchor:cell.contentView.centerYAnchor],
@@ -797,18 +804,19 @@ typedef NS_ENUM(NSInteger, S7TVHomeRow) {
 
     UILabel *lbl = [[UILabel alloc] init];
     lbl.text = @"Effacer tous les logs";
-    lbl.font = [UIFont systemFontOfSize:16];
+    lbl.font = [UIFont systemFontOfSize:17 weight:UIFontWeightRegular];
     lbl.textColor = [UIColor systemRedColor];
-    lbl.numberOfLines = 0;
+    lbl.numberOfLines = 1;
     lbl.translatesAutoresizingMaskIntoConstraints = NO;
     [cell.contentView addSubview:lbl];
 
     [NSLayoutConstraint activateConstraints:@[
-        [icon.leadingAnchor constraintEqualToAnchor:cell.contentView.leadingAnchor constant:16],
-        [icon.centerYAnchor constraintEqualToAnchor:cell.contentView.centerYAnchor],
-        [lbl.leadingAnchor  constraintEqualToAnchor:icon.trailingAnchor constant:14],
-        [lbl.centerYAnchor  constraintEqualToAnchor:cell.contentView.centerYAnchor],
-        [lbl.trailingAnchor constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-16],
+        [icon.leadingAnchor  constraintEqualToAnchor:cell.contentView.leadingAnchor constant:16],
+        [icon.centerYAnchor  constraintEqualToAnchor:cell.contentView.centerYAnchor],
+        [lbl.leadingAnchor   constraintEqualToAnchor:icon.trailingAnchor constant:14],
+        [lbl.trailingAnchor  constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-16],
+        [lbl.topAnchor       constraintEqualToAnchor:cell.contentView.topAnchor constant:10],
+        [lbl.bottomAnchor    constraintEqualToAnchor:cell.contentView.bottomAnchor constant:-10],
     ]];
     return cell;
 }
