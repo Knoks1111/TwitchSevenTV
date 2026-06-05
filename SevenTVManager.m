@@ -1209,21 +1209,44 @@ static const CGFloat kCellSize      = 40.0;
     //   1. Emotes CARRÉES en premier (width == height), du plus petit au plus grand
     //   2. Emotes NON-CARRÉES ensuite, du plus petit au plus grand (surface = w × h)
     //   3. Emotes sans dimensions (w=0 ou h=0) tout en dernier
+    //   4. À taille égale : ordre alphabétique du nom
+    //      → !, ?, chiffres (0-9) avant les lettres (A-Z)
+    //        (Unicode : ! = 33, ? = 63, '0'-'9' = 48-57, 'A'-'Z' = 65-90)
     NSArray<SevenTVEmote *> *sorted = [all sortedArrayUsingComparator:
         ^NSComparisonResult(SevenTVEmote *a, SevenTVEmote *b) {
             BOOL aSquare = (a.width > 0 && a.height > 0 && a.width == a.height);
             BOOL bSquare = (b.width > 0 && b.height > 0 && b.width == b.height);
-            // Carrées avant non-carrées
+            // 1. Carrées avant non-carrées
             if (aSquare != bSquare) return aSquare ? NSOrderedAscending : NSOrderedDescending;
-            // Dans chaque groupe : plus petite surface en premier
+            // 2. Plus petite surface en premier
             NSInteger aArea = a.width * a.height;
             NSInteger bArea = b.width * b.height;
             // Emotes sans dimensions → tout en dernier
-            if (aArea == 0 && bArea == 0) return NSOrderedSame;
+            if (aArea == 0 && bArea == 0) {
+                // Même groupe "sans dims" → trier alphabétiquement
+                return [a.emoteName compare:b.emoteName options:NSCaseInsensitiveSearch|NSNumericSearch];
+            }
             if (aArea == 0) return NSOrderedDescending;
             if (bArea == 0) return NSOrderedAscending;
             if (aArea < bArea) return NSOrderedAscending;
             if (aArea > bArea) return NSOrderedDescending;
+            // 3. Même taille → alphabétique (!, ?, 0-9 avant A-Z en Unicode)
+            //    On compare caractère par caractère pour respecter l'ordre ASCII :
+            //    spéciaux < chiffres < majuscules < minuscules
+            NSString *aName = a.emoteName ?: @"";
+            NSString *bName = b.emoteName ?: @"";
+            NSUInteger len = MIN(aName.length, bName.length);
+            for (NSUInteger i = 0; i < len; i++) {
+                unichar ac = [aName characterAtIndex:i];
+                unichar bc = [bName characterAtIndex:i];
+                // Convertir minuscules en majuscules pour comparaison insensible à la casse
+                if (ac >= 'a' && ac <= 'z') ac -= 32;
+                if (bc >= 'a' && bc <= 'z') bc -= 32;
+                if (ac < bc) return NSOrderedAscending;
+                if (ac > bc) return NSOrderedDescending;
+            }
+            if (aName.length < bName.length) return NSOrderedAscending;
+            if (aName.length > bName.length) return NSOrderedDescending;
             return NSOrderedSame;
         }];
     self.emotePickerAllEmotes = sorted;
