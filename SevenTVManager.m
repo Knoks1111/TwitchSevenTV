@@ -2,9 +2,9 @@
  * SevenTVManager.m
  * Implémentation du gestionnaire 7TV.
  *
- * CORRECTIFS v1.8 — No-keyboard mode:
- *   Fix M — inputView=CGRectZero : masque le clavier a l'ouverture du picker.
- *   Fix N — _hideEmotePicker : restaure inputView=nil pour retablir le clavier.
+ * CORRECTIFS v1.8 — Keyboard-replacement mode:
+ *   Fix M — inputView = picker : le picker remplace le clavier (s'affiche en dessous).
+ *   Fix N — _hideEmotePicker : inputView=nil restaure le clavier natif.
  *
  * CORRECTIFS v1.4:
  *   Fix C — Injection IRC multi-lignes.
@@ -1165,7 +1165,7 @@ static const CGFloat kCellSize      = 40.0;
     // _hideEmotePicker est appelé avant même que le picker ait été créé → bug d'ouverture.
     if (self.emotePickerView &&
         self.emotePickerTextEntryView &&
-        self.emotePickerTextEntryView.inputAccessoryView == self.emotePickerView) {
+        self.emotePickerTextEntryView.inputView == self.emotePickerView) {
         [self _hideEmotePicker];
         return;
     }
@@ -1180,10 +1180,12 @@ static const CGFloat kCellSize      = 40.0;
     // puis on appelle reloadInputViews pour que UIKit applique le changement.
     UITextView *tv = self.emotePickerTextEntryView;
     if (tv) {
-        tv.inputView = nil;           // ← restaure le clavier natif
+        tv.inputView = nil;       // ← remet le clavier natif en dessous
         tv.inputAccessoryView = nil;
         if (tv.isFirstResponder) {
-            [tv reloadInputViews];    // UIKit affiche de nouveau le clavier
+            [tv reloadInputViews]; // UIKit re-affiche le clavier normal
+        } else {
+            [tv resignFirstResponder];
         }
     }
     // Cacher la vue picker (réutilisée la prochaine fois)
@@ -1232,32 +1234,31 @@ static const CGFloat kCellSize      = 40.0;
     [self.emoteCollectionView reloadData];
     [self.emoteCollectionView setContentOffset:CGPointZero animated:NO];
 
-    // ── inputView vide + inputAccessoryView (no-keyboard mode) ─────────────
-    // STRATÉGIE "no-keyboard" :
-    //   On remplace le clavier natif par une UIView de hauteur zéro (inputView).
-    //   Ainsi le TextEntryView devient firstResponder (→ insertText: fonctionne)
-    //   SANS afficher le clavier. Seul le picker (inputAccessoryView) est visible.
+    // ── inputView = picker (keyboard-replacement mode) ──────────────────────
+    // STRATÉGIE "clavier remplacé" :
+    //   inputView remplace entièrement le clavier natif.
+    //   Le picker s'affiche EN DESSOUS de la chat bar (comme le picker d'emojis iOS).
+    //   Le TextEntryView reste firstResponder → insertText: fonctionne normalement.
     //
     // ORDRE CRITIQUE :
-    //   1. inputView = vue vide   → substitue le clavier par rien
-    //   2. inputAccessoryView     → pose le picker au-dessus
-    //   3. becomeFirstResponder   → active le responder (clavier = rien, picker visible)
-    //   4. reloadInputViews       → UIKit re-render avec la nouvelle configuration
+    //   1. inputView = picker     → substitue le clavier par notre picker
+    //   2. inputAccessoryView nil → pas de barre accessoire superflue
+    //   3. becomeFirstResponder   → affiche l'inputView (picker) à la place du clavier
+    //   4. reloadInputViews       → UIKit re-render avec inputView = picker
     UITextView *tv = self.emotePickerTextEntryView;
     if (tv) {
-        // Étape 1 : substituer le clavier natif par une vue vide (hauteur 0)
-        tv.inputView = [[UIView alloc] initWithFrame:CGRectZero];
-        // Étape 2 : poser le picker comme inputAccessoryView
+        // Étape 1 : le picker DEVIENT le clavier (affiché en dessous de la chat bar)
         self.emotePickerView.hidden = NO;
-        tv.inputAccessoryView = self.emotePickerView;
-        // Étape 3 : devenir firstResponder (affiche inputView=vide, pas le clavier)
+        tv.inputView = self.emotePickerView;
+        tv.inputAccessoryView = nil;
+        // Étape 2 : devenir firstResponder → UIKit affiche inputView (notre picker)
         if (!tv.isFirstResponder) {
-            [self log:@"ℹ️ tv pas firstResponder → becomeFirstResponder (sans clavier)"];
+            [self log:@"ℹ️ tv pas firstResponder → becomeFirstResponder"];
             [tv becomeFirstResponder];
         }
-        // Étape 4 : recharger le keyboard stack
+        // Étape 3 : recharger pour appliquer le nouvel inputView
         [tv reloadInputViews];
-        [self log:@"✅ picker affiché sans clavier sur %@", NSStringFromClass([tv class])];
+        [self log:@"✅ picker en dessous de la chat bar (inputView) sur %@", NSStringFromClass([tv class])];
     } else {
         [self log:@"⚠️ TextEntryView nil — fallback fenêtre flottante"];
         UIWindow *keyWindow = nil;
@@ -1422,7 +1423,7 @@ static const CGFloat kCellSize      = 40.0;
 
     [picker addSubview:cv];
 
-    // NOTE: pas d'addSubview ici — la vue est attachée via inputAccessoryView
+    // NOTE: pas d'addSubview ici — la vue est attachée via inputView (remplace le clavier)
 }
 
 // ── Recherche ──────────────────────────────────────────────────────────────
