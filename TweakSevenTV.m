@@ -1505,6 +1505,204 @@ static UIViewController *s7tv_vcForView(UIView *v) {
 @end
 
 // ────────────────────────────────────────────────────────────
+// MARK: - Hook AccountMenuViewController — section "7TV Settings"
+//
+// Injecte une nouvelle section tout en bas des paramètres Twitch
+// natifs (_TtC6Twitch25AccountMenuViewController).
+//
+// Technique identique à TwitchDvnloader :
+//   • numberOfSectionsInTableView: → orig + 1
+//   • numberOfRowsInSection:       → 1 ligne dans notre section
+//   • titleForHeaderInSection:     → nil (on utilise viewForHeaderInSection)
+//   • viewForHeaderInSection:      → header avec logo 7TV + titre
+//   • heightForHeaderInSection:    → 38pt
+//   • cellForRowAtIndexPath:       → cellule disclosure native Twitch
+//   • didSelectRowAtIndexPath:     → push SevenTVSettingsController
+//
+// On réutilise Twitch.SettingsDisclosureCell pour un rendu
+// strictement identique aux autres lignes Twitch.
+// ────────────────────────────────────────────────────────────
+
+// Clé pour stocker le nombre original de sections (associated object)
+static const char kS7TVOrigSectionCount = 7;
+
+@interface _TtC6Twitch25AccountMenuViewController : UITableViewController
+@end
+
+@interface _TtC6Twitch25AccountMenuViewController (S7TVSettings)
+- (NSInteger)s7tv_numberOfSectionsInTableView:(UITableView *)tableView;
+- (NSInteger)s7tv_tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)section;
+- (NSString *)s7tv_tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)section;
+- (UIView *)s7tv_tableView:(UITableView *)tv viewForHeaderInSection:(NSInteger)section;
+- (CGFloat)s7tv_tableView:(UITableView *)tv heightForHeaderInSection:(NSInteger)section;
+- (UITableViewCell *)s7tv_tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip;
+- (void)s7tv_tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip;
+@end
+
+@implementation _TtC6Twitch25AccountMenuViewController (S7TVSettings)
+
+- (NSInteger)s7tv_numberOfSectionsInTableView:(UITableView *)tv {
+    NSInteger orig = [self s7tv_numberOfSectionsInTableView:tv]; // swizzle → appel original
+    // Mémoriser le count original pour que les autres méthodes connaissent l'index de notre section
+    objc_setAssociatedObject(self, &kS7TVOrigSectionCount,
+                             @(orig), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return orig + 1;
+}
+
+- (NSInteger)s7tv_tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)section {
+    NSInteger ourSection = [objc_getAssociatedObject(self, &kS7TVOrigSectionCount) integerValue];
+    if (section == ourSection) return 1;
+    return [self s7tv_tableView:tv numberOfRowsInSection:section];
+}
+
+- (NSString *)s7tv_tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)section {
+    NSInteger ourSection = [objc_getAssociatedObject(self, &kS7TVOrigSectionCount) integerValue];
+    if (section == ourSection) return nil; // header géré par viewForHeaderInSection
+    return [self s7tv_tableView:tv titleForHeaderInSection:section];
+}
+
+- (UIView *)s7tv_tableView:(UITableView *)tv viewForHeaderInSection:(NSInteger)section {
+    NSInteger ourSection = [objc_getAssociatedObject(self, &kS7TVOrigSectionCount) integerValue];
+    if (section != ourSection) {
+        return [self s7tv_tableView:tv viewForHeaderInSection:section];
+    }
+
+    // ── Header avec logo 7TV + label "7TV SETTINGS" ──────────────────────────
+    UIView *container = [[UIView alloc] init];
+    container.backgroundColor = [UIColor clearColor];
+
+    NSData *logoData = [[NSData alloc]
+        initWithBase64EncodedString:kS7TVLogoBase64
+                            options:NSDataBase64DecodingIgnoreUnknownCharacters];
+    UIImageView *logoView = [[UIImageView alloc] init];
+    if (logoData) logoView.image = [UIImage imageWithData:logoData scale:2.0];
+    logoView.contentMode = UIViewContentModeScaleAspectFit;
+    logoView.translatesAutoresizingMaskIntoConstraints = NO;
+    [container addSubview:logoView];
+
+    UILabel *lbl = [[UILabel alloc] init];
+    lbl.text = @"7TV SETTINGS";
+    lbl.font = [UIFont systemFontOfSize:13 weight:UIFontWeightRegular];
+    lbl.textColor = [UIColor secondaryLabelColor];
+    lbl.translatesAutoresizingMaskIntoConstraints = NO;
+    [container addSubview:lbl];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [logoView.leadingAnchor constraintEqualToAnchor:container.leadingAnchor constant:16],
+        [logoView.centerYAnchor constraintEqualToAnchor:container.centerYAnchor],
+        [logoView.widthAnchor constraintEqualToConstant:26],
+        [logoView.heightAnchor constraintEqualToConstant:19],
+        [lbl.leadingAnchor constraintEqualToAnchor:logoView.trailingAnchor constant:6],
+        [lbl.centerYAnchor constraintEqualToAnchor:container.centerYAnchor],
+        [lbl.trailingAnchor constraintEqualToAnchor:container.trailingAnchor constant:-16],
+    ]];
+
+    return container;
+}
+
+- (CGFloat)s7tv_tableView:(UITableView *)tv heightForHeaderInSection:(NSInteger)section {
+    NSInteger ourSection = [objc_getAssociatedObject(self, &kS7TVOrigSectionCount) integerValue];
+    if (section == ourSection) return 38.0;
+    return [self s7tv_tableView:tv heightForHeaderInSection:section];
+}
+
+- (UITableViewCell *)s7tv_tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
+    NSInteger ourSection = [objc_getAssociatedObject(self, &kS7TVOrigSectionCount) integerValue];
+    if (ip.section != ourSection) {
+        return [self s7tv_tableView:tv cellForRowAtIndexPath:ip];
+    }
+
+    static NSString *rID = @"S7TVSettingsCell";
+    UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:rID];
+    if (!cell) {
+        // Tenter de réutiliser le type natif Twitch.SettingsDisclosureCell
+        Class disclosureClass = NSClassFromString(@"Twitch.SettingsDisclosureCell")
+                              ?: NSClassFromString(@"_TtC6Twitch22SettingsDisclosureCell");
+        if (disclosureClass) {
+            cell = [[disclosureClass alloc] initWithStyle:UITableViewCellStyleDefault
+                                          reuseIdentifier:rID];
+        }
+        if (!cell) {
+            cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault
+                                          reuseIdentifier:rID];
+        }
+        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+    }
+
+    cell.textLabel.text = @"7TV Settings";
+
+    // Logo 7TV comme imageView de la cellule
+    NSData *logoData = [[NSData alloc]
+        initWithBase64EncodedString:kS7TVLogoBase64
+                            options:NSDataBase64DecodingIgnoreUnknownCharacters];
+    if (logoData) {
+        UIImage *logo = [UIImage imageWithData:logoData scale:2.0];
+        if (logo) cell.imageView.image = logo;
+    }
+
+    return cell;
+}
+
+- (void)s7tv_tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
+    NSInteger ourSection = [objc_getAssociatedObject(self, &kS7TVOrigSectionCount) integerValue];
+    if (ip.section != ourSection) {
+        [self s7tv_tableView:tv didSelectRowAtIndexPath:ip];
+        return;
+    }
+
+    [tv deselectRowAtIndexPath:ip animated:YES];
+
+    // Push directement dans la nav Twitch existante — pas de modal
+    SevenTVSettingsController *vc = [[SevenTVSettingsController alloc] init];
+    [self.navigationController pushViewController:vc animated:YES];
+
+    [[SevenTVManager sharedManager] log:@"✅ 7TV Settings ouvert depuis les paramètres Twitch"];
+}
+
+@end
+
+
+// ────────────────────────────────────────────────────────────
+// MARK: - Swizzle AccountMenuViewController
+// ────────────────────────────────────────────────────────────
+
+static void s7tv_swizzle_account_menu(void) {
+    Class target = NSClassFromString(@"_TtC6Twitch25AccountMenuViewController");
+    if (!target) {
+        [[SevenTVManager sharedManager]
+            log:@"⚠️ _TtC6Twitch25AccountMenuViewController introuvable — swizzle ignoré"];
+        return;
+    }
+    Class source = [_TtC6Twitch25AccountMenuViewController class];
+
+    s7tv_swizzle(target, source,
+                 @selector(numberOfSectionsInTableView:),
+                 @selector(s7tv_numberOfSectionsInTableView:));
+    s7tv_swizzle(target, source,
+                 @selector(tableView:numberOfRowsInSection:),
+                 @selector(s7tv_tableView:numberOfRowsInSection:));
+    s7tv_swizzle(target, source,
+                 @selector(tableView:titleForHeaderInSection:),
+                 @selector(s7tv_tableView:titleForHeaderInSection:));
+    s7tv_swizzle(target, source,
+                 @selector(tableView:viewForHeaderInSection:),
+                 @selector(s7tv_tableView:viewForHeaderInSection:));
+    s7tv_swizzle(target, source,
+                 @selector(tableView:heightForHeaderInSection:),
+                 @selector(s7tv_tableView:heightForHeaderInSection:));
+    s7tv_swizzle(target, source,
+                 @selector(tableView:cellForRowAtIndexPath:),
+                 @selector(s7tv_tableView:cellForRowAtIndexPath:));
+    s7tv_swizzle(target, source,
+                 @selector(tableView:didSelectRowAtIndexPath:),
+                 @selector(s7tv_tableView:didSelectRowAtIndexPath:));
+
+    [[SevenTVManager sharedManager]
+        log:@"✅ AccountMenuViewController swizzlé — section 7TV Settings injectée"];
+}
+
+
+// ────────────────────────────────────────────────────────────
 // MARK: - Point d'entrée __attribute__((constructor))
 // ────────────────────────────────────────────────────────────
 
@@ -1548,6 +1746,9 @@ static void TwitchSevenTVInit(void) {
 
     // ── Swizzle NSURLSessionWebSocketTask (chat IRC) ──────────────────────────
     s7tv_swizzle_websocket();
+
+    // ── Swizzle AccountMenuViewController (section 7TV Settings dans les paramètres Twitch) ──
+    s7tv_swizzle_account_menu();
 
     // ── Setup sur le main thread ──────────────────────────────────────────────
     dispatch_async(dispatch_get_main_queue(), ^{

@@ -7,6 +7,7 @@
 #import "SevenTVSettingsController.h"
 #import "SevenTVManager.h"
 #import "SevenTVLogsController.h"
+#import "SevenTVLogo.h"
 
 static NSString *const kSwitchCell = @"SwitchCell";
 static NSString *const kInfoCell   = @"InfoCell";
@@ -39,15 +40,61 @@ typedef NS_ENUM(NSInteger, S7TVSection) {
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.title = @"Paramètres 7TV";
+
+    // ── Titre avec logo 7TV dans la barre de navigation ──────────────────────
+    // Créer une vue titre personnalisée : logo + texte côte à côte
+    NSData *logoData = [[NSData alloc]
+        initWithBase64EncodedString:kS7TVLogoBase64
+                            options:NSDataBase64DecodingIgnoreUnknownCharacters];
+    UIImage *logo = logoData ? [UIImage imageWithData:logoData scale:2.0] : nil;
+
+    if (logo) {
+        UIView *titleView = [[UIView alloc] init];
+
+        UIImageView *logoView = [[UIImageView alloc] initWithImage:logo];
+        logoView.contentMode = UIViewContentModeScaleAspectFit;
+        logoView.translatesAutoresizingMaskIntoConstraints = NO;
+        [titleView addSubview:logoView];
+
+        UILabel *titleLabel = [[UILabel alloc] init];
+        titleLabel.text = @"7TV Settings";
+        titleLabel.font = [UIFont boldSystemFontOfSize:17];
+        titleLabel.textColor = [UIColor labelColor];
+        titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+        [titleView addSubview:titleLabel];
+
+        [NSLayoutConstraint activateConstraints:@[
+            [logoView.leadingAnchor constraintEqualToAnchor:titleView.leadingAnchor],
+            [logoView.centerYAnchor constraintEqualToAnchor:titleView.centerYAnchor],
+            [logoView.widthAnchor constraintEqualToConstant:28],
+            [logoView.heightAnchor constraintEqualToConstant:20],
+            [titleLabel.leadingAnchor constraintEqualToAnchor:logoView.trailingAnchor constant:6],
+            [titleLabel.centerYAnchor constraintEqualToAnchor:titleView.centerYAnchor],
+            [titleLabel.trailingAnchor constraintEqualToAnchor:titleView.trailingAnchor],
+        ]];
+
+        // Calculer la taille de la titleView
+        [titleView sizeToFit];
+        CGFloat totalWidth = 28 + 6 + titleLabel.intrinsicContentSize.width;
+        CGFloat totalHeight = MAX(20, titleLabel.intrinsicContentSize.height);
+        titleView.frame = CGRectMake(0, 0, totalWidth, totalHeight);
+
+        self.navigationItem.titleView = titleView;
+    } else {
+        self.title = @"7TV Settings";
+    }
 
     // Toutes les sections fermées par défaut
     self.expandedSections = [NSMutableSet set];
 
-    UIBarButtonItem *closeBtn = [[UIBarButtonItem alloc]
-        initWithBarButtonSystemItem:UIBarButtonSystemItemClose
-                             target:self action:@selector(closeTapped)];
-    self.navigationItem.rightBarButtonItem = closeBtn;
+    // Bouton Fermer uniquement quand présenté en modal (bouton flottant)
+    // Quand ouvert depuis les paramètres Twitch → le back natif suffit
+    if (self.openedAsModal) {
+        UIBarButtonItem *closeBtn = [[UIBarButtonItem alloc]
+            initWithBarButtonSystemItem:UIBarButtonSystemItemClose
+                                 target:self action:@selector(closeTapped)];
+        self.navigationItem.rightBarButtonItem = closeBtn;
+    }
 
     self.refreshTimer = [NSTimer scheduledTimerWithTimeInterval:2.0
                                                          target:self

@@ -405,6 +405,9 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
     if ([prefs objectForKey:@"s7tv_animated"]          != nil) _showAnimated          = [prefs boolForKey:@"s7tv_animated"];
     if ([prefs objectForKey:@"s7tv_picker_anim"]       != nil) _showPickerAnimations  = [prefs boolForKey:@"s7tv_picker_anim"];
     if ([prefs objectForKey:@"s7tv_debug"]             != nil) _debugLogging          = [prefs boolForKey:@"s7tv_debug"];
+    if ([prefs objectForKey:@"s7tv_floating_btn"]      != nil) _showFloatingButton     = [prefs boolForKey:@"s7tv_floating_btn"];
+    else _showFloatingButton = YES; // activé par défaut
+    if ([prefs objectForKey:@"s7tv_tap_log"]           != nil) _tapLogging             = [prefs boolForKey:@"s7tv_tap_log"];
     // Charger les favoris (array d'IDs 7TV)
     NSArray *savedFavs = [prefs arrayForKey:@"s7tv_favorites"];
     if (savedFavs) {
@@ -414,10 +417,12 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
 
 - (void)savePreferences {
     NSUserDefaults *prefs = [NSUserDefaults standardUserDefaults];
-    [prefs setBool:self.isEnabled           forKey:@"s7tv_enabled"];
-    [prefs setBool:self.showAnimated        forKey:@"s7tv_animated"];
+    [prefs setBool:self.isEnabled            forKey:@"s7tv_enabled"];
+    [prefs setBool:self.showAnimated         forKey:@"s7tv_animated"];
     [prefs setBool:self.showPickerAnimations forKey:@"s7tv_picker_anim"];
-    [prefs setBool:self.debugLogging        forKey:@"s7tv_debug"];
+    [prefs setBool:self.debugLogging         forKey:@"s7tv_debug"];
+    [prefs setBool:self.showFloatingButton   forKey:@"s7tv_floating_btn"];
+    [prefs setBool:self.tapLogging           forKey:@"s7tv_tap_log"];
     [prefs synchronize];
 }
 
@@ -430,6 +435,21 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
 - (void)setIsEnabled:(BOOL)v              { _isEnabled            = v; [self savePreferences]; }
 - (void)setShowAnimated:(BOOL)v           { _showAnimated          = v; [self savePreferences]; }
 - (void)setShowPickerAnimations:(BOOL)v   { _showPickerAnimations  = v; [self savePreferences]; }
+- (void)setShowFloatingButton:(BOOL)v {
+    _showFloatingButton = v;
+    [self savePreferences];
+    // Afficher/masquer le bouton flottant en temps réel
+    dispatch_async(dispatch_get_main_queue(), ^{
+        self.floatingWindow.hidden = !v;
+    });
+}
+- (void)setTapLogging:(BOOL)v {
+    _tapLogging = v;
+    [self savePreferences];
+    extern BOOL s_tapLogEnabled;
+    s_tapLogEnabled = v;
+    [self log:@"👆 Tap logger %@", v ? @"activé" : @"désactivé"];
+}
 - (void)setDebugLogging:(BOOL)v {
     _debugLogging  = v;
     [self savePreferences];
@@ -2066,6 +2086,8 @@ referenceSizeForHeaderInSection:(NSInteger)section {
 - (void)settingsButtonTapped:(UIButton *)sender {
     dispatch_async(dispatch_get_main_queue(), ^{
         SevenTVSettingsController *vc = [[SevenTVSettingsController alloc] init];
+        // Quand ouvert depuis le bouton flottant → modal avec bouton Close
+        vc.openedAsModal = YES;
         UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
         [[self topViewController] presentViewController:nav animated:YES completion:nil];
     });
