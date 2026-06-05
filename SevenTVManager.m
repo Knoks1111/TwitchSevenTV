@@ -1703,60 +1703,56 @@ referenceSizeForHeaderInSection:(NSInteger)section {
 
     NSString *prefix  = (currentText.length > 0 && ![currentText hasSuffix:@" "]) ? @" " : @"";
     NSString *toAppend = [NSString stringWithFormat:@"%@%@ ", prefix, emote.emoteName];
-    NSString *newText  = [currentText stringByAppendingString:toAppend];
 
     // ── Étape 4: insertion — trois stratégies par ordre de fiabilité ──────────
 
     BOOL inserted = NO;
 
-    // Stratégie A : UIKeyInput.insertText: — le chemin que le clavier système utilise.
-    // Fonctionne même avec les champs SwiftUI (qui exposent UIKeyInput via leur hôte UIKit).
-    // On le tente UNIQUEMENT si le champ a déjà le focus (isFirstResponder), sinon
-    // insertText: insère dans le vide.
+    // ── Stratégie A : insertText: si le champ est DÉJÀ firstResponder ────────────
+    // C'est le chemin exact du clavier système → SwiftUI l'observe nativement.
+    // Ne tenter que si firstResponder : sinon insertText: écrit dans le vide.
     UIView *bestInput = textView ?: textField ?: (UIView *)keyInput;
     if (bestInput && bestInput.isFirstResponder
         && [bestInput conformsToProtocol:@protocol(UIKeyInput)]) {
         [(id<UIKeyInput>)bestInput insertText:toAppend];
-        [self log:@"✅ A — insertText: (firstResponder) → «%@»", toAppend];
+        [self log:@"✅ A — insertText: (déjà firstResponder) → «%@»", toAppend];
         inserted = YES;
     }
 
-    // Stratégie B : UITextView — setter + toutes les notifications/delegates.
+    // ── Stratégie B : becomeFirstResponder + insertText: ─────────────────────────
+    // SEUL chemin fiable pour un UITextView hébergé dans SwiftUI.
+    // textView.text = ... met à jour la propriété ObjC mais PAS le @Binding SwiftUI,
+    // donc Twitch envoie toujours le texte vide à l'appui sur Envoyer.
+    // insertText: passe par le protocole UITextInput que SwiftUI observe.
+    // Le clavier réapparaît : comportement intentionnel (l'utilisateur tape Envoyer).
     if (!inserted && textView) {
-        textView.text = newText;
-        textView.selectedRange = NSMakeRange(newText.length, 0);
-        [[NSNotificationCenter defaultCenter]
-            postNotificationName:UITextViewTextDidChangeNotification object:textView];
-        if ([textView.delegate respondsToSelector:@selector(textViewDidChange:)])
-            [textView.delegate textViewDidChange:textView];
-        // KVC path utilisé par certains frameworks SwiftUI
-        [textView setValue:newText forKey:@"text"];
-        [self log:@"✅ B — UITextView.text = «%@»", newText];
+        [textView becomeFirstResponder];
+        // Curseur à la fin du texte existant avant l'insertion
+        textView.selectedRange = NSMakeRange(textView.text.length, 0);
+        [textView insertText:toAppend];
+        [self log:@"✅ B — becomeFirstResponder + insertText: → «%@»", toAppend];
         inserted = YES;
     }
 
-    // Stratégie C : UITextField — setter + sendActions + notification.
+    // ── Stratégie C : UITextField — becomeFirstResponder + insertText: ───────────
     if (!inserted && textField) {
-        textField.text = newText;
-        [textField sendActionsForControlEvents:UIControlEventEditingChanged];
-        [[NSNotificationCenter defaultCenter]
-            postNotificationName:UITextFieldTextDidChangeNotification object:textField];
-        [self log:@"✅ C — UITextField.text = «%@»", newText];
+        [textField becomeFirstResponder];
+        [(id<UIKeyInput>)textField insertText:toAppend];
+        [self log:@"✅ C — UITextField becomeFirstResponder + insertText: → «%@»", toAppend];
         inserted = YES;
     }
 
-    // Stratégie D : UIKeyInput.insertText: SANS first responder (dernier recours).
-    // On rend le champ first responder, insère, puis retire le focus.
+    // ── Stratégie D : UIKeyInput générique (champ custom SwiftUI sans UITextView) ─
+    // Dernier recours : on force le focus puis on insère.
     if (!inserted && keyInput) {
         UIView *kv = (UIView *)keyInput;
         [kv becomeFirstResponder];
+        if ([kv isKindOfClass:[UITextView class]]) {
+            UITextView *tv = (UITextView *)kv;
+            tv.selectedRange = NSMakeRange(tv.text.length, 0);
+        }
         [(id<UIKeyInput>)kv insertText:toAppend];
-        // Retirer le focus après un court délai pour éviter l'affichage du clavier
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            [kv resignFirstResponder];
-        });
-        [self log:@"✅ D — insertText: (forced firstResponder) → «%@»", toAppend];
+        [self log:@"✅ D — UIKeyInput forcé firstResponder + insertText: → «%@»", toAppend];
         inserted = YES;
     }
 
