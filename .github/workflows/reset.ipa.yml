@@ -1,4 +1,4 @@
-name: 🌪️ reset dylibs & Rebuild IPA
+name: 🧹 Strip dylibs & Rebuild IPA
 
 on:
   workflow_dispatch:
@@ -63,20 +63,15 @@ jobs:
           echo "📋 Toutes les dylibs chargées (hors Apple/système) :"
           otool -L "$BINARY" | grep -v '/usr/lib' | grep -v '/System' | grep -v "$APP_NAME" || echo "(aucune)"
 
-      # ─── 4. Installer optool ──────────────────────────────────────────────
+      # ─── 4. Installer optool (binaire pré-compilé) ───────────────────────
       - name: 🛠️ Installer optool
         run: |
-          if ! command -v optool &>/dev/null; then
-            echo "Installation d'optool depuis les sources..."
-            git clone --depth 1 https://github.com/alexzielenski/optool /tmp/optool
-            cd /tmp/optool
-            git submodule update --init --recursive
-            xcodebuild -configuration Release -quiet
-            sudo cp build/Release/optool /usr/local/bin/optool
-            echo "✅ optool installé : $(optool --version 2>&1 || echo 'ok')"
-          else
-            echo "✅ optool déjà disponible"
-          fi
+          curl -sSL https://github.com/alexzielenski/optool/releases/download/0.1/optool.zip \
+            -o /tmp/optool.zip
+          unzip -q /tmp/optool.zip -d /tmp/optool_bin
+          sudo cp /tmp/optool_bin/optool /usr/local/bin/optool
+          sudo chmod +x /usr/local/bin/optool
+          echo "✅ optool installé"
 
       # ─── 5. Supprimer les dylibs custom ──────────────────────────────────
       - name: 🗑️ Supprimer les dylibs custom
