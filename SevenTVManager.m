@@ -1719,41 +1719,76 @@ referenceSizeForHeaderInSection:(NSInteger)section {
         inserted = YES;
     }
 
-    // ── Stratégie B : becomeFirstResponder + insertText: ─────────────────────────
+    // ── Stratégie B : becomeFirstResponder + insertText: différé ─────────────────
     // SEUL chemin fiable pour un UITextView hébergé dans SwiftUI.
-    // textView.text = ... met à jour la propriété ObjC mais PAS le @Binding SwiftUI,
-    // donc Twitch envoie toujours le texte vide à l'appui sur Envoyer.
-    // insertText: passe par le protocole UITextInput que SwiftUI observe.
-    // Le clavier réapparaît : comportement intentionnel (l'utilisateur tape Envoyer).
+    //
+    // POURQUOI LE DÉLAI :
+    //   Quand l'utilisateur tape sur le picker (UICollectionView flottant),
+    //   le UITextView de Twitch perd le firstResponder AVANT que
+    //   didSelectItemAtIndexPath soit appelé. SwiftUI détecte ce resign et
+    //   recrée/réinitialise son @State interne.
+    //   Si on appelle becomeFirstResponder + insertText: dans la même
+    //   passe de RunLoop, insertText: arrive pendant que SwiftUI est encore
+    //   en train de reconstruire son arbre → le texte est ignoré ou perdu.
+    //
+    //   Solution : on donne 1 cycle de RunLoop (dispatch_async main) pour que
+    //   SwiftUI finisse son cycle, PUIS on appelle becomeFirstResponder.
+    //   Ensuite on attend encore 1 cycle avant insertText: pour que le
+    //   UITextView soit vraiment firstResponder et que SwiftUI soit prêt.
+    //
+    //   Résultat : le texte apparaît dans la chatbox ET est bien lu par
+    //   le @Binding Twitch au moment de l'envoi.
     if (!inserted && textView) {
-        [textView becomeFirstResponder];
-        // Curseur à la fin du texte existant avant l'insertion
-        textView.selectedRange = NSMakeRange(textView.text.length, 0);
-        [textView insertText:toAppend];
-        [self log:@"✅ B — becomeFirstResponder + insertText: → «%@»", toAppend];
-        inserted = YES;
+        UITextView *tv = textView; // capture forte pour les blocs
+        NSString   *text = toAppend;
+        [self log:@"⏳ B — scheduling becomeFirstResponder + insertText: → «%@»", text];
+        inserted = YES; // on marque inséré pour ne pas tomber en C/D
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            // Cycle 1 : SwiftUI a eu le temps de finir son resign-cleanup
+            [tv becomeFirstResponder];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                // Cycle 2 : UITextView est firstResponder, SwiftUI est prêt
+                tv.selectedRange = NSMakeRange(tv.text.length, 0);
+                [tv insertText:text];
+                [self log:@"✅ B — becomeFirstResponder + insertText: → «%@»", text];
+            });
+        });
     }
 
-    // ── Stratégie C : UITextField — becomeFirstResponder + insertText: ───────────
+    // ── Stratégie C : UITextField — becomeFirstResponder + insertText: différé ──
     if (!inserted && textField) {
-        [textField becomeFirstResponder];
-        [(id<UIKeyInput>)textField insertText:toAppend];
-        [self log:@"✅ C — UITextField becomeFirstResponder + insertText: → «%@»", toAppend];
+        UITextField *tf  = textField;
+        NSString    *text = toAppend;
+        [self log:@"⏳ C — scheduling UITextField insertText: → «%@»", text];
         inserted = YES;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [tf becomeFirstResponder];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [(id<UIKeyInput>)tf insertText:text];
+                [self log:@"✅ C — UITextField becomeFirstResponder + insertText: → «%@»", text];
+            });
+        });
     }
 
-    // ── Stratégie D : UIKeyInput générique (champ custom SwiftUI sans UITextView) ─
-    // Dernier recours : on force le focus puis on insère.
+    // ── Stratégie D : UIKeyInput générique — différé ──────────────────────────
     if (!inserted && keyInput) {
-        UIView *kv = (UIView *)keyInput;
-        [kv becomeFirstResponder];
-        if ([kv isKindOfClass:[UITextView class]]) {
-            UITextView *tv = (UITextView *)kv;
-            tv.selectedRange = NSMakeRange(tv.text.length, 0);
-        }
-        [(id<UIKeyInput>)kv insertText:toAppend];
-        [self log:@"✅ D — UIKeyInput forcé firstResponder + insertText: → «%@»", toAppend];
+        UIView      *kv   = (UIView *)keyInput;
+        NSString    *text = toAppend;
+        BOOL         isTV = [kv isKindOfClass:[UITextView class]];
+        [self log:@"⏳ D — scheduling UIKeyInput insertText: → «%@»", text];
         inserted = YES;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [kv becomeFirstResponder];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (isTV) {
+                    UITextView *tv2 = (UITextView *)kv;
+                    tv2.selectedRange = NSMakeRange(tv2.text.length, 0);
+                }
+                [(id<UIKeyInput>)kv insertText:text];
+                [self log:@"✅ D — UIKeyInput forcé firstResponder + insertText: → «%@»", text];
+            });
+        });
     }
 
     if (!inserted) {
