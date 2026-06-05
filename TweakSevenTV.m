@@ -557,18 +557,18 @@ static const char kS7TVAttachDuration = 4;
 
 static const char kS7TVTextFieldTagged = 5;
 
-@interface NSObject (S7TVChatInputHook)
+@interface UIView (S7TVChatInputHook)
 - (void)s7tv_didMoveToWindow;
 @end
 
-@implementation NSObject (S7TVChatInputHook)
+@implementation UIView (S7TVChatInputHook)
 
 - (void)s7tv_didMoveToWindow {
     [self s7tv_didMoveToWindow]; // appel original
 
     // Filtrer : seule Twitch.ChatInputView nous intéresse
     if (![NSStringFromClass([self class]) isEqualToString:@"Twitch.ChatInputView"]) return;
-    UIView *chatInputView = (UIView *)self;
+    UIView *chatInputView = self;
 
     // Guard anti-doublon : on ne touche cette vue qu'une seule fois
     if (objc_getAssociatedObject(chatInputView, &kS7TVTextFieldTagged)) return;
@@ -1272,9 +1272,9 @@ static void TwitchSevenTVInit(void) {
                  @selector(sendEvent:),
                  @selector(s7tv_sendEvent:));
 
-    // ── Swizzle NSObject didMoveToWindow (injection bouton dans ChatInputView) ─
-    s7tv_swizzle([NSObject class],
-                 [NSObject class],
+    // ── Swizzle UIView didMoveToWindow (injection bouton dans ChatInputView) ──
+    s7tv_swizzle([UIView class],
+                 [UIView class],
                  @selector(didMoveToWindow),
                  @selector(s7tv_didMoveToWindow));
 
