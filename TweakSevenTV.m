@@ -546,66 +546,78 @@ static const char kS7TVAttachDuration = 4;
 // ────────────────────────────────────────────────────────────
 // MARK: - Injection bouton 7TV dans la barre de saisie Twitch
 //
-// Stratégie: scan périodique (CADisplayLink ~2fps) de TOUS les
-// UITextField visibles. On injecte le bouton dès qu'on trouve un
-// champ qui ressemble à la barre de chat (critères larges).
-// Une fois injecté (kS7TVTextFieldTagged), on ne le retraite plus.
+// Stratégie: hook sur NSObject.didMoveToWindow.
+// Dès qu'une vue "Twitch.ChatInputView" apparaît dans la hiérarchie,
+// on cherche le ChatInputViewEmoticonButton pour se positionner
+// juste à sa gauche, et on injecte notre bouton violet.
+//
+// kS7TVTextFieldTagged posé sur ChatInputView (guard anti-doublon)
+// ET sur le bouton (pour retrouver la ChatInputView au tap).
 // ────────────────────────────────────────────────────────────
 
 static const char kS7TVTextFieldTagged = 5;
 
-// Trouve récursivement tous les UITextField dans une vue
-static void s7tv_findTextFields(UIView *view, NSMutableArray<UITextField *> *result) {
-    if (!view || view.isHidden || view.alpha < 0.01) return;
-    if ([view isKindOfClass:[UITextField class]]) {
-        [result addObject:(UITextField *)view];
-    }
-    for (UIView *sub in view.subviews) {
-        s7tv_findTextFields(sub, result);
-    }
-}
+@interface NSObject (S7TVChatInputHook)
+- (void)s7tv_didMoveToWindow;
+@end
 
-static BOOL s7tv_isChatTextField(UITextField *tf) {
-    // Critère 1: placeholder (toutes langues)
-    NSString *ph = tf.placeholder.lowercaseString ?: @"";
-    if ([ph containsString:@"message"] || [ph containsString:@"chat"] ||
-        [ph containsString:@"envoyer"] || [ph containsString:@"send"] ||
-        [ph containsString:@"say"] || [ph containsString:@"type"]) {
-        return YES;
-    }
-    // Critère 2: hiérarchie de vues
-    UIView *v = tf.superview;
-    for (int i = 0; i < 10 && v; i++, v = v.superview) {
-        NSString *cn = NSStringFromClass([v class]).lowercaseString;
-        if ([cn containsString:@"chat"]    || [cn containsString:@"input"] ||
-            [cn containsString:@"compose"] || [cn containsString:@"message"] ||
-            [cn containsString:@"bottom"]  || [cn containsString:@"bar"]) {
-            return YES;
-        }
-    }
-    // Critère 3: le TextField est en bas de l'écran (y > 60% hauteur)
-    UIWindow *w = [UIApplication sharedApplication].windows.firstObject;
-    CGRect frame = [tf convertRect:tf.bounds toView:w];
-    CGFloat screenH = [UIScreen mainScreen].bounds.size.height;
-    if (frame.origin.y > screenH * 0.6 && tf.bounds.size.height < 60) {
-        return YES;
-    }
-    return NO;
-}
+@implementation NSObject (S7TVChatInputHook)
 
-static void s7tv_injectButtonInTextField(UITextField *tf) {
-    if (objc_getAssociatedObject(tf, &kS7TVTextFieldTagged)) return;
-    if (!s7tv_isChatTextField(tf)) return;
+- (void)s7tv_didMoveToWindow {
+    [self s7tv_didMoveToWindow]; // appel original
 
-    objc_setAssociatedObject(tf, &kS7TVTextFieldTagged, @YES,
+    // Filtrer : seule Twitch.ChatInputView nous intéresse
+    if (![NSStringFromClass([self class]) isEqualToString:@"Twitch.ChatInputView"]) return;
+    UIView *chatInputView = (UIView *)self;
+
+    // Guard anti-doublon : on ne touche cette vue qu'une seule fois
+    if (objc_getAssociatedObject(chatInputView, &kS7TVTextFieldTagged)) return;
+    objc_setAssociatedObject(chatInputView, &kS7TVTextFieldTagged, @YES,
                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
     dispatch_async(dispatch_get_main_queue(), ^{
-        // Remonter d'un niveau pour trouver la barre de saisie complète
-        // (qui contient aussi les boutons natifs Twitch)
-        UIView *bar = tf.superview ?: tf;
 
+        // ── 1. Trouver le container des boutons ──────────────────────────────
+        // D'après les logs : UIView frame=(60,8,274,40) ou (101,8,233,40)
+        // → sous-vue UIView, h≈40, y≈8, qui contient des UIControl (boutons)
+        UIView *buttonContainer = nil;
+        for (UIView *sub in chatInputView.subviews) {
+            if (![sub isKindOfClass:[UIView class]])    continue;
+            if ([sub isKindOfClass:[UIControl class]])  continue; // pas un bouton direct
+            CGFloat h = sub.frame.size.height;
+            CGFloat y = sub.frame.origin.y;
+            if (h < 36 || h > 48 || y < 4 || y > 14)  continue;
+            // Vérifier qu'il y a des UIControl dedans
+            for (UIView *child in sub.subviews) {
+                if ([child isKindOfClass:[UIControl class]]) {
+                    buttonContainer = sub;
+                    break;
+                }
+            }
+            if (buttonContainer) break;
+        }
+
+        UIView *target = buttonContainer ?: chatInputView;
+
+        // Vérifier qu'on n'a pas déjà le bouton (protection re-entrante)
+        for (UIView *sub in target.subviews) {
+            if (sub.tag == 0x7777) return;
+        }
+
+        // ── 2. Trouver ChatInputViewEmoticonButton pour se caler à sa gauche ─
+        // D'après les logs : classe "Twitch.ChatInputViewEmoticonButton"
+        UIView *emoticonBtn = nil;
+        for (UIView *sub in target.subviews) {
+            NSString *cn = NSStringFromClass([sub class]);
+            if ([cn containsString:@"Emoticon"] || [cn containsString:@"emoticon"]) {
+                emoticonBtn = sub;
+                break;
+            }
+        }
+
+        // ── 3. Créer le bouton 7TV ────────────────────────────────────────────
         UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
+        btn.tag = 0x7777;
 
         UIImageSymbolConfiguration *symCfg = [UIImageSymbolConfiguration
             configurationWithPointSize:15 weight:UIImageSymbolWeightMedium];
@@ -614,118 +626,52 @@ static void s7tv_injectButtonInTextField(UITextField *tf) {
             [btn setImage:icon forState:UIControlStateNormal];
             btn.tintColor = [UIColor colorWithRed:0.55 green:0.25 blue:0.95 alpha:1.0];
         } else {
-            [btn setTitle:@"7ᵥ" forState:UIControlStateNormal];
+            [btn setTitle:@"7TV" forState:UIControlStateNormal];
             [btn setTitleColor:[UIColor colorWithRed:0.55 green:0.25 blue:0.95 alpha:1.0]
                       forState:UIControlStateNormal];
-            btn.titleLabel.font = [UIFont boldSystemFontOfSize:13];
+            btn.titleLabel.font = [UIFont boldSystemFontOfSize:10];
         }
 
-        objc_setAssociatedObject(btn, &kS7TVTextFieldTagged, tf,
+        // ── 4. Positionner à gauche du bouton emote Twitch ────────────────────
+        CGFloat btnSize = 36.0;
+        CGFloat btnX, btnY;
+
+        if (emoticonBtn) {
+            btnX = emoticonBtn.frame.origin.x - btnSize - 4.0;
+            btnY = emoticonBtn.frame.origin.y
+                 + (emoticonBtn.frame.size.height - btnSize) / 2.0;
+        } else {
+            // Fallback : coller à droite du container
+            btnX = target.frame.size.width - btnSize - 4.0;
+            btnY = (target.frame.size.height - btnSize) / 2.0;
+        }
+        if (btnX < 0) btnX = 0;
+
+        btn.frame = CGRectMake(btnX, btnY, btnSize, btnSize);
+        btn.autoresizingMask = UIViewAutoresizingFlexibleRightMargin
+                             | UIViewAutoresizingFlexibleTopMargin
+                             | UIViewAutoresizingFlexibleBottomMargin;
+
+        // Stocker la référence à chatInputView (pour l'insertion de texte)
+        objc_setAssociatedObject(btn, &kS7TVTextFieldTagged, chatInputView,
                                  OBJC_ASSOCIATION_ASSIGN);
+
         [btn addTarget:[SevenTVManager sharedManager]
                 action:@selector(s7tv_emoteButtonTappedForButton:)
       forControlEvents:UIControlEventTouchUpInside];
 
-        // Positionner le bouton à GAUCHE du TextField dans la barre parent
-        CGRect tfInBar = [tf convertRect:tf.bounds toView:bar];
-        CGFloat btnSize = 32.0;
-        CGFloat btnX = tfInBar.origin.x - btnSize - 6;
-        if (btnX < 2) btnX = 2;
-        CGFloat btnY = CGRectGetMidY(tfInBar) - btnSize / 2.0;
-        btn.frame = CGRectMake(btnX, btnY, btnSize, btnSize);
-        btn.autoresizingMask = UIViewAutoresizingFlexibleRightMargin |
-                               UIViewAutoresizingFlexibleTopMargin   |
-                               UIViewAutoresizingFlexibleBottomMargin;
-        btn.tag = 0x7777; // tag unique pour éviter les doublons
+        [target addSubview:btn];
+        [target bringSubviewToFront:btn];
 
-        // Vérifier qu'on n'a pas déjà ajouté le bouton
-        BOOL alreadyAdded = NO;
-        for (UIView *sub in bar.subviews) {
-            if (sub.tag == 0x7777) { alreadyAdded = YES; break; }
-        }
-        if (!alreadyAdded) {
-            [bar addSubview:btn];
-            [bar bringSubviewToFront:btn];
-        }
-
-        [[SevenTVManager sharedManager] log:@"🎹 Bouton 7TV injecté dans bar:%@ x=%.0f (ph:\"%@\")",
-         NSStringFromClass([bar class]), btnX, tf.placeholder ?: @"(vide)"];
+        [[SevenTVManager sharedManager]
+            log:@"🎹 Bouton 7TV injecté — container:%@ emoticonBtn:%@ x=%.0f",
+            NSStringFromClass([target class]),
+            emoticonBtn ? NSStringFromClass([emoticonBtn class]) : @"(introuvable)",
+            btnX];
     });
 }
 
-// ── Objet cible pour NSTimer (évite les fonctions C comme target) ────────────
-@interface S7TVChatScanner : NSObject
-+ (instancetype)shared;
-- (void)startScan;
-- (void)scanTick;
 @end
-
-@implementation S7TVChatScanner {
-    NSTimer  *_timer;
-    NSInteger _missCount;
-}
-
-+ (instancetype)shared {
-    static S7TVChatScanner *s = nil;
-    static dispatch_once_t t;
-    dispatch_once(&t, ^{ s = [[S7TVChatScanner alloc] init]; });
-    return s;
-}
-
-- (void)startScan {
-    if (_timer) return;
-    _missCount = 0;
-    _timer = [NSTimer scheduledTimerWithTimeInterval:0.5
-                                             target:self
-                                           selector:@selector(scanTick)
-                                           userInfo:nil
-                                            repeats:YES];
-}
-
-- (void)scanTick {
-    UIWindow *keyWindow = nil;
-    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-        if ([scene isKindOfClass:[UIWindowScene class]])
-            for (UIWindow *w in ((UIWindowScene *)scene).windows)
-                if (w.isKeyWindow) { keyWindow = w; break; }
-    }
-    if (!keyWindow) keyWindow = [UIApplication sharedApplication].windows.firstObject;
-    if (!keyWindow) return;
-
-    NSMutableArray<UITextField *> *fields = [NSMutableArray array];
-    s7tv_findTextFields(keyWindow, fields);
-
-    BOOL found = NO;
-    for (UITextField *tf in fields) {
-        if (s7tv_isChatTextField(tf)) {
-            s7tv_injectButtonInTextField(tf);
-            found = YES;
-            _missCount = 0;
-        }
-    }
-
-    if (!found) {
-        _missCount++;
-        // Après 60s sans trouver → pause, relance dans 10s
-        if (_missCount > 120) {
-            [_timer invalidate];
-            _timer = nil;
-            _missCount = 0;
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 10LL * NSEC_PER_SEC),
-                           dispatch_get_main_queue(), ^{
-                [[S7TVChatScanner shared] startScan];
-            });
-        }
-    }
-}
-
-@end
-
-static void s7tv_startChatBarScan(void) {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [[S7TVChatScanner shared] startScan];
-    });
-}
 
 
 // ────────────────────────────────────────────────────────────
@@ -739,8 +685,8 @@ static void s7tv_startChatBarScan(void) {
 @implementation SevenTVManager (ChatBarButton)
 
 - (void)s7tv_emoteButtonTappedForButton:(UIButton *)sender {
-    UITextField *tf = objc_getAssociatedObject(sender, &kS7TVTextFieldTagged);
-    [self toggleEmotePickerForTextField:tf];
+    UIView *chatInputView = objc_getAssociatedObject(sender, &kS7TVTextFieldTagged);
+    [self toggleEmotePickerForChatInputView:chatInputView];
 }
 
 @end
@@ -1326,12 +1272,11 @@ static void TwitchSevenTVInit(void) {
                  @selector(sendEvent:),
                  @selector(s7tv_sendEvent:));
 
-    // ── Scan périodique pour injecter le bouton 7TV dans la barre de saisie ────
-    // Démarré après 3s pour laisser Twitch construire son UI
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        s7tv_startChatBarScan();
-    });
+    // ── Swizzle NSObject didMoveToWindow (injection bouton dans ChatInputView) ─
+    s7tv_swizzle([NSObject class],
+                 [NSObject class],
+                 @selector(didMoveToWindow),
+                 @selector(s7tv_didMoveToWindow));
 
     // ── Swizzle UIImage imageWithData: (décodage WebP/GIF + tag) ──────────────
     s7tv_swizzle(object_getClass([UIImage class]),

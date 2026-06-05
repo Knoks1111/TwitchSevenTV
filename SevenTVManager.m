@@ -76,7 +76,7 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
 
 // Picker d'emotes inline (affiché au-dessus de la barre de saisie)
 @property (nonatomic, strong) UIView              *emotePickerView;
-@property (nonatomic, weak)   UITextField         *emotePickerTextField;
+@property (nonatomic, weak)   UIView              *emotePickerTextField;
 @property (nonatomic, strong) UICollectionView    *emoteCollectionView;
 @property (nonatomic, strong) UITextField         *emoteSearchField;
 @property (nonatomic, strong) NSArray<SevenTVEmote *> *emotePickerEmotes;
@@ -1073,15 +1073,15 @@ static const CGFloat kPickerHeight  = 220.0;
 // Taille de chaque cellule (carré)
 static const CGFloat kCellSize      = 52.0;
 
-- (void)toggleEmotePickerForTextField:(UITextField *)textField {
+- (void)toggleEmotePickerForChatInputView:(UIView *)chatInputView {
     dispatch_async(dispatch_get_main_queue(), ^{
         // ── Si le picker est déjà visible → le fermer ─────────────────────────
         if (self.emotePickerView && !self.emotePickerView.isHidden) {
             [self _hideEmotePicker];
             return;
         }
-        self.emotePickerTextField = textField;
-        [self _buildAndShowEmotePickerForTextField:textField];
+        self.emotePickerTextField = chatInputView;
+        [self _buildAndShowEmotePickerForView:chatInputView];
     });
 }
 
@@ -1096,7 +1096,7 @@ static const CGFloat kCellSize      = 52.0;
     }];
 }
 
-- (void)_buildAndShowEmotePickerForTextField:(UITextField *)textField {
+- (void)_buildAndShowEmotePickerForView:(UIView *)chatInputView {
     // ── Rassembler toutes les emotes (channel d'abord, puis globales) ──────
     __block NSDictionary *global, *channel;
     dispatch_sync(self.emoteQueue, ^{
@@ -1127,7 +1127,10 @@ static const CGFloat kCellSize      = 52.0;
     CGRect screenBounds = keyWindow.bounds;
 
     // ── Trouver la position Y du TextField dans la fenêtre ────────────────
-    CGRect tfFrame = [textField convertRect:textField.bounds toView:keyWindow];
+    // Positionner le picker juste au-dessus de la ChatInputView
+    CGRect tfFrame = chatInputView
+        ? [chatInputView convertRect:chatInputView.bounds toView:keyWindow]
+        : CGRectMake(0, keyWindow.bounds.size.height - 56, keyWindow.bounds.size.width, 56);
     CGFloat pickerY = tfFrame.origin.y - kPickerHeight - 4.0;
     if (pickerY < 0) pickerY = 0;
 
@@ -1329,17 +1332,36 @@ static const CGFloat kCellSize      = 52.0;
 - (void)collectionView:(UICollectionView *)cv didSelectItemAtIndexPath:(NSIndexPath *)indexPath {
     SevenTVEmote *emote = self.emotePickerEmotes[(NSUInteger)indexPath.item];
 
-    // Insérer le nom de l'emote dans le TextField
-    UITextField *tf = self.emotePickerTextField;
-    if (tf) {
-        NSString *current = tf.text ?: @"";
-        // Ajouter un espace avant si le champ n'est pas vide et ne finit pas par un espace
-        NSString *prefix = (current.length > 0 &&
-                            ![current hasSuffix:@" "]) ? @" " : @"";
-        tf.text = [NSString stringWithFormat:@"%@%@%@ ", current, prefix, emote.emoteName];
+    // Insérer le nom de l'emote dans le champ texte de la ChatInputView
+    UIView *inputRoot = self.emotePickerTextField;
+    if (inputRoot) {
+        // Chercher récursivement UITextView d'abord (Twitch utilise probablement UITextView)
+        // puis UITextField en fallback
+        __block UIView *textInput = nil;
+        NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:inputRoot];
+        while (queue.count > 0 && !textInput) {
+            UIView *v = queue.firstObject; [queue removeObjectAtIndex:0];
+            if ([v isKindOfClass:[UITextView class]] || [v isKindOfClass:[UITextField class]]) {
+                textInput = v;
+                break;
+            }
+            for (UIView *sub in v.subviews) [queue addObject:sub];
+        }
 
-        // Notifier UITextField du changement (pour que Twitch détecte la modif)
-        [tf sendActionsForControlEvents:UIControlEventEditingChanged];
+        if ([textInput isKindOfClass:[UITextView class]]) {
+            UITextView *tv = (UITextView *)textInput;
+            NSString *current = tv.text ?: @"";
+            NSString *prefix  = (current.length > 0 && ![current hasSuffix:@" "]) ? @" " : @"";
+            tv.text = [NSString stringWithFormat:@"%@%@%@ ", current, prefix, emote.emoteName];
+            [[NSNotificationCenter defaultCenter]
+                postNotificationName:UITextViewTextDidChangeNotification object:tv];
+        } else if ([textInput isKindOfClass:[UITextField class]]) {
+            UITextField *tf = (UITextField *)textInput;
+            NSString *current = tf.text ?: @"";
+            NSString *prefix  = (current.length > 0 && ![current hasSuffix:@" "]) ? @" " : @"";
+            tf.text = [NSString stringWithFormat:@"%@%@%@ ", current, prefix, emote.emoteName];
+            [tf sendActionsForControlEvents:UIControlEventEditingChanged];
+        }
     }
 
     // Feedback haptique léger
