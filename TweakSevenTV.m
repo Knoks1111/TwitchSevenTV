@@ -656,6 +656,43 @@ static const char kS7TVTextFieldTagged = 5;
             NSStringFromClass([target class]),
             emoticonBtn ? NSStringFromClass([emoticonBtn class]) : @"(introuvable)",
             btnX, btnY];
+
+        // ── DIAGNOSTIC: Scanner TOUS les boutons de ChatInputView ─────────────
+        SevenTVManager *mgr2 = [SevenTVManager sharedManager];
+        [mgr2 log:@"🔎 Scan des boutons dans ChatInputView:"];
+        NSMutableArray<UIView *> *scanQ = [NSMutableArray arrayWithArray:chatInputView.subviews];
+        NSInteger btnIdx = 0;
+        while (scanQ.count > 0) {
+            UIView *sv = scanQ.firstObject; [scanQ removeObjectAtIndex:0];
+            [scanQ addObjectsFromArray:sv.subviews];
+
+            NSString *cls      = NSStringFromClass([sv class]);
+            NSString *accLabel = sv.accessibilityLabel ?: @"";
+            NSString *accID    = sv.accessibilityIdentifier ?: @"";
+
+            if ([sv isKindOfClass:[UIButton class]]) {
+                UIButton *b = (UIButton *)sv;
+                btnIdx++;
+                NSString *titleN = [b titleForState:UIControlStateNormal] ?: @"";
+                NSString *titleS = [b titleForState:UIControlStateSelected] ?: @"";
+                UIImage  *imgN   = [b imageForState:UIControlStateNormal];
+                UIImage  *imgBg  = [b backgroundImageForState:UIControlStateNormal];
+                [mgr2 log:@"  BTN[%ld] %@ frame=(%.0f,%.0f,%.0f,%.0f) tag=%ld title='%@'/'%@' img=%@ bg=%@ accLabel='%@' accID='%@'",
+                 (long)btnIdx, cls,
+                 sv.frame.origin.x, sv.frame.origin.y, sv.frame.size.width, sv.frame.size.height,
+                 (long)sv.tag, titleN, titleS,
+                 imgN ? imgN.description : @"nil",
+                 imgBg ? imgBg.description : @"nil",
+                 accLabel, accID];
+            } else if ([cls containsString:@"Bit"] || [cls containsString:@"bit"] ||
+                       [cls containsString:@"Cheer"] || [cls containsString:@"Coin"] ||
+                       accLabel.length > 0 || accID.length > 0) {
+                [mgr2 log:@"  VIEW %@ frame=(%.0f,%.0f,%.0f,%.0f) accLabel='%@' accID='%@'",
+                 cls, sv.frame.origin.x, sv.frame.origin.y, sv.frame.size.width, sv.frame.size.height,
+                 accLabel, accID];
+            }
+        }
+        [mgr2 log:@"🔎 Fin scan — %ld boutons trouvés dans ChatInputView", (long)btnIdx];
     });
 }
 
@@ -1180,20 +1217,90 @@ static void s7tv_swizzle_attachment(void) {
 
 
 // ────────────────────────────────────────────────────────────
-// MARK: - Tap Logger — log la hiérarchie au point touché
+// MARK: - Tap Logger v2 — log détaillé de la hiérarchie au point touché
 //
 // À chaque tap dans l'app, on logue :
 //   • Les coordonnées du tap
-//   • La vue "hit" (hitTest)
-//   • Toute la chaîne de superviews avec leur classe + frame
+//   • La vue "hit" (hitTest) avec classe, frame, tag
+//   • accessibilityLabel + accessibilityIdentifier
+//   • Pour UIButton : titre de chaque état + nom de l'image
+//   • Pour UITextField : placeholder
+//   • Toute la chaîne de superviews (max 15 niveaux)
+//   • Le UIViewController parent (le plus proche)
 //
-// Désactivé automatiquement après 30 taps pour ne pas polluer
-// les logs une fois le diagnostic terminé.
-// Peut être réactivé en touchant l'écran 5x rapidement (TODO).
+// ILLIMITÉ — pas de limite de taps.
+// Peut être mis en pause/repris depuis SevenTVSettingsController.
 // ────────────────────────────────────────────────────────────
 
+// Contrôle depuis les paramètres 7TV (accessible via SevenTVManager)
+BOOL s_tapLogEnabled = YES;
 static NSInteger s_tapLogCount = 0;
-static const NSInteger kTapLogMax = 30;
+
+// Helper : infos supplémentaires sur une vue pour le log
+static NSString *s7tv_viewExtra(UIView *v) {
+    NSMutableString *extra = [NSMutableString string];
+
+    // accessibilityLabel
+    if (v.accessibilityLabel.length > 0)
+        [extra appendFormat:@" accLabel='%@'", v.accessibilityLabel];
+
+    // accessibilityIdentifier
+    if (v.accessibilityIdentifier.length > 0)
+        [extra appendFormat:@" accID='%@'", v.accessibilityIdentifier];
+
+    // UIButton : titre + nom image pour chaque état utile
+    if ([v isKindOfClass:[UIButton class]]) {
+        UIButton *btn = (UIButton *)v;
+        NSArray *states = @[@(UIControlStateNormal), @(UIControlStateSelected),
+                            @(UIControlStateHighlighted), @(UIControlStateDisabled)];
+        NSArray *stateNames = @[@"normal", @"selected", @"highlighted", @"disabled"];
+        for (NSUInteger i = 0; i < states.count; i++) {
+            UIControlState st = ((NSNumber *)states[i]).unsignedIntegerValue;
+            NSString *title = [btn titleForState:st];
+            UIImage  *img   = [btn imageForState:st];
+            if (title.length > 0)
+                [extra appendFormat:@" btnTitle[%@]='%@'", stateNames[i], title];
+            if (img) {
+                // Essayer de récupérer le nom SF Symbol ou asset
+                NSString *imgDesc = img.description;
+                // description contient souvent "named(xxx)" ou les dimensions
+                [extra appendFormat:@" btnImg[%@]=(%@)", stateNames[i], imgDesc];
+            }
+        }
+        // Tag target/action
+        NSSet *targets = [btn allTargets];
+        for (id target in targets) {
+            NSArray *actions = [btn actionsForTarget:target forControlEvent:UIControlEventTouchUpInside];
+            if (actions.count > 0)
+                [extra appendFormat:@" action=%@->%@",
+                 NSStringFromClass([target class]), [actions componentsJoinedByString:@","]];
+        }
+    }
+
+    // UITextField : placeholder
+    if ([v isKindOfClass:[UITextField class]])
+        [extra appendFormat:@" ph='%@'", ((UITextField *)v).placeholder ?: @""];
+
+    // UILabel : texte court
+    if ([v isKindOfClass:[UILabel class]]) {
+        NSString *txt = ((UILabel *)v).text;
+        if (txt.length > 0 && txt.length <= 40)
+            [extra appendFormat:@" text='%@'", txt];
+    }
+
+    return [extra copy];
+}
+
+// Helper : trouver le UIViewController responsable d'une vue
+static UIViewController *s7tv_vcForView(UIView *v) {
+    UIResponder *r = v.nextResponder;
+    while (r) {
+        if ([r isKindOfClass:[UIViewController class]])
+            return (UIViewController *)r;
+        r = r.nextResponder;
+    }
+    return nil;
+}
 
 @interface UIWindow (S7TVTapLogger)
 - (void)s7tv_sendEvent:(UIEvent *)event;
@@ -1204,7 +1311,7 @@ static const NSInteger kTapLogMax = 30;
 - (void)s7tv_sendEvent:(UIEvent *)event {
     [self s7tv_sendEvent:event];
 
-    if (s_tapLogCount >= kTapLogMax) return;
+    if (!s_tapLogEnabled) return;
     if (event.type != UIEventTypeTouches) return;
 
     UITouch *touch = event.allTouches.anyObject;
@@ -1214,33 +1321,38 @@ static const NSInteger kTapLogMax = 30;
     CGPoint pt = [touch locationInView:self];
 
     SevenTVManager *mgr = [SevenTVManager sharedManager];
-    [mgr log:@"👆 TAP #%ld @ (%.0f, %.0f) — hiérarchie:",
-     (long)s_tapLogCount, pt.x, pt.y];
+    [mgr log:@"👆 TAP #%ld @ (%.0f, %.0f)", (long)s_tapLogCount, pt.x, pt.y];
 
-    // Vue touchée
+    // Vue touchée (hit)
     UIView *hit = [self hitTest:pt withEvent:nil];
-    [mgr log:@"  HIT: %@ frame=(%.0f,%.0f,%.0f,%.0f) tag=%ld ph='%@'",
+    if (!hit) {
+        [mgr log:@"  HIT: (nil)"];
+        return;
+    }
+
+    [mgr log:@"  HIT: %@ frame=(%.0f,%.0f,%.0f,%.0f) tag=%ld%@",
      NSStringFromClass([hit class]),
-     hit.frame.origin.x, hit.frame.origin.y, hit.frame.size.width, hit.frame.size.height,
+     hit.frame.origin.x, hit.frame.origin.y,
+     hit.frame.size.width, hit.frame.size.height,
      (long)hit.tag,
-     ([hit isKindOfClass:[UITextField class]] ? ((UITextField *)hit).placeholder : @"")];
+     s7tv_viewExtra(hit)];
 
-    // Chaîne de superviews (max 12 niveaux)
+    // ViewController parent le plus proche
+    UIViewController *vc = s7tv_vcForView(hit);
+    if (vc) {
+        [mgr log:@"  VC: %@", NSStringFromClass([vc class])];
+    }
+
+    // Chaîne de superviews (max 15 niveaux)
     UIView *v = hit.superview;
-    for (int d = 1; d <= 12 && v; d++, v = v.superview) {
-        NSString *extra = @"";
-        if ([v isKindOfClass:[UITextField class]])
-            extra = [NSString stringWithFormat:@" ph='%@'", ((UITextField *)v).placeholder ?: @""];
-        [mgr log:@"  [%d] %@ frame=(%.0f,%.0f,%.0f,%.0f)%@",
+    for (int d = 1; d <= 15 && v; d++, v = v.superview) {
+        [mgr log:@"  [%02d] %@ frame=(%.0f,%.0f,%.0f,%.0f)%@",
          d, NSStringFromClass([v class]),
-         v.frame.origin.x, v.frame.origin.y, v.frame.size.width, v.frame.size.height,
-         extra];
+         v.frame.origin.x, v.frame.origin.y,
+         v.frame.size.width, v.frame.size.height,
+         s7tv_viewExtra(v)];
     }
-
-    if (s_tapLogCount == kTapLogMax) {
-        [mgr log:@"👆 Tap logger désactivé après %ld taps — ouvre les logs pour analyser",
-         (long)kTapLogMax];
-    }
+    [mgr log:@"  ── fin hiérarchie ──"];
 }
 
 @end
