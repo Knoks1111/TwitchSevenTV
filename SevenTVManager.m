@@ -1175,13 +1175,17 @@ static const char kS7TVTaskKey = 0;
     if (wantsAnimated) {
         NSUInteger count = CGImageSourceGetCount(src);
         if (count > 1) {
-            // Cap à 24 frames — au-delà les gains visuels sont nuls mais
-            // la RAM explose (chaque frame 4x ≈ 160 KB décompressé).
-            NSUInteger maxFrames = MIN(count, 24);
+            // Cap à 10 frames :
+            //   • Les emotes sont affichées sur ~40pt → gain visuel nul au-delà de 10 frames
+            //   • Réduit drastiquement le nombre de UIImageView timers actifs en simultané
+            //     (chaque timer animé consomme CPU en continu → lag au scroll avec N cellules)
+            //   • Stratégie : prendre 1 frame sur N pour couvrir toute l'animation
+            NSUInteger maxFrames = 10;
+            NSUInteger step = MAX(1, count / maxFrames);  // ex: 30 frames → step=3 → frames 0,3,6,...
             NSMutableArray<UIImage *> *frames = [NSMutableArray arrayWithCapacity:maxFrames];
             NSTimeInterval duration = 0.0;
 
-            for (NSUInteger i = 0; i < maxFrames; i++) {
+            for (NSUInteger i = 0; i < count && frames.count < maxFrames; i += step) {
                 // @autoreleasepool : libère le CGImage immédiatement après
                 // chaque itération → pic mémoire = 1 frame, pas N frames.
                 @autoreleasepool {
@@ -1198,16 +1202,28 @@ static const char kS7TVTaskKey = 0;
                     NSNumber *delay = gifProps[@"UnclampedDelayTime"]
                                    ?: gifProps[@"DelayTime"]
                                    ?: webpProps[@"DelayTime"];
-                    duration += (delay && delay.doubleValue > 0.01)
-                                ? delay.doubleValue : 0.1;
+
+                    // Délai brut (avec fallback à 0.1s si absent/invalide)
+                    NSTimeInterval frameDelay = (delay && delay.doubleValue > 0.01)
+                                               ? delay.doubleValue : 0.1;
+                    // Minimum 100ms par frame (= max 10fps).
+                    // Les emotes 7TV sont conçues pour le web à 30-50fps ; sur de petites
+                    // cellules iOS la vitesse native est inutilement rapide ET coûteuse.
+                    // 10fps est fluide à l'œil sur une icône de 40pt.
+                    frameDelay = MAX(frameDelay, 0.1);
+                    // Multiplier par step pour que la durée totale reste cohérente
+                    // (on a sauté step-1 frames entre chaque frame décodée)
+                    duration += frameDelay * (NSTimeInterval)step;
                 }
             }
 
             CFRelease(src);
 
             if (frames.count > 1) {
+                // Durée minimale 1.0s — évite les boucles frénétiques sur les emotes
+                // très courtes (ex: 4 frames à 0.03s = 0.12s → boucle 8×/seconde).
                 return [UIImage animatedImageWithImages:frames
-                                              duration:MAX(duration, 0.5)];
+                                              duration:MAX(duration, 1.0)];
             }
             return frames.firstObject;
         }
