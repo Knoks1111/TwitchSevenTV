@@ -1538,8 +1538,12 @@ static const char kS7TVOrigSectionCount = 7;
 
 // ── IMP implémentations (plain C, pas de category ObjC) ──────────────────
 
+// ── Section 7TV = section 0 (EN TÊTE de liste) ───────────────────────────────
+// La section 7TV est TOUJOURS la section 0.
+// Les sections originales Twitch sont décalées : origIndex → origIndex + 1.
+// kS7TVOrigSectionCount stocke le nombre de sections ORIGINAL (sans 7TV).
+
 static NSInteger s7tv_imp_numberOfSections(id self, SEL _cmd, UITableView *tv) {
-    // Appel de l'originale (swizzlée sous s7tv_numberOfSectionsInTableView:)
     SEL origSel = NSSelectorFromString(@"s7tv_numberOfSectionsInTableView:");
     NSInteger (*origIMP)(id, SEL, UITableView *) =
         (NSInteger (*)(id, SEL, UITableView *))
@@ -1550,36 +1554,39 @@ static NSInteger s7tv_imp_numberOfSections(id self, SEL _cmd, UITableView *tv) {
     return orig + 1;
 }
 
+// Convertit un index de section affiché → index original Twitch (soustrait 1)
+static NSInteger s7tv_origSection(NSInteger displayedSection) {
+    return displayedSection - 1;
+}
+
 static NSInteger s7tv_imp_numberOfRows(id self, SEL _cmd, UITableView *tv, NSInteger section) {
-    NSInteger ourSection = [objc_getAssociatedObject(self, &kS7TVOrigSectionCount) integerValue];
-    if (section == ourSection) return 1;
+    if (section == 0) return 1; // notre section 7TV
     SEL origSel = NSSelectorFromString(@"s7tv_tableView:numberOfRowsInSection:");
     NSInteger (*origIMP)(id, SEL, UITableView *, NSInteger) =
         (NSInteger (*)(id, SEL, UITableView *, NSInteger))
         [self methodForSelector:origSel];
-    return origIMP(self, origSel, tv, section);
+    return origIMP(self, origSel, tv, s7tv_origSection(section));
 }
 
 static NSString *s7tv_imp_titleForHeader(id self, SEL _cmd, UITableView *tv, NSInteger section) {
-    NSInteger ourSection = [objc_getAssociatedObject(self, &kS7TVOrigSectionCount) integerValue];
-    if (section == ourSection) return nil;
+    if (section == 0) return nil;
     SEL origSel = NSSelectorFromString(@"s7tv_tableView:titleForHeaderInSection:");
     NSString *(*origIMP)(id, SEL, UITableView *, NSInteger) =
         (NSString *(*)(id, SEL, UITableView *, NSInteger))
         [self methodForSelector:origSel];
-    return origIMP(self, origSel, tv, section);
+    return origIMP(self, origSel, tv, s7tv_origSection(section));
 }
 
 static UIView *s7tv_imp_viewForHeader(id self, SEL _cmd, UITableView *tv, NSInteger section) {
-    NSInteger ourSection = [objc_getAssociatedObject(self, &kS7TVOrigSectionCount) integerValue];
-    if (section != ourSection) {
+    if (section != 0) {
         SEL origSel = NSSelectorFromString(@"s7tv_tableView:viewForHeaderInSection:");
         UIView *(*origIMP)(id, SEL, UITableView *, NSInteger) =
             (UIView *(*)(id, SEL, UITableView *, NSInteger))
             [self methodForSelector:origSel];
-        return origIMP(self, origSel, tv, section);
+        return origIMP(self, origSel, tv, s7tv_origSection(section));
     }
 
+    // Header section 7TV — style identique aux headers natifs Twitch
     UIView *container = [[UIView alloc] init];
     container.backgroundColor = [UIColor clearColor];
 
@@ -1613,25 +1620,27 @@ static UIView *s7tv_imp_viewForHeader(id self, SEL _cmd, UITableView *tv, NSInte
 }
 
 static CGFloat s7tv_imp_heightForHeader(id self, SEL _cmd, UITableView *tv, NSInteger section) {
-    NSInteger ourSection = [objc_getAssociatedObject(self, &kS7TVOrigSectionCount) integerValue];
-    if (section == ourSection) return 38.0;
+    if (section == 0) return 38.0;
     SEL origSel = NSSelectorFromString(@"s7tv_tableView:heightForHeaderInSection:");
     CGFloat (*origIMP)(id, SEL, UITableView *, NSInteger) =
         (CGFloat (*)(id, SEL, UITableView *, NSInteger))
         [self methodForSelector:origSel];
-    return origIMP(self, origSel, tv, section);
+    return origIMP(self, origSel, tv, s7tv_origSection(section));
 }
 
 static UITableViewCell *s7tv_imp_cellForRow(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
-    NSInteger ourSection = [objc_getAssociatedObject(self, &kS7TVOrigSectionCount) integerValue];
-    if (ip.section != ourSection) {
+    if (ip.section != 0) {
+        // Section Twitch originale → on décale l'index
+        NSIndexPath *origIP = [NSIndexPath indexPathForRow:ip.row
+                                                 inSection:s7tv_origSection(ip.section)];
         SEL origSel = NSSelectorFromString(@"s7tv_tableView:cellForRowAtIndexPath:");
         UITableViewCell *(*origIMP)(id, SEL, UITableView *, NSIndexPath *) =
             (UITableViewCell *(*)(id, SEL, UITableView *, NSIndexPath *))
             [self methodForSelector:origSel];
-        return origIMP(self, origSel, tv, ip);
+        return origIMP(self, origSel, tv, origIP);
     }
 
+    // Notre cellule 7TV (section 0)
     static NSString *rID = @"S7TVSettingsCell";
     UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:rID];
     if (!cell) {
@@ -1649,6 +1658,7 @@ static UITableViewCell *s7tv_imp_cellForRow(id self, SEL _cmd, UITableView *tv, 
     }
 
     cell.textLabel.text = @"7TV Settings";
+    cell.textLabel.numberOfLines = 0; // pas de troncature
 
     NSData *logoData = [[NSData alloc]
         initWithBase64EncodedString:kS7TVLogoBase64
@@ -1662,13 +1672,15 @@ static UITableViewCell *s7tv_imp_cellForRow(id self, SEL _cmd, UITableView *tv, 
 }
 
 static void s7tv_imp_didSelect(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
-    NSInteger ourSection = [objc_getAssociatedObject(self, &kS7TVOrigSectionCount) integerValue];
-    if (ip.section != ourSection) {
+    if (ip.section != 0) {
+        // Section Twitch originale → on décale l'index
+        NSIndexPath *origIP = [NSIndexPath indexPathForRow:ip.row
+                                                 inSection:s7tv_origSection(ip.section)];
         SEL origSel = NSSelectorFromString(@"s7tv_tableView:didSelectRowAtIndexPath:");
         void (*origIMP)(id, SEL, UITableView *, NSIndexPath *) =
             (void (*)(id, SEL, UITableView *, NSIndexPath *))
             [self methodForSelector:origSel];
-        origIMP(self, origSel, tv, ip);
+        origIMP(self, origSel, tv, origIP);
         return;
     }
 
