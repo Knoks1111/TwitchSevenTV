@@ -575,44 +575,33 @@ static const char kS7TVTextFieldTagged = 5;
     objc_setAssociatedObject(chatInputView, &kS7TVTextFieldTagged, @YES,
                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
-    dispatch_async(dispatch_get_main_queue(), ^{
+    // Attendre que le layout soit finalisé avant de chercher les sous-vues
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
 
-        // ── 1. Trouver le container des boutons ──────────────────────────────
-        // D'après les logs : UIView frame=(60,8,274,40) ou (101,8,233,40)
-        // → sous-vue UIView, h≈40, y≈8, qui contient des UIControl (boutons)
-        UIView *buttonContainer = nil;
-        for (UIView *sub in chatInputView.subviews) {
-            if (![sub isKindOfClass:[UIView class]])    continue;
-            if ([sub isKindOfClass:[UIControl class]])  continue; // pas un bouton direct
-            CGFloat h = sub.frame.size.height;
-            CGFloat y = sub.frame.origin.y;
-            if (h < 36 || h > 48 || y < 4 || y > 14)  continue;
-            // Vérifier qu'il y a des UIControl dedans
-            for (UIView *child in sub.subviews) {
-                if ([child isKindOfClass:[UIControl class]]) {
-                    buttonContainer = sub;
-                    break;
-                }
+        // ── 1. Chercher ChatInputViewEmoticonButton RÉCURSIVEMENT ─────────────
+        // On ne peut pas compter sur les frames au moment de didMoveToWindow
+        // (layout pas encore finalisé). On cherche par nom de classe dans
+        // toute la hiérarchie de chatInputView.
+        __block UIView *emoticonBtn = nil;
+        NSMutableArray<UIView *> *bfs = [NSMutableArray arrayWithArray:chatInputView.subviews];
+        while (bfs.count > 0 && !emoticonBtn) {
+            UIView *v = bfs.firstObject; [bfs removeObjectAtIndex:0];
+            NSString *cn = NSStringFromClass([v class]);
+            if ([cn containsString:@"Emoticon"] || [cn containsString:@"emoticon"]) {
+                emoticonBtn = v;
+            } else {
+                [bfs addObjectsFromArray:v.subviews];
             }
-            if (buttonContainer) break;
         }
 
-        UIView *target = buttonContainer ?: chatInputView;
+        // ── 2. Le container est le superview direct de l'emoticonBtn ─────────
+        // D'après les logs : UIView frame=(60,8,274,40) dans ChatInputView
+        UIView *target = emoticonBtn.superview ?: chatInputView;
 
         // Vérifier qu'on n'a pas déjà le bouton (protection re-entrante)
         for (UIView *sub in target.subviews) {
             if (sub.tag == 0x7777) return;
-        }
-
-        // ── 2. Trouver ChatInputViewEmoticonButton pour se caler à sa gauche ─
-        // D'après les logs : classe "Twitch.ChatInputViewEmoticonButton"
-        UIView *emoticonBtn = nil;
-        for (UIView *sub in target.subviews) {
-            NSString *cn = NSStringFromClass([sub class]);
-            if ([cn containsString:@"Emoticon"] || [cn containsString:@"emoticon"]) {
-                emoticonBtn = sub;
-                break;
-            }
         }
 
         // ── 3. Créer le bouton 7TV ────────────────────────────────────────────
@@ -641,8 +630,7 @@ static const char kS7TVTextFieldTagged = 5;
             btnY = emoticonBtn.frame.origin.y
                  + (emoticonBtn.frame.size.height - btnSize) / 2.0;
         } else {
-            // Fallback : coller à droite du container
-            btnX = target.frame.size.width - btnSize - 4.0;
+            btnX = MAX(0, target.frame.size.width - btnSize - 4.0);
             btnY = (target.frame.size.height - btnSize) / 2.0;
         }
         if (btnX < 0) btnX = 0;
@@ -664,10 +652,10 @@ static const char kS7TVTextFieldTagged = 5;
         [target bringSubviewToFront:btn];
 
         [[SevenTVManager sharedManager]
-            log:@"🎹 Bouton 7TV injecté — container:%@ emoticonBtn:%@ x=%.0f",
+            log:@"🎹 Bouton 7TV injecté — target:%@ emoticonBtn:%@ x=%.0f y=%.0f",
             NSStringFromClass([target class]),
             emoticonBtn ? NSStringFromClass([emoticonBtn class]) : @"(introuvable)",
-            btnX];
+            btnX, btnY];
     });
 }
 
