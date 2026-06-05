@@ -1175,18 +1175,16 @@ static const CGFloat kCellSize      = 40.0;
 }
 
 - (void)_hideEmotePicker {
-    // Retirer le picker et RESTAURER le clavier natif.
-    // On remet inputView = nil pour que le clavier normal réapparaisse,
-    // puis on appelle reloadInputViews pour que UIKit applique le changement.
+    // Fermer le picker SANS faire réapparaître le clavier.
+    // resignFirstResponder retire simplement le focus — aucune vue
+    // de saisie n'est affichée. L'utilisateur devra re-tapper le champ
+    // pour écrire (comportement identique au picker d'emojis iOS natif
+    // quand on le ferme via la touche ⌨).
     UITextView *tv = self.emotePickerTextEntryView;
     if (tv) {
-        tv.inputView = nil;       // ← remet le clavier natif en dessous
+        tv.inputView = nil;
         tv.inputAccessoryView = nil;
-        if (tv.isFirstResponder) {
-            [tv reloadInputViews]; // UIKit re-affiche le clavier normal
-        } else {
-            [tv resignFirstResponder];
-        }
+        [tv resignFirstResponder]; // ferme tout sans afficher le clavier
     }
     // Cacher la vue picker (réutilisée la prochaine fois)
     self.emotePickerView.hidden = YES;
@@ -1207,14 +1205,25 @@ static const CGFloat kCellSize      = 40.0;
     for (NSString *key in [global.allKeys sortedArrayUsingSelector:@selector(caseInsensitiveCompare:)]) {
         if (!channel[key]) [all addObject:global[key]]; // pas de doublons
     }
-    // Trier par taille décroissante (surface = w × h) comme sur 7TV PC.
-    // Emotes sans dimensions (w=0 ou h=0) vont en dernier.
+    // Tri :
+    //   1. Emotes CARRÉES en premier (width == height), du plus petit au plus grand
+    //   2. Emotes NON-CARRÉES ensuite, du plus petit au plus grand (surface = w × h)
+    //   3. Emotes sans dimensions (w=0 ou h=0) tout en dernier
     NSArray<SevenTVEmote *> *sorted = [all sortedArrayUsingComparator:
         ^NSComparisonResult(SevenTVEmote *a, SevenTVEmote *b) {
+            BOOL aSquare = (a.width > 0 && a.height > 0 && a.width == a.height);
+            BOOL bSquare = (b.width > 0 && b.height > 0 && b.width == b.height);
+            // Carrées avant non-carrées
+            if (aSquare != bSquare) return aSquare ? NSOrderedAscending : NSOrderedDescending;
+            // Dans chaque groupe : plus petite surface en premier
             NSInteger aArea = a.width * a.height;
             NSInteger bArea = b.width * b.height;
-            if (aArea > bArea) return NSOrderedAscending;
-            if (aArea < bArea) return NSOrderedDescending;
+            // Emotes sans dimensions → tout en dernier
+            if (aArea == 0 && bArea == 0) return NSOrderedSame;
+            if (aArea == 0) return NSOrderedDescending;
+            if (bArea == 0) return NSOrderedAscending;
+            if (aArea < bArea) return NSOrderedAscending;
+            if (aArea > bArea) return NSOrderedDescending;
             return NSOrderedSame;
         }];
     self.emotePickerAllEmotes = sorted;
