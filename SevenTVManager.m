@@ -1107,59 +1107,74 @@ static const CGFloat kPickerHeight  = 280.0;
 static const CGFloat kCellSize      = 40.0;
 
 - (void)toggleEmotePickerForChatInputView:(UIView *)chatInputView {
-    dispatch_async(dispatch_get_main_queue(), ^{
+    // Appel synchrone : on est déjà sur le main thread (tap UIButton).
+    // Le dispatch_async précédent créait une race : UIKit pouvait résigner
+    // le firstResponder entre le tap et l'exécution du bloc, rendant
+    // reloadInputViews inopérant (NO-OP si pas firstResponder).
 
-        // ── Trouver le TextEntryView (UITextView de Twitch) ───────────────
-        // C’est _TtC6Twitch...TextEntryView qui reste firstResponder pendant
-        // l’inputAccessoryView — exactement comme le picker d’emotes natif Twitch.
-        // Clé : dans UIRemoteKeyboardWindow, tapper une emote ne fait PAS résigner
-        // le TextEntryView. On reproduit ça en utilisant inputAccessoryView.
-        if (!self.emotePickerTextEntryView && chatInputView) {
-            NSMutableArray<UIView *> *bfs = [NSMutableArray arrayWithObject:chatInputView];
-            while (bfs.count > 0) {
-                UIView *v = bfs.firstObject; [bfs removeObjectAtIndex:0];
-                [bfs addObjectsFromArray:v.subviews];
-                NSString *cn = NSStringFromClass([v class]);
-                // Chercher la sous-classe TextEntryView de Twitch (UITextView)
-                if ([v isKindOfClass:[UITextView class]] && [cn containsString:@"TextEntryView"]) {
+    // ── Invalider le cache si le TextEntryView n'est plus dans une fenêtre ──
+    // Twitch reconstruit sa hiérarchie lors d'un changement de channel.
+    // Sans cette invalidation, le BFS est skippé et on utilise une vue orpheline
+    // dont isFirstResponder est toujours NO → picker jamais affiché.
+    if (self.emotePickerTextEntryView && !self.emotePickerTextEntryView.window) {
+        [self log:@"⚠️ emotePickerTextEntryView orphelin (window=nil) → reset cache"];
+        self.emotePickerTextEntryView = nil;
+    }
+
+    // ── Trouver le TextEntryView (UITextView de Twitch) via BFS ─────────────
+    // C'est _TtC6Twitch...TextEntryView qui reste firstResponder pendant
+    // l'inputAccessoryView — exactement comme le picker d'emotes natif Twitch.
+    // Clé : dans UIRemoteKeyboardWindow, tapper une emote ne fait PAS résigner
+    // le TextEntryView. On reproduit ça en utilisant inputAccessoryView.
+    if (!self.emotePickerTextEntryView && chatInputView) {
+        NSMutableArray<UIView *> *bfs = [NSMutableArray arrayWithObject:chatInputView];
+        while (bfs.count > 0) {
+            UIView *v = bfs.firstObject; [bfs removeObjectAtIndex:0];
+            [bfs addObjectsFromArray:v.subviews];
+            NSString *cn = NSStringFromClass([v class]);
+            // Chercher la sous-classe TextEntryView de Twitch (UITextView)
+            if ([v isKindOfClass:[UITextView class]] && [cn containsString:@"TextEntryView"]) {
+                self.emotePickerTextEntryView = (UITextView *)v;
+                [self log:@"✅ TextEntryView trouvé: %@", cn];
+                break;
+            }
+        }
+        // Fallback : n'importe quel UITextView dans ChatInputView
+        if (!self.emotePickerTextEntryView) {
+            NSMutableArray<UIView *> *bfs2 = [NSMutableArray arrayWithObject:chatInputView];
+            while (bfs2.count > 0) {
+                UIView *v = bfs2.firstObject; [bfs2 removeObjectAtIndex:0];
+                [bfs2 addObjectsFromArray:v.subviews];
+                if ([v isKindOfClass:[UITextView class]]) {
                     self.emotePickerTextEntryView = (UITextView *)v;
-                    [self log:@"✅ TextEntryView trouvé: %@", cn];
+                    [self log:@"⚠️ TextEntryView fallback UITextView: %@", NSStringFromClass([v class])];
                     break;
                 }
             }
-            // Fallback : n’importe quel UITextView dans ChatInputView
-            if (!self.emotePickerTextEntryView) {
-                NSMutableArray<UIView *> *bfs2 = [NSMutableArray arrayWithObject:chatInputView];
-                while (bfs2.count > 0) {
-                    UIView *v = bfs2.firstObject; [bfs2 removeObjectAtIndex:0];
-                    [bfs2 addObjectsFromArray:v.subviews];
-                    if ([v isKindOfClass:[UITextView class]]) {
-                        self.emotePickerTextEntryView = (UITextView *)v;
-                        [self log:@"⚠️ TextEntryView fallback UITextView: %@", NSStringFromClass([v class])];
-                        break;
-                    }
-                }
-            }
         }
+    }
 
-        // ── Basculer : picker déjà posé comme inputAccessoryView → retirer ─────
-        if (self.emotePickerTextEntryView &&
-            self.emotePickerTextEntryView.inputAccessoryView == self.emotePickerView) {
-            [self _hideEmotePicker];
-            return;
-        }
+    // ── Basculer : picker déjà posé comme inputAccessoryView → retirer ───────
+    if (self.emotePickerTextEntryView &&
+        self.emotePickerTextEntryView.inputAccessoryView == self.emotePickerView) {
+        [self _hideEmotePicker];
+        return;
+    }
 
-        self.emotePickerTextField = chatInputView;
-        [self _buildAndShowEmotePickerForView:chatInputView];
-    });
+    self.emotePickerTextField = chatInputView;
+    [self _buildAndShowEmotePickerForView:chatInputView];
 }
 
 - (void)_hideEmotePicker {
-    // Retirer le picker de l'inputAccessoryView et reloader le clavier
+    // Retirer le picker de l'inputAccessoryView et reloader le clavier.
+    // On appelle reloadInputViews SEULEMENT si tv est firstResponder,
+    // sinon c'est un NO-OP et on évite un becomeFirstResponder non voulu.
     UITextView *tv = self.emotePickerTextEntryView;
     if (tv) {
         tv.inputAccessoryView = nil;
-        [tv reloadInputViews];
+        if (tv.isFirstResponder) {
+            [tv reloadInputViews];
+        }
     }
     // Cacher la vue picker (réutilisée la prochaine fois)
     self.emotePickerView.hidden = YES;
@@ -1207,16 +1222,25 @@ static const CGFloat kCellSize      = 40.0;
     [self.emoteCollectionView reloadData];
     [self.emoteCollectionView setContentOffset:CGPointZero animated:NO];
 
-    // ── inputAccessoryView ──────────────────────────────────────────
-    // En posant le picker comme inputAccessoryView du TextEntryView,
-    // il s'affiche dans UIRemoteKeyboardWindow comme le picker Twitch natif.
-    // Le TextEntryView reste firstResponder -> insertText: fonctionne.
+    // ── inputAccessoryView ──────────────────────────────────────────────────
+    // ORDRE CRITIQUE (Bug 1 fix) :
+    //   1. becomeFirstResponder  → tv est firstResponder
+    //   2. inputAccessoryView    → on pose le picker
+    //   3. reloadInputViews      → UIKit re-render le keyboard stack avec le picker
+    // Si l'ordre est inversé, reloadInputViews est un NO-OP et le picker
+    // n'est jamais rendu (UIKit ignore le reload si pas firstResponder).
     UITextView *tv = self.emotePickerTextEntryView;
     if (tv) {
+        // Étape 1 : s'assurer d'être firstResponder AVANT de poser l'accessoire
+        if (!tv.isFirstResponder) {
+            [self log:@"ℹ️ tv pas firstResponder → becomeFirstResponder"];
+            [tv becomeFirstResponder];
+        }
+        // Étape 2 : poser le picker comme inputAccessoryView
         self.emotePickerView.hidden = NO;
         tv.inputAccessoryView = self.emotePickerView;
+        // Étape 3 : recharger le keyboard stack (maintenant qu'on est firstResponder)
         [tv reloadInputViews];
-        if (!tv.isFirstResponder) [tv becomeFirstResponder];
         [self log:@"✅ inputAccessoryView posé sur %@", NSStringFromClass([tv class])];
     } else {
         [self log:@"⚠️ TextEntryView nil — fallback fenêtre flottante"];
