@@ -163,7 +163,9 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
         _isEnabled             = YES;
         _showAnimated          = YES;
         _showPickerAnimations  = NO;   // Désactivé par défaut (perf)
+        _showFloatingButton    = YES;  // Bouton visible par défaut
         _debugLogging          = (S7TV_DEBUG == 1);
+        _tapLogging            = NO;   // Tap logger désactivé par défaut
 
         _globalEmotes      = @{};
         _channelEmotes     = @{};
@@ -397,7 +399,9 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
     if ([prefs objectForKey:@"s7tv_enabled"]           != nil) _isEnabled            = [prefs boolForKey:@"s7tv_enabled"];
     if ([prefs objectForKey:@"s7tv_animated"]          != nil) _showAnimated          = [prefs boolForKey:@"s7tv_animated"];
     if ([prefs objectForKey:@"s7tv_picker_anim"]       != nil) _showPickerAnimations  = [prefs boolForKey:@"s7tv_picker_anim"];
+    if ([prefs objectForKey:@"s7tv_floating_btn"]      != nil) _showFloatingButton    = [prefs boolForKey:@"s7tv_floating_btn"];
     if ([prefs objectForKey:@"s7tv_debug"]             != nil) _debugLogging          = [prefs boolForKey:@"s7tv_debug"];
+    if ([prefs objectForKey:@"s7tv_tap_log"]           != nil) _tapLogging            = [prefs boolForKey:@"s7tv_tap_log"];
     // Charger les favoris (array d'IDs 7TV)
     NSArray *savedFavs = [prefs arrayForKey:@"s7tv_favorites"];
     if (savedFavs) {
@@ -407,10 +411,12 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
 
 - (void)savePreferences {
     NSUserDefaults *prefs = [NSUserDefaults standardUserDefaults];
-    [prefs setBool:self.isEnabled           forKey:@"s7tv_enabled"];
-    [prefs setBool:self.showAnimated        forKey:@"s7tv_animated"];
+    [prefs setBool:self.isEnabled            forKey:@"s7tv_enabled"];
+    [prefs setBool:self.showAnimated         forKey:@"s7tv_animated"];
     [prefs setBool:self.showPickerAnimations forKey:@"s7tv_picker_anim"];
-    [prefs setBool:self.debugLogging        forKey:@"s7tv_debug"];
+    [prefs setBool:self.showFloatingButton   forKey:@"s7tv_floating_btn"];
+    [prefs setBool:self.debugLogging         forKey:@"s7tv_debug"];
+    [prefs setBool:self.tapLogging           forKey:@"s7tv_tap_log"];
     [prefs synchronize];
 }
 
@@ -423,10 +429,21 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
 - (void)setIsEnabled:(BOOL)v              { _isEnabled            = v; [self savePreferences]; }
 - (void)setShowAnimated:(BOOL)v           { _showAnimated          = v; [self savePreferences]; }
 - (void)setShowPickerAnimations:(BOOL)v   { _showPickerAnimations  = v; [self savePreferences]; }
+- (void)setShowFloatingButton:(BOOL)v {
+    _showFloatingButton = v;
+    [self savePreferences];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        self.floatingWindow.hidden = !v;
+    });
+}
 - (void)setDebugLogging:(BOOL)v {
     _debugLogging  = v;
     [self savePreferences];
-    // Synchroniser le tap logger avec l'état des logs
+    [self log:@"🖥️ Logs console %@", v ? @"activés" : @"désactivés"];
+}
+- (void)setTapLogging:(BOOL)v {
+    _tapLogging = v;
+    [self savePreferences];
     extern BOOL s_tapLogEnabled;
     s_tapLogEnabled = v;
     [self log:@"👆 Tap logger %@", v ? @"activé" : @"désactivé"];
@@ -1824,11 +1841,7 @@ referenceSizeForHeaderInSection:(NSInteger)section {
 
     NSURL *emoteURL = [self cdnURLForEmote:emote];
     NSURLRequest *req = [NSURLRequest requestWithURL:emoteURL];
-    // Animation uniquement pour les emotes en favoris (section 0).
-    // Animer toutes les cellules visibles = N timers UIImageView actifs en simultané
-    // → lag au scroll. Les favoris sont peu nombreux → coût négligeable.
-    BOOL isFavorite = [self.favoriteEmoteIDs containsObject:emote.emoteID];
-    BOOL wantsAnimated = emote.isAnimated && self.showPickerAnimations && isFavorite;
+    BOOL wantsAnimated = emote.isAnimated && self.showPickerAnimations;
 
     // ── Étape 1 : check cache synchrone — zéro réseau si image déjà là ────
     // SevenTVURLProtocol.sharedEmoteCache est le MÊME cache que celui utilisé

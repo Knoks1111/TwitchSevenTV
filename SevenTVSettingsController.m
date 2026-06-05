@@ -5,24 +5,21 @@
  * Accessible via le bouton flottant "7TV" dans l'app Twitch.
  *
  * Sections:
- *   1. Activation générale de 7TV
- *   2. Options d'affichage (emotes animées)
- *   3. Informations (version, channel actuel, nb d'emotes)
- *   4. Débogage (logs console, voir logs in-app, recharger)
- *   5. À propos
+ *   0. Emotes 7TV  — activation, animées chat, animées picker, bouton flottant
+ *   1. Statistiques — channel, emotes globales, emotes channel, total
+ *   2. Logs         — logs console, tap logger, voir les logs, recharger
+ *   3. À propos     — version, API
  */
 
 #import "SevenTVSettingsController.h"
 #import "SevenTVManager.h"
 #import "SevenTVLogsController.h"
 
-// Identifiants des cellules
 static NSString *const kSwitchCell = @"SwitchCell";
 static NSString *const kInfoCell   = @"InfoCell";
 static NSString *const kActionCell = @"ActionCell";
 
 @interface SevenTVSettingsController ()
-// Pour rafraîchir les infos dynamiquement
 @property (nonatomic, strong) NSTimer *refreshTimer;
 @end
 
@@ -40,10 +37,8 @@ static NSString *const kActionCell = @"ActionCell";
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-
     self.title = @"Paramètres 7TV";
 
-    // Bouton "Fermer"
     UIBarButtonItem *closeBtn = [[UIBarButtonItem alloc]
         initWithBarButtonSystemItem:UIBarButtonSystemItemClose
                              target:self
@@ -69,50 +64,47 @@ static NSString *const kActionCell = @"ActionCell";
 }
 
 - (void)refreshStats {
-    // Recharger uniquement la section d'infos (section 2)
-    [self.tableView reloadSections:[NSIndexSet indexSetWithIndex:2]
+    [self.tableView reloadSections:[NSIndexSet indexSetWithIndex:1]
                   withRowAnimation:UITableViewRowAnimationNone];
 }
 
 
 // ============================================================
-// MARK: - Structure du tableau (sections et cellules)
+// MARK: - Structure
 // ============================================================
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
-    return 5;
+    return 4;
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
     switch (section) {
-        case 0: return @"Général";
-        case 1: return @"Affichage";
-        case 2: return @"Statistiques";
-        case 3: return @"Débogage";
-        case 4: return @"À propos";
+        case 0: return @"Emotes 7TV";
+        case 1: return @"Statistiques";
+        case 2: return @"Logs";
+        case 3: return @"À propos";
         default: return nil;
     }
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
     switch (section) {
-        case 0: return @"Désactiver 7TV ne supprime pas les emotes déjà affichées.";
-        case 1: return @"\"Emotes animées\" contrôle les GIFs dans le chat. "
-                       @"\"Animations dans le picker\" anime les emotes dans la grille de sélection "
-                       @"(peut ralentir le scroll sur ancien iPhone, désactivé par défaut).";
-        case 3: return @"Le buffer conserve les 1000 dernières lignes. "
-                       @"Activer \"Logs console\" pour voir aussi dans Console.app (Mac requis).";
+        case 0:
+            return @"\"Animées dans le picker\" anime uniquement les emotes en favoris "
+                   @"(long press sur une emote pour la mettre en favori).";
+        case 2:
+            return @"\"Tap logger\" enregistre chaque tap dans la vue. "
+                   @"\"Logs console\" envoie aussi les logs vers Console.app (Mac).";
         default: return nil;
     }
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     switch (section) {
-        case 0: return 1; // Activer 7TV
-        case 1: return 2; // Emotes animées (chat) + Animations picker
-        case 2: return 4; // Stats: channel, global, channel emotes, total
-        case 3: return 3; // Logs console + Voir les logs + Recharger emotes
-        case 4: return 2; // Version + Info API
+        case 0: return 4;  // 7TV on/off, animées chat, animées picker, bouton flottant
+        case 1: return 4;  // channel, globales, channel emotes, total
+        case 2: return 4;  // logs console, tap logger, voir logs, recharger
+        case 3: return 2;  // version, API
         default: return 0;
     }
 }
@@ -124,39 +116,42 @@ static NSString *const kActionCell = @"ActionCell";
 
     switch (indexPath.section) {
 
-        // ── Section 0: Activation ──
+        // ── Section 0: Emotes 7TV ──────────────────────────────────────────
         case 0: {
-            UITableViewCell *cell = [self switchCellWithTitle:@"Activer 7TV"
-                                                         icon:@"🟣"
-                                                       isOn:mgr.isEnabled
-                                                       action:@selector(toggleEnabled:)];
-            return cell;
-        }
-
-        // ── Section 1: Affichage ──
-        case 1: {
-            if (indexPath.row == 0) {
-                return [self switchCellWithTitle:@"Emotes animées (chat)"
-                                           icon:@"✨"
-                                           isOn:mgr.showAnimated
-                                         action:@selector(toggleAnimated:)];
-            } else {
-                UITableViewCell *cell = [self switchCellWithTitle:@"Animations dans le picker"
-                                                            icon:@"🎞️"
-                                                            isOn:mgr.showPickerAnimations
-                                                          action:@selector(togglePickerAnimations:)];
-                return cell;
+            switch (indexPath.row) {
+                case 0:
+                    return [self switchCellWithTitle:@"Activer les emotes 7TV"
+                                               icon:@"🟣"
+                                               isOn:mgr.isEnabled
+                                             action:@selector(toggleEnabled:)];
+                case 1:
+                    return [self switchCellWithTitle:@"Emotes animées dans le chat"
+                                               icon:@"✨"
+                                               isOn:mgr.showAnimated
+                                             action:@selector(toggleAnimated:)];
+                case 2:
+                    return [self switchCellWithTitle:@"Emotes animées dans le picker"
+                                               icon:@"🎞️"
+                                               isOn:mgr.showPickerAnimations
+                                             action:@selector(togglePickerAnimations:)];
+                case 3:
+                    return [self switchCellWithTitle:@"Bouton flottant 7TV"
+                                               icon:@"💜"
+                                               isOn:mgr.showFloatingButton
+                                             action:@selector(toggleFloatingButton:)];
+                default:
+                    return [[UITableViewCell alloc] init];
             }
         }
 
-        // ── Section 2: Stats ──
-        case 2: {
+        // ── Section 1: Statistiques ────────────────────────────────────────
+        case 1: {
             UITableViewCell *cell = [[UITableViewCell alloc]
                 initWithStyle:UITableViewCellStyleValue1
                reuseIdentifier:kInfoCell];
             cell.selectionStyle = UITableViewCellSelectionStyleNone;
 
-            NSString *channelName = mgr.currentChannelName ?: @"Aucun";
+            NSString *channelName   = mgr.currentChannelName ?: @"Aucun";
             NSUInteger globalCount  = mgr.globalEmotes.count;
             NSUInteger channelCount = mgr.channelEmotes.count;
 
@@ -177,51 +172,48 @@ static NSString *const kActionCell = @"ActionCell";
                     cell.textLabel.text       = @"Total disponibles";
                     cell.detailTextLabel.text = [NSString stringWithFormat:@"%lu",
                                                  (unsigned long)(globalCount + channelCount)];
-                    cell.textLabel.font       = [UIFont boldSystemFontOfSize:cell.textLabel.font.pointSize];
+                    cell.textLabel.font = [UIFont boldSystemFontOfSize:cell.textLabel.font.pointSize];
                     break;
             }
             return cell;
         }
 
-        // ── Section 3: Debug ──
-        case 3: {
+        // ── Section 2: Logs ────────────────────────────────────────────────
+        case 2: {
             switch (indexPath.row) {
 
-                // Ligne 0: toggle logs console (NSLog / Console.app)
-                case 0: {
-                    UITableViewCell *cell = [self switchCellWithTitle:@"Logs console (NSLog)"
-                                                                 icon:@"🖥️"
-                                                               isOn:mgr.debugLogging
-                                                               action:@selector(toggleDebug:)];
-                    return cell;
-                }
+                case 0:
+                    return [self switchCellWithTitle:@"Logs console (Console.app)"
+                                               icon:@"🖥️"
+                                               isOn:mgr.debugLogging
+                                             action:@selector(toggleDebug:)];
 
-                // Ligne 1: ouvrir le viewer de logs in-app
-                case 1: {
+                case 1:
+                    return [self switchCellWithTitle:@"Tap logger"
+                                               icon:@"👆"
+                                               isOn:mgr.tapLogging
+                                             action:@selector(toggleTapLog:)];
+
+                case 2: {
                     UITableViewCell *cell = [[UITableViewCell alloc]
                         initWithStyle:UITableViewCellStyleValue1
                        reuseIdentifier:kInfoCell];
-
                     cell.textLabel.text      = @"🪵  Voir les logs";
                     cell.textLabel.textColor = self.view.tintColor;
-
-                    NSUInteger logCount = [[SevenTVManager sharedManager] allLogs].count;
+                    NSUInteger logCount = [mgr allLogs].count;
                     cell.detailTextLabel.text = logCount > 0
                         ? [NSString stringWithFormat:@"%lu lignes", (unsigned long)logCount]
                         : @"";
-
                     cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
                     return cell;
                 }
 
-                // Ligne 2: recharger les emotes
-                case 2: {
+                case 3: {
                     UITableViewCell *cell = [[UITableViewCell alloc]
                         initWithStyle:UITableViewCellStyleDefault
                        reuseIdentifier:kActionCell];
                     cell.textLabel.text      = @"🔄  Recharger les emotes";
                     cell.textLabel.textColor = self.view.tintColor;
-                    cell.accessoryType       = UITableViewCellAccessoryNone;
                     return cell;
                 }
 
@@ -230,13 +222,12 @@ static NSString *const kActionCell = @"ActionCell";
             }
         }
 
-        // ── Section 4: À propos ──
-        case 4: {
+        // ── Section 3: À propos ────────────────────────────────────────────
+        case 3: {
             UITableViewCell *cell = [[UITableViewCell alloc]
                 initWithStyle:UITableViewCellStyleValue1
                reuseIdentifier:kInfoCell];
             cell.selectionStyle = UITableViewCellSelectionStyleNone;
-
             if (indexPath.row == 0) {
                 cell.textLabel.text       = @"Version";
                 cell.detailTextLabel.text = @"1.0.0";
@@ -260,19 +251,12 @@ static NSString *const kActionCell = @"ActionCell";
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
 
-    if (indexPath.section == 3) {
-        switch (indexPath.row) {
-            case 1: // "Voir les logs"
-                [self openLogsViewer];
-                break;
-            case 2: // "Recharger les emotes"
-                [self reloadEmotes];
-                break;
-        }
+    if (indexPath.section == 2) {
+        if (indexPath.row == 2) [self openLogsViewer];
+        if (indexPath.row == 3) [self reloadEmotes];
     }
 }
 
-// Ouvre SevenTVLogsController en push dans la navigation courante
 - (void)openLogsViewer {
     SevenTVLogsController *logsVC = [[SevenTVLogsController alloc] init];
     [self.navigationController pushViewController:logsVC animated:YES];
@@ -280,14 +264,10 @@ static NSString *const kActionCell = @"ActionCell";
 
 - (void)reloadEmotes {
     SevenTVManager *mgr = [SevenTVManager sharedManager];
-
-    // Vider le cache et recharger
     [mgr loadGlobalEmotes];
     if (mgr.currentChannelTwitchID) {
         [mgr loadEmotesForChannelTwitchID:mgr.currentChannelTwitchID];
     }
-
-    // Feedback visuel
     UIAlertController *alert = [UIAlertController
         alertControllerWithTitle:@"Rechargement lancé"
                          message:@"Les emotes seront disponibles dans quelques secondes."
@@ -298,41 +278,31 @@ static NSString *const kActionCell = @"ActionCell";
     [self presentViewController:alert animated:YES completion:nil];
 }
 
-- (void)toggleEnabled:(UISwitch *)sw {
-    [SevenTVManager sharedManager].isEnabled = sw.isOn;
-}
-- (void)toggleAnimated:(UISwitch *)sw {
-    [SevenTVManager sharedManager].showAnimated = sw.isOn;
-}
-- (void)togglePickerAnimations:(UISwitch *)sw {
-    [SevenTVManager sharedManager].showPickerAnimations = sw.isOn;
-}
-- (void)toggleDebug:(UISwitch *)sw {
-    [SevenTVManager sharedManager].debugLogging = sw.isOn;
-}
+- (void)toggleEnabled:(UISwitch *)sw           { [SevenTVManager sharedManager].isEnabled           = sw.isOn; }
+- (void)toggleAnimated:(UISwitch *)sw          { [SevenTVManager sharedManager].showAnimated         = sw.isOn; }
+- (void)togglePickerAnimations:(UISwitch *)sw  { [SevenTVManager sharedManager].showPickerAnimations = sw.isOn; }
+- (void)toggleFloatingButton:(UISwitch *)sw    { [SevenTVManager sharedManager].showFloatingButton   = sw.isOn; }
+- (void)toggleDebug:(UISwitch *)sw             { [SevenTVManager sharedManager].debugLogging         = sw.isOn; }
+- (void)toggleTapLog:(UISwitch *)sw            { [SevenTVManager sharedManager].tapLogging           = sw.isOn; }
 
 
 // ============================================================
-// MARK: - Helper: créer une cellule avec UISwitch
+// MARK: - Helper: cellule avec UISwitch
 // ============================================================
 
 - (UITableViewCell *)switchCellWithTitle:(NSString *)title
                                     icon:(NSString *)icon
                                     isOn:(BOOL)isOn
                                   action:(SEL)action {
-
     UITableViewCell *cell = [[UITableViewCell alloc]
         initWithStyle:UITableViewCellStyleDefault
        reuseIdentifier:kSwitchCell];
-
     cell.textLabel.text = [NSString stringWithFormat:@"%@  %@", icon, title];
     cell.selectionStyle = UITableViewCellSelectionStyleNone;
-
     UISwitch *sw = [[UISwitch alloc] init];
     sw.on = isOn;
     [sw addTarget:self action:action forControlEvents:UIControlEventValueChanged];
     cell.accessoryView = sw;
-
     return cell;
 }
 
