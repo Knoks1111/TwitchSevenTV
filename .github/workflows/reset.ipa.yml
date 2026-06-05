@@ -1,4 +1,4 @@
-name: 🧹 Strip dylibs & Rebuild IPA
+name: 🌪️ reset dylibs & Rebuild IPA
 
 on:
   workflow_dispatch:
