@@ -46,6 +46,7 @@
 #import "SevenTVManager.h"
 #import "SevenTVURLProtocol.h"
 #import "SevenTVLogo.h"
+#import "SevenTVSettingsController.h"
 
 
 // ────────────────────────────────────────────────────────────
