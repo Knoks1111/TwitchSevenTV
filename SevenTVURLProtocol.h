@@ -22,4 +22,10 @@
 // Si l'image est déjà en cache, completion est appelé immédiatement.
 + (void)prefetchEmoteID:(NSString *)emoteID completion:(void(^)(void))completion;
 
+// Cache partagé entre le chat (URLProtocol) et le picker.
+// Utiliser ce cache dans SevenTVManager pour que les deux lisent/écrivent
+// au même endroit — une emote vue dans le chat est immédiatement disponible
+// dans le picker sans aucun réseau supplémentaire.
++ (NSURLCache *)sharedEmoteCache;
+
 @end

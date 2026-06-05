@@ -1130,10 +1130,15 @@ static const char kS7TVTaskKey = 0;
     static NSURLSession *s = nil;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
-        cfg.URLCache                      = [NSURLCache sharedURLCache];
+        // ephemeralSessionConfiguration : isolation totale du sharedURLCache iOS
+        // (que Twitch peut vider à tout moment) → on branche sur notre cache dédié.
+        // protocolClasses = @[] : SevenTVURLProtocol n'intercepte pas ses propres
+        // requêtes CDN → pas de boucle d'interception.
+        NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration ephemeralSessionConfiguration];
+        cfg.URLCache                      = [SevenTVURLProtocol sharedEmoteCache];
         cfg.requestCachePolicy            = NSURLRequestReturnCacheDataElseLoad;
-        cfg.HTTPMaximumConnectionsPerHost = 6; // sweet-spot HTTP/2
+        cfg.protocolClasses               = @[];
+        cfg.HTTPMaximumConnectionsPerHost = 6;
         s = [NSURLSession sessionWithConfiguration:cfg];
     });
     return s;
@@ -1800,9 +1805,10 @@ referenceSizeForHeaderInSection:(NSInteger)section {
     BOOL wantsAnimated = emote.isAnimated && self.showPickerAnimations;
 
     // ── Étape 1 : check cache synchrone — zéro réseau si image déjà là ────
-    // NSURLCache.sharedURLCache est rempli par le prefetch massif au JOIN.
-    // Dans la majorité des cas (~95%), l'image est en cache → affichage immédiat.
-    NSCachedURLResponse *cached = [[NSURLCache sharedURLCache] cachedResponseForRequest:req];
+    // SevenTVURLProtocol.sharedEmoteCache est le MÊME cache que celui utilisé
+    // par le chat (URLProtocol + prefetch au JOIN). Une emote déjà vue dans le
+    // chat → disponible immédiatement dans le picker, et vice versa.
+    NSCachedURLResponse *cached = [[SevenTVURLProtocol sharedEmoteCache] cachedResponseForRequest:req];
     if (cached.data) {
         // Décodage CGImage sur un thread background pour ne pas bloquer le scroll
         NSData *imgData = cached.data;

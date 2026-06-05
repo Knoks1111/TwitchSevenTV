@@ -349,6 +349,14 @@ static NSURL *SevenTVCDNURLForEmoteID(NSString *emoteID) {
 // MARK: - Préchauffage connexion CDN
 // ============================================================
 
+// ============================================================
+// MARK: - Cache partagé (accessible depuis SevenTVManager pour le picker)
+// ============================================================
+
++ (NSURLCache *)sharedEmoteCache {
+    return SevenTVGetSharedCache();
+}
+
 + (void)prewarmCDNConnection {
     NSURL *warmURL = [NSURL URLWithString:@"https://cdn.7tv.app/emote/01F6MSP3NV00001B6E/1x.webp"];
     if (!warmURL) return;
