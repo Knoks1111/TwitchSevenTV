@@ -160,9 +160,10 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
 - (instancetype)init {
     self = [super init];
     if (self) {
-        _isEnabled    = YES;
-        _showAnimated = YES;
-        _debugLogging = (S7TV_DEBUG == 1);
+        _isEnabled             = YES;
+        _showAnimated          = YES;
+        _showPickerAnimations  = NO;   // Désactivé par défaut (perf)
+        _debugLogging          = (S7TV_DEBUG == 1);
 
         _globalEmotes      = @{};
         _channelEmotes     = @{};
@@ -393,9 +394,10 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
 
 - (void)loadPreferences {
     NSUserDefaults *prefs = [NSUserDefaults standardUserDefaults];
-    if ([prefs objectForKey:@"s7tv_enabled"]  != nil) _isEnabled    = [prefs boolForKey:@"s7tv_enabled"];
-    if ([prefs objectForKey:@"s7tv_animated"] != nil) _showAnimated = [prefs boolForKey:@"s7tv_animated"];
-    if ([prefs objectForKey:@"s7tv_debug"]    != nil) _debugLogging = [prefs boolForKey:@"s7tv_debug"];
+    if ([prefs objectForKey:@"s7tv_enabled"]           != nil) _isEnabled            = [prefs boolForKey:@"s7tv_enabled"];
+    if ([prefs objectForKey:@"s7tv_animated"]          != nil) _showAnimated          = [prefs boolForKey:@"s7tv_animated"];
+    if ([prefs objectForKey:@"s7tv_picker_anim"]       != nil) _showPickerAnimations  = [prefs boolForKey:@"s7tv_picker_anim"];
+    if ([prefs objectForKey:@"s7tv_debug"]             != nil) _debugLogging          = [prefs boolForKey:@"s7tv_debug"];
     // Charger les favoris (array d'IDs 7TV)
     NSArray *savedFavs = [prefs arrayForKey:@"s7tv_favorites"];
     if (savedFavs) {
@@ -405,9 +407,10 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
 
 - (void)savePreferences {
     NSUserDefaults *prefs = [NSUserDefaults standardUserDefaults];
-    [prefs setBool:self.isEnabled    forKey:@"s7tv_enabled"];
-    [prefs setBool:self.showAnimated forKey:@"s7tv_animated"];
-    [prefs setBool:self.debugLogging forKey:@"s7tv_debug"];
+    [prefs setBool:self.isEnabled           forKey:@"s7tv_enabled"];
+    [prefs setBool:self.showAnimated        forKey:@"s7tv_animated"];
+    [prefs setBool:self.showPickerAnimations forKey:@"s7tv_picker_anim"];
+    [prefs setBool:self.debugLogging        forKey:@"s7tv_debug"];
     [prefs synchronize];
 }
 
@@ -417,8 +420,9 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
     [prefs synchronize];
 }
 
-- (void)setIsEnabled:(BOOL)v    { _isEnabled    = v; [self savePreferences]; }
-- (void)setShowAnimated:(BOOL)v { _showAnimated  = v; [self savePreferences]; }
+- (void)setIsEnabled:(BOOL)v              { _isEnabled            = v; [self savePreferences]; }
+- (void)setShowAnimated:(BOOL)v           { _showAnimated          = v; [self savePreferences]; }
+- (void)setShowPickerAnimations:(BOOL)v   { _showPickerAnimations  = v; [self savePreferences]; }
 - (void)setDebugLogging:(BOOL)v {
     _debugLogging  = v;
     [self savePreferences];
@@ -1110,6 +1114,86 @@ static const CGFloat kPickerHeight  = 280.0;
 // Taille de chaque cellule par défaut (carré)
 static const CGFloat kCellSize      = 40.0;
 
+// Clé pour stocker la NSURLSessionDataTask courante dans chaque cellule
+// (annulation lors du recyclage)
+static const char kS7TVTaskKey = 0;
+
+// ── Session partagée pour le chargement des images du picker ─────────────────
+//
+// Une seule session persistante avec cache NSURLCache partagé.
+// Avantages :
+//   • Réutilisation des connexions TCP/TLS (HTTP keep-alive)
+//   • Pas de création/destruction de session à chaque cellule
+//   • requestCachePolicy = ReturnCacheDataElseLoad → zéro réseau si déjà en cache
+//
+- (NSURLSession *)_pickerImageSession {
+    static NSURLSession *s = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
+        cfg.URLCache                      = [NSURLCache sharedURLCache];
+        cfg.requestCachePolicy            = NSURLRequestReturnCacheDataElseLoad;
+        cfg.HTTPMaximumConnectionsPerHost = 6; // sweet-spot HTTP/2
+        s = [NSURLSession sessionWithConfiguration:cfg];
+    });
+    return s;
+}
+
+// ── Décodage image pour le picker ─────────────────────────────────────────────
+//
+// wantsAnimated=YES ET showPickerAnimations=YES → UIImage animée (toutes frames)
+// sinon → frame 0 uniquement (rapide, économe en RAM)
+//
+- (UIImage *)_decodePickerImageData:(NSData *)data wantsAnimated:(BOOL)wantsAnimated {
+    if (!data) return nil;
+
+    CGImageSourceRef src = CGImageSourceCreateWithData((__bridge CFDataRef)data, NULL);
+    if (!src) return [UIImage imageWithData:data];
+
+    // ── Animé : décoder toutes les frames ──────────────────────────────────
+    if (wantsAnimated) {
+        NSUInteger count = CGImageSourceGetCount(src);
+        if (count > 1) {
+            NSMutableArray<UIImage *> *frames = [NSMutableArray arrayWithCapacity:count];
+            NSTimeInterval duration = 0.0;
+
+            for (NSUInteger i = 0; i < count; i++) {
+                CGImageRef cgImg = CGImageSourceCreateImageAtIndex(src, i, NULL);
+                if (!cgImg) continue;
+
+                [frames addObject:[UIImage imageWithCGImage:cgImg]];
+                CGImageRelease(cgImg);
+
+                // Récupérer le délai de la frame (GIF ou WebP)
+                NSDictionary *props = CFBridgingRelease(
+                    CGImageSourceCopyPropertiesAtIndex(src, i, NULL));
+                NSDictionary *gifProps  = props[@"{GIF}"];
+                NSDictionary *webpProps = props[@"{WebP}"];
+                NSNumber *delay = gifProps[@"UnclampedDelayTime"]
+                               ?: gifProps[@"DelayTime"]
+                               ?: webpProps[@"DelayTime"];
+                duration += (delay && delay.doubleValue > 0.01)
+                            ? delay.doubleValue : 0.1;
+            }
+
+            CFRelease(src);
+
+            if (frames.count > 1) {
+                return [UIImage animatedImageWithImages:frames
+                                              duration:MAX(duration, 0.5)];
+            }
+            return frames.firstObject;
+        }
+    }
+
+    // ── Statique : frame 0 uniquement ──────────────────────────────────────
+    CGImageRef cgImg = CGImageSourceCreateImageAtIndex(src, 0, NULL);
+    UIImage *img = nil;
+    if (cgImg) { img = [UIImage imageWithCGImage:cgImg]; CGImageRelease(cgImg); }
+    CFRelease(src);
+    return img ?: [UIImage imageWithData:data];
+}
+
 - (void)toggleEmotePickerForChatInputView:(UIView *)chatInputView {
     // Appel synchrone : on est déjà sur le main thread (tap UIButton).
     // Le dispatch_async précédent créait une race : UIKit pouvait résigner
@@ -1675,12 +1759,16 @@ referenceSizeForHeaderInSection:(NSInteger)section {
     cell.layer.cornerRadius   = 0;
 
     // ── Bordure 1 pixel physique BLANCHE autour de chaque cellule ─────────────
-    // borderWidth en points : 1 / scale → 1 pixel sur @2x, 1/3 pt sur @3x.
-    // Le résultat est une ligne fine et nette qui épouse exactement la cellule,
-    // y compris les rangées incomplètes (pas de fond commun qui déborde).
     CGFloat onePixel = 1.0 / [UIScreen mainScreen].scale;
     cell.layer.borderWidth = onePixel;
     cell.layer.borderColor = [UIColor whiteColor].CGColor;
+
+    // ── Annuler la tâche réseau de la cellule recyclée ─────────────────────
+    // Sans ça, une cellule recyclée peut afficher une image obsolète
+    // si la task précédente se termine après le recyclage.
+    NSURLSessionDataTask *oldTask = objc_getAssociatedObject(cell, &kS7TVTaskKey);
+    [oldTask cancel];
+    objc_setAssociatedObject(cell, &kS7TVTaskKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
     // Nettoyer la cellule recyclée
     for (UIView *sub in cell.contentView.subviews) [sub removeFromSuperview];
@@ -1688,7 +1776,7 @@ referenceSizeForHeaderInSection:(NSInteger)section {
     SevenTVEmote *emote = [self _emoteForIndexPath:indexPath];
     if (!emote) return cell;
 
-    // L'image remplit la cellule entière (aspect-fit) — pas d'inset supplémentaire
+    // UIImageView qui remplit la cellule
     UIImageView *iv = [[UIImageView alloc] initWithFrame:cell.contentView.bounds];
     iv.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     iv.contentMode = UIViewContentModeScaleAspectFit;
@@ -1707,33 +1795,51 @@ referenceSizeForHeaderInSection:(NSInteger)section {
         [cell.contentView addSubview:star];
     }
 
-    // Charger l'image (frame 0 seulement → statique dans le picker)
     NSURL *emoteURL = [self cdnURLForEmote:emote];
-    NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration ephemeralSessionConfiguration];
-    cfg.URLCache = [NSURLCache sharedURLCache];
-    NSURLSession *sess = [NSURLSession sessionWithConfiguration:cfg];
+    NSURLRequest *req = [NSURLRequest requestWithURL:emoteURL];
+    BOOL wantsAnimated = emote.isAnimated && self.showPickerAnimations;
 
-    [[sess dataTaskWithURL:emoteURL completionHandler:^(NSData *data, NSURLResponse *r, NSError *e) {
-        if (!data) return;
+    // ── Étape 1 : check cache synchrone — zéro réseau si image déjà là ────
+    // NSURLCache.sharedURLCache est rempli par le prefetch massif au JOIN.
+    // Dans la majorité des cas (~95%), l'image est en cache → affichage immédiat.
+    NSCachedURLResponse *cached = [[NSURLCache sharedURLCache] cachedResponseForRequest:req];
+    if (cached.data) {
+        // Décodage CGImage sur un thread background pour ne pas bloquer le scroll
+        NSData *imgData = cached.data;
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            UIImage *img = [self _decodePickerImageData:imgData wantsAnimated:wantsAnimated];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                // Vérifier que la cellule n'a pas été recyclée entre temps
+                NSIndexPath *nowPath = [cv indexPathForCell:cell];
+                if (nowPath && nowPath.section == indexPath.section
+                            && nowPath.item   == indexPath.item) {
+                    iv.image = img;
+                }
+            });
+        });
+        return cell;
+    }
 
-        UIImage *img = nil;
-        CGImageSourceRef src = CGImageSourceCreateWithData((__bridge CFDataRef)data, NULL);
-        if (src) {
-            CGImageRef cgImg = CGImageSourceCreateImageAtIndex(src, 0, NULL);
-            if (cgImg) { img = [UIImage imageWithCGImage:cgImg]; CGImageRelease(cgImg); }
-            CFRelease(src);
-        }
-        if (!img) img = [UIImage imageWithData:data];
-
+    // ── Étape 2 : image absente du cache → fetch réseau (session partagée) ─
+    // Se produit lors de la première ouverture du picker avant que le prefetch
+    // n'ait terminé, ou après une purge du cache par iOS.
+    NSURLSessionDataTask *task = [[self _pickerImageSession]
+        dataTaskWithURL:emoteURL
+      completionHandler:^(NSData *data, NSURLResponse *r, NSError *e) {
+        if (!data || e.code == NSURLErrorCancelled) return;
+        UIImage *img = [self _decodePickerImageData:data wantsAnimated:wantsAnimated];
         dispatch_async(dispatch_get_main_queue(), ^{
-            // Vérifier que la cellule n'a pas été recyclée pour un autre indexPath
             NSIndexPath *nowPath = [cv indexPathForCell:cell];
             if (nowPath && nowPath.section == indexPath.section
                         && nowPath.item   == indexPath.item) {
                 iv.image = img;
             }
         });
-    }] resume];
+    }];
+
+    // Stocker la task dans la cellule pour pouvoir l'annuler au recyclage
+    objc_setAssociatedObject(cell, &kS7TVTaskKey, task, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [task resume];
 
     return cell;
 }

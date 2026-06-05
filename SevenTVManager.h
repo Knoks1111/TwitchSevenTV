@@ -55,9 +55,10 @@ extern NSString *const S7TVLogsDidUpdateNotification;
 + (instancetype)sharedManager;
 
 // --- Configuration ---
-@property (nonatomic, assign) BOOL isEnabled;       // 7TV activé/désactivé
-@property (nonatomic, assign) BOOL showAnimated;    // Afficher les emotes animées
-@property (nonatomic, assign) BOOL debugLogging;    // NSLog console activé
+@property (nonatomic, assign) BOOL isEnabled;             // 7TV activé/désactivé
+@property (nonatomic, assign) BOOL showAnimated;          // Afficher les emotes animées dans le chat
+@property (nonatomic, assign) BOOL showPickerAnimations;  // Animer les emotes dans le picker (GIF/WebP animé)
+@property (nonatomic, assign) BOOL debugLogging;          // NSLog console activé
 
 // --- Données des emotes ---
 // Dictionnaire: @{ "KEKW": SevenTVEmote*, "Pog": SevenTVEmote*, ... }

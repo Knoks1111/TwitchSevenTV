@@ -97,7 +97,9 @@ static NSString *const kActionCell = @"ActionCell";
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
     switch (section) {
         case 0: return @"Désactiver 7TV ne supprime pas les emotes déjà affichées.";
-        case 1: return @"Les emotes animées (GIF) consomment un peu plus de batterie.";
+        case 1: return @"\"Emotes animées\" contrôle les GIFs dans le chat. "
+                       @"\"Animations dans le picker\" anime les emotes dans la grille de sélection "
+                       @"(peut ralentir le scroll sur ancien iPhone, désactivé par défaut).";
         case 3: return @"Le buffer conserve les 1000 dernières lignes. "
                        @"Activer \"Logs console\" pour voir aussi dans Console.app (Mac requis).";
         default: return nil;
@@ -107,7 +109,7 @@ static NSString *const kActionCell = @"ActionCell";
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     switch (section) {
         case 0: return 1; // Activer 7TV
-        case 1: return 1; // Emotes animées
+        case 1: return 2; // Emotes animées (chat) + Animations picker
         case 2: return 4; // Stats: channel, global, channel emotes, total
         case 3: return 3; // Logs console + Voir les logs + Recharger emotes
         case 4: return 2; // Version + Info API
@@ -133,11 +135,18 @@ static NSString *const kActionCell = @"ActionCell";
 
         // ── Section 1: Affichage ──
         case 1: {
-            UITableViewCell *cell = [self switchCellWithTitle:@"Emotes animées"
-                                                         icon:@"✨"
-                                                       isOn:mgr.showAnimated
-                                                       action:@selector(toggleAnimated:)];
-            return cell;
+            if (indexPath.row == 0) {
+                return [self switchCellWithTitle:@"Emotes animées (chat)"
+                                           icon:@"✨"
+                                           isOn:mgr.showAnimated
+                                         action:@selector(toggleAnimated:)];
+            } else {
+                UITableViewCell *cell = [self switchCellWithTitle:@"Animations dans le picker"
+                                                            icon:@"🎞️"
+                                                            isOn:mgr.showPickerAnimations
+                                                          action:@selector(togglePickerAnimations:)];
+                return cell;
+            }
         }
 
         // ── Section 2: Stats ──
@@ -289,12 +298,14 @@ static NSString *const kActionCell = @"ActionCell";
     [self presentViewController:alert animated:YES completion:nil];
 }
 
-// Toggles
 - (void)toggleEnabled:(UISwitch *)sw {
     [SevenTVManager sharedManager].isEnabled = sw.isOn;
 }
 - (void)toggleAnimated:(UISwitch *)sw {
     [SevenTVManager sharedManager].showAnimated = sw.isOn;
+}
+- (void)togglePickerAnimations:(UISwitch *)sw {
+    [SevenTVManager sharedManager].showPickerAnimations = sw.isOn;
 }
 - (void)toggleDebug:(UISwitch *)sw {
     [SevenTVManager sharedManager].debugLogging = sw.isOn;
