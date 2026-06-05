@@ -1371,6 +1371,34 @@ static UIViewController *s7tv_vcForView(UIView *v) {
     SevenTVManager *mgr = [SevenTVManager sharedManager];
     [mgr log:@"👆 TAP #%ld @ (%.0f, %.0f)", (long)s_tapLogCount, pt.x, pt.y];
 
+    // ── firstResponder actuel au moment du tap ────────────────────────────────
+    // Permet de voir quel champ avait le focus AVANT que le tap change quoi que ce soit
+    UIView *keyWindow = self;
+    UIResponder *currentFR = nil;
+    {
+        // Parcourir la hiérarchie pour trouver le firstResponder
+        NSMutableArray<UIView *> *frQueue = [NSMutableArray arrayWithObject:keyWindow];
+        while (frQueue.count > 0) {
+            UIView *fv = frQueue.firstObject; [frQueue removeObjectAtIndex:0];
+            if (fv.isFirstResponder) { currentFR = fv; break; }
+            for (UIView *sub in fv.subviews) [frQueue addObject:sub];
+        }
+    }
+    if (currentFR) {
+        NSString *frExtra = @"";
+        if ([currentFR isKindOfClass:[UITextView class]]) {
+            UITextView *tv = (UITextView *)currentFR;
+            frExtra = [NSString stringWithFormat:@" text='%@' selectedRange={%lu,%lu}",
+                       tv.text ?: @"",
+                       (unsigned long)tv.selectedRange.location,
+                       (unsigned long)tv.selectedRange.length];
+        }
+        [mgr log:@"  FIRST_RESPONDER: %@%@",
+         NSStringFromClass([currentFR class]), frExtra];
+    } else {
+        [mgr log:@"  FIRST_RESPONDER: (aucun)"];
+    }
+
     // Vue touchée (hit)
     UIView *hit = [self hitTest:pt withEvent:nil];
     if (!hit) {
@@ -1401,6 +1429,76 @@ static UIViewController *s7tv_vcForView(UIView *v) {
          s7tv_viewExtra(v)];
     }
     [mgr log:@"  ── fin hiérarchie ──"];
+
+    // ── Snapshot différé: état du UITextView 200ms après le tap ──────────────
+    // Permet de voir ce que Twitch a écrit dans le champ APRÈS son traitement
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        // Chercher le UITextView dans ChatInputView
+        UIView *chatInputView = nil;
+        NSMutableArray<UIView *> *sq = [NSMutableArray arrayWithObject:self];
+        while (sq.count > 0) {
+            UIView *sv = sq.firstObject; [sq removeObjectAtIndex:0];
+            if ([NSStringFromClass([sv class]) isEqualToString:@"Twitch.ChatInputView"]) {
+                chatInputView = sv; break;
+            }
+            for (UIView *sub in sv.subviews) [sq addObject:sub];
+        }
+        if (!chatInputView) {
+            [mgr log:@"  📸 POST-TAP(200ms): ChatInputView introuvable"];
+            return;
+        }
+
+        NSMutableArray<UIView *> *bfs = [NSMutableArray arrayWithObject:chatInputView];
+        while (bfs.count > 0) {
+            UIView *bv = bfs.firstObject; [bfs removeObjectAtIndex:0];
+            [bfs addObjectsFromArray:bv.subviews];
+
+            if ([bv isKindOfClass:[UITextView class]]) {
+                UITextView *tv = (UITextView *)bv;
+                [mgr log:@"  📸 POST-TAP UITextView(%@) text='%@' isFirstResponder=%d",
+                 NSStringFromClass([bv class]),
+                 tv.text ?: @"",
+                 (int)tv.isFirstResponder];
+
+                // Inspecter l'attributedText pour voir les attachments (emotes)
+                NSAttributedString *attr = tv.attributedText;
+                if (attr.length > 0) {
+                    [attr enumerateAttribute:NSAttachmentAttributeName
+                                     inRange:NSMakeRange(0, attr.length)
+                                     options:0
+                                  usingBlock:^(id att, NSRange r, BOOL *stop) {
+                        if (att) {
+                            [mgr log:@"    📎 NSTextAttachment @ range {%lu,%lu}: %@",
+                             (unsigned long)r.location, (unsigned long)r.length,
+                             NSStringFromClass([att class])];
+                        }
+                    }];
+                    // Log du texte brut (sans attachments)
+                    NSMutableString *plainText = [NSMutableString string];
+                    [attr enumerateAttributesInRange:NSMakeRange(0, attr.length)
+                                            options:0
+                                         usingBlock:^(NSDictionary *attrs, NSRange r, BOOL *stop) {
+                        if (!attrs[NSAttachmentAttributeName]) {
+                            [plainText appendString:[attr.string substringWithRange:r]];
+                        }
+                    }];
+                    [mgr log:@"    📝 texte brut (sans attachments): '%@'", plainText];
+                }
+            }
+        }
+
+        // firstResponder après le tap
+        UIResponder *postFR = nil;
+        NSMutableArray<UIView *> *frq2 = [NSMutableArray arrayWithObject:self];
+        while (frq2.count > 0) {
+            UIView *fv = frq2.firstObject; [frq2 removeObjectAtIndex:0];
+            if (fv.isFirstResponder) { postFR = fv; break; }
+            for (UIView *sub in fv.subviews) [frq2 addObject:sub];
+        }
+        [mgr log:@"  📸 POST-TAP firstResponder: %@",
+         postFR ? NSStringFromClass([postFR class]) : @"(aucun)"];
+    });
 }
 
 @end
