@@ -77,7 +77,9 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
 
 // Picker d'emotes inline (affiché au-dessus de la barre de saisie)
 @property (nonatomic, strong) UIView              *emotePickerView;
-@property (nonatomic, weak)   UIView              *emotePickerTextField;
+// FORT (pas weak) — doit rester valide jusqu'au tap sur l'emote.
+// Un weak pointer devient nil dès que Twitch recycle la vue → insertion silencieuse.
+@property (nonatomic, strong) UIView              *emotePickerTextField;
 @property (nonatomic, strong) UICollectionView    *emoteCollectionView;
 @property (nonatomic, strong) UITextField         *emoteSearchField;
 @property (nonatomic, strong) NSArray<SevenTVEmote *> *emotePickerEmotes;
@@ -1140,7 +1142,17 @@ static const CGFloat kCellSize      = 40.0;
     for (NSString *key in [global.allKeys sortedArrayUsingSelector:@selector(caseInsensitiveCompare:)]) {
         if (!channel[key]) [all addObject:global[key]]; // pas de doublons
     }
-    self.emotePickerAllEmotes = [all copy];
+    // Trier par taille décroissante (surface = w × h) comme sur 7TV PC.
+    // Emotes sans dimensions (w=0 ou h=0) vont en dernier.
+    NSArray<SevenTVEmote *> *sorted = [all sortedArrayUsingComparator:
+        ^NSComparisonResult(SevenTVEmote *a, SevenTVEmote *b) {
+            NSInteger aArea = a.width * a.height;
+            NSInteger bArea = b.width * b.height;
+            if (aArea > bArea) return NSOrderedAscending;
+            if (aArea < bArea) return NSOrderedDescending;
+            return NSOrderedSame;
+        }];
+    self.emotePickerAllEmotes = sorted;
     self.emotePickerEmotes    = self.emotePickerAllEmotes;
     [self _updatePickerArraysForSearch:@""];
 
@@ -1235,9 +1247,10 @@ static const CGFloat kCellSize      = 40.0;
     NSData *_logoData = [[NSData alloc]
         initWithBase64EncodedString:kS7TVLogoBase64 options:NSDataBase64DecodingIgnoreUnknownCharacters];
     UIImage *_logoImg = [UIImage imageWithData:_logoData scale:2.0];
-    // UIImageView centré verticalement dans le header, respecte le ratio naturel du PNG
-    CGFloat _logoW = _logoImg ? _logoImg.size.width  : 38.0; // 38 pt
-    CGFloat _logoH = _logoImg ? _logoImg.size.height : 28.0; // 28 pt
+    // UIImageView centré verticalement dans le header, respecte le ratio naturel du PNG.
+    // Réduction de 20% par rapport à la taille naturelle du PNG (38×28 pt → 30×22 pt).
+    CGFloat _logoW = _logoImg ? _logoImg.size.width  * 0.8 : 30.0;
+    CGFloat _logoH = _logoImg ? _logoImg.size.height * 0.8 : 22.0;
     CGFloat _logoY = (headerH - _logoH) / 2.0;
     UIImageView *_logoIV = [[UIImageView alloc] initWithFrame:CGRectMake(12, _logoY, _logoW, _logoH)];
     _logoIV.image = _logoImg;
@@ -1292,20 +1305,31 @@ static const CGFloat kCellSize      = 40.0;
     [picker addSubview:headerView];
 
     // ── Collection View — SCROLL VERTICAL UNIQUEMENT ───────────────────────
+    // 7 colonnes fixes.
+    // Espacement inter-cellule + inter-ligne = 0.5 pt (ligne blanche fine et propre).
+    // Fond de la CV = blanc → les espaces entre cellules apparaissent en blanc.
+    static const NSInteger kColumns = 7;
+    static const CGFloat kSpacing   = 0.5;
+    static const CGFloat kInset     = 2.0;
+    // Taille d'une cellule carrée : on divise la largeur disponible en 7 colonnes égales.
+    CGFloat availableW = frame.size.width - 2.0 * kInset - (kColumns - 1) * kSpacing;
+    CGFloat computedCell = floor(availableW / (CGFloat)kColumns);
+    if (computedCell < 30.0) computedCell = 30.0;
+
     UICollectionViewFlowLayout *layout = [[UICollectionViewFlowLayout alloc] init];
-    layout.scrollDirection        = UICollectionViewScrollDirectionVertical;
-    layout.itemSize               = CGSizeMake(kCellSize, kCellSize);
-    layout.minimumInteritemSpacing = 1;
-    layout.minimumLineSpacing      = 1;
-    layout.sectionInset = UIEdgeInsetsMake(2, 2, 2, 2);
+    layout.scrollDirection         = UICollectionViewScrollDirectionVertical;
+    layout.itemSize                = CGSizeMake(computedCell, computedCell);
+    layout.minimumInteritemSpacing = kSpacing;
+    layout.minimumLineSpacing      = kSpacing;
+    layout.sectionInset = UIEdgeInsetsMake(kInset, kInset, kInset, kInset);
     layout.headerReferenceSize = CGSizeMake(frame.size.width, 28.0);
-    // itemSize est géré via collectionView:layout:sizeForItemAtIndexPath:
 
     UICollectionView *cv = [[UICollectionView alloc]
         initWithFrame:CGRectMake(0, headerH, frame.size.width, kPickerHeight - headerH)
  collectionViewLayout:layout];
-    // Le fond du cv sert de "mini bordure" entre les cellules transparentes
-    cv.backgroundColor        = sepColor;
+    // Fond BLANC → les espaces de 0.5 pt entre les cellules transparentes
+    // apparaissent comme de fines lignes blanches nettes (pas grises, pas épaisses).
+    cv.backgroundColor        = [UIColor whiteColor];
     cv.autoresizingMask       = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     cv.dataSource             = (id<UICollectionViewDataSource>)self;
     cv.delegate               = (id<UICollectionViewDelegate>)self;
@@ -1487,34 +1511,22 @@ static const CGFloat kCellSize      = 40.0;
     return header;
 }
 
-// ── Taille dynamique des cellules selon ratio de l'emote ─────────────────
+// ── Taille fixe : 7 colonnes calculées dans _createEmotePickerViewWithFrame: ──
+// On re-calcule ici pour être indépendant du layout stocké (qui peut avoir bougé).
 
-static const CGFloat kCellMaxSize = 36.0; // dimension max
-static const CGFloat kCellMinSize = 22.0; // dimension min
+static const NSInteger kPickerColumns = 7;
+static const CGFloat kPickerSpacing   = 0.5;
+static const CGFloat kPickerInset     = 2.0;
 
 - (CGSize)collectionView:(UICollectionView *)cv
                   layout:(UICollectionViewLayout *)layout
   sizeForItemAtIndexPath:(NSIndexPath *)indexPath {
-    SevenTVEmote *emote = [self _emoteForIndexPath:indexPath];
-    if (!emote || emote.width <= 0 || emote.height <= 0) {
-        return CGSizeMake(kCellSize, kCellSize); // carré par défaut
-    }
-    CGFloat ratio = (CGFloat)emote.width / (CGFloat)emote.height;
-    CGFloat w, h;
-    if (ratio >= 1.0) {
-        // Emote plus large que haute → fixer la largeur à kCellMaxSize
-        w = MIN(kCellMaxSize, kCellMaxSize * ratio);
-        h = w / ratio;
-    } else {
-        // Emote plus haute que large → fixer la hauteur à kCellMaxSize
-        h = kCellMaxSize;
-        w = h * ratio;
-    }
-    // Assurer une taille minimale
-    w = MAX(w, kCellMinSize);
-    h = MAX(h, kCellMinSize);
-    // Pas de +16 : plus de label de nom
-    return CGSizeMake(ceil(w), ceil(h));
+    CGFloat available = cv.bounds.size.width
+                      - 2.0 * kPickerInset
+                      - (kPickerColumns - 1) * kPickerSpacing;
+    CGFloat side = floor(available / (CGFloat)kPickerColumns);
+    if (side < 30.0) side = 30.0;
+    return CGSizeMake(side, side);
 }
 
 // ── Hauteur des headers (0 si inutile) ────────────────────────────────────
@@ -1610,6 +1622,32 @@ referenceSizeForHeaderInSection:(NSInteger)section {
     // On manipule directement la propriété .text puis on envoie la
     // notification de changement pour que Twitch (SwiftUI) détecte la modif.
     UIView *inputRoot = self.emotePickerTextField;
+
+    // Fallback : si la référence forte est quand même nulle (premier lancement,
+    // changement de VC, etc.), on BFS la fenêtre entière pour retrouver
+    // Twitch.ChatInputView — même stratégie que dans s7tv_didMoveToWindow.
+    if (!inputRoot) {
+        [self log:@"⚠️ didSelect: emotePickerTextField nil → fallback BFS fenêtre"];
+        UIWindow *kw = nil;
+        for (UIScene *sc in [UIApplication sharedApplication].connectedScenes) {
+            if ([sc isKindOfClass:[UIWindowScene class]])
+                for (UIWindow *w in ((UIWindowScene *)sc).windows)
+                    if (w.isKeyWindow) { kw = w; break; }
+        }
+        if (!kw) kw = [UIApplication sharedApplication].windows.firstObject;
+        if (kw) {
+            NSMutableArray<UIView *> *bq = [NSMutableArray arrayWithObject:kw];
+            while (bq.count > 0) {
+                UIView *v = bq.firstObject; [bq removeObjectAtIndex:0];
+                [bq addObjectsFromArray:v.subviews];
+                if ([NSStringFromClass([v class]) isEqualToString:@"Twitch.ChatInputView"]) {
+                    inputRoot = v;
+                    self.emotePickerTextField = v; // mémoriser pour la prochaine fois
+                    break;
+                }
+            }
+        }
+    }
     if (inputRoot) {
         // BFS illimité : UITextView en priorité, UITextField en fallback
         __block UIView *textInput = nil;
