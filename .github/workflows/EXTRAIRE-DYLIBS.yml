@@ -1,15 +1,16 @@
 name: 🔍 Extraire les dylibs
-
 on:
   workflow_dispatch:
-
+    inputs:
+      ipa_filename:
+        description: 'Nom du fichier IPA (ex: Twitch29.6.7TV.01.ipa)'
+        required: true
+        default: 'Twitch29.6.7TV.01.ipa'
 permissions:
   contents: read
-
 jobs:
   extract:
     runs-on: macos-14
-
     steps:
       - name: 📥 Télécharger et extraire l'IPA
         env:
@@ -17,10 +18,9 @@ jobs:
         run: |
           gh release download ipa-base \
             --repo "${{ github.repository }}" \
-            --pattern "Twitch29.6.7TV.01.ipa" \
+            --pattern "${{ github.event.inputs.ipa_filename }}" \
             --output Twitch_modded.ipa
           unzip -q Twitch_modded.ipa -d IPA_extracted
-
           # Copier les dylibs dans un dossier output
           mkdir -p dylibs_output
           cp IPA_extracted/Payload/Twitch.app/Frameworks/TwitchControl0.0.5.dylib dylibs_output/
@@ -28,7 +28,6 @@ jobs:
           cp IPA_extracted/Payload/Twitch.app/Frameworks/zxPluginsInject.dylib dylibs_output/
           cp IPA_extracted/Payload/Twitch.app/Frameworks/sideloadFixerLol.dylib dylibs_output/
           ls -lah dylibs_output/
-
       - name: 📤 Upload des dylibs
         uses: actions/upload-artifact@v4
         with:
