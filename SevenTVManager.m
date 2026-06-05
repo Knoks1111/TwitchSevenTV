@@ -80,6 +80,8 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
 // FORT (pas weak) — doit rester valide jusqu'au tap sur l'emote.
 // Un weak pointer devient nil dès que Twitch recycle la vue → insertion silencieuse.
 @property (nonatomic, strong) UIView              *emotePickerTextField;
+// Référence forte au _TtC6Twitch...TextEntryView — reste firstResponder pendant le picker.
+@property (nonatomic, strong) UITextView          *emotePickerTextEntryView;
 @property (nonatomic, strong) UICollectionView    *emoteCollectionView;
 @property (nonatomic, strong) UITextField         *emoteSearchField;
 @property (nonatomic, strong) NSArray<SevenTVEmote *> *emotePickerEmotes;
@@ -1106,25 +1108,61 @@ static const CGFloat kCellSize      = 40.0;
 
 - (void)toggleEmotePickerForChatInputView:(UIView *)chatInputView {
     dispatch_async(dispatch_get_main_queue(), ^{
-        // ── Si le picker est déjà visible → le fermer ─────────────────────────
-        if (self.emotePickerView && !self.emotePickerView.isHidden) {
+
+        // ── Trouver le TextEntryView (UITextView de Twitch) ───────────────
+        // C’est _TtC6Twitch...TextEntryView qui reste firstResponder pendant
+        // l’inputAccessoryView — exactement comme le picker d’emotes natif Twitch.
+        // Clé : dans UIRemoteKeyboardWindow, tapper une emote ne fait PAS résigner
+        // le TextEntryView. On reproduit ça en utilisant inputAccessoryView.
+        if (!self.emotePickerTextEntryView && chatInputView) {
+            NSMutableArray<UIView *> *bfs = [NSMutableArray arrayWithObject:chatInputView];
+            while (bfs.count > 0) {
+                UIView *v = bfs.firstObject; [bfs removeObjectAtIndex:0];
+                [bfs addObjectsFromArray:v.subviews];
+                NSString *cn = NSStringFromClass([v class]);
+                // Chercher la sous-classe TextEntryView de Twitch (UITextView)
+                if ([v isKindOfClass:[UITextView class]] && [cn containsString:@"TextEntryView"]) {
+                    self.emotePickerTextEntryView = (UITextView *)v;
+                    [self log:@"✅ TextEntryView trouvé: %@", cn];
+                    break;
+                }
+            }
+            // Fallback : n’importe quel UITextView dans ChatInputView
+            if (!self.emotePickerTextEntryView) {
+                NSMutableArray<UIView *> *bfs2 = [NSMutableArray arrayWithObject:chatInputView];
+                while (bfs2.count > 0) {
+                    UIView *v = bfs2.firstObject; [bfs2 removeObjectAtIndex:0];
+                    [bfs2 addObjectsFromArray:v.subviews];
+                    if ([v isKindOfClass:[UITextView class]]) {
+                        self.emotePickerTextEntryView = (UITextView *)v;
+                        [self log:@"⚠️ TextEntryView fallback UITextView: %@", NSStringFromClass([v class])];
+                        break;
+                    }
+                }
+            }
+        }
+
+        // ── Basculer : picker déjà posé comme inputAccessoryView → retirer ─────
+        if (self.emotePickerTextEntryView &&
+            self.emotePickerTextEntryView.inputAccessoryView == self.emotePickerView) {
             [self _hideEmotePicker];
             return;
         }
+
         self.emotePickerTextField = chatInputView;
         [self _buildAndShowEmotePickerForView:chatInputView];
     });
 }
 
 - (void)_hideEmotePicker {
-    [UIView animateWithDuration:0.2 animations:^{
-        self.emotePickerView.alpha = 0;
-        self.emotePickerView.transform = CGAffineTransformMakeTranslation(0, 20);
-    } completion:^(BOOL done) {
-        self.emotePickerView.hidden = YES;
-        self.emotePickerView.alpha = 1;
-        self.emotePickerView.transform = CGAffineTransformIdentity;
-    }];
+    // Retirer le picker de l'inputAccessoryView et reloader le clavier
+    UITextView *tv = self.emotePickerTextEntryView;
+    if (tv) {
+        tv.inputAccessoryView = nil;
+        [tv reloadInputViews];
+    }
+    // Cacher la vue picker (réutilisée la prochaine fois)
+    self.emotePickerView.hidden = YES;
 }
 
 - (void)_buildAndShowEmotePickerForView:(UIView *)chatInputView {
@@ -1156,35 +1194,12 @@ static const CGFloat kCellSize      = 40.0;
     self.emotePickerEmotes    = self.emotePickerAllEmotes;
     [self _updatePickerArraysForSearch:@""];
 
-    // ── Trouver la fenêtre clé ─────────────────────────────────────────────
-    UIWindow *keyWindow = nil;
-    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-        if ([scene isKindOfClass:[UIWindowScene class]])
-            for (UIWindow *w in ((UIWindowScene *)scene).windows)
-                if (w.isKeyWindow) { keyWindow = w; break; }
-    }
-    if (!keyWindow) keyWindow = [UIApplication sharedApplication].windows.firstObject;
-    if (!keyWindow) return;
-
-    CGRect screenBounds = keyWindow.bounds;
-
-    // ── Trouver la position Y du TextField dans la fenêtre ────────────────
-    // Positionner le picker juste au-dessus de la ChatInputView
-    CGRect tfFrame = chatInputView
-        ? [chatInputView convertRect:chatInputView.bounds toView:keyWindow]
-        : CGRectMake(0, keyWindow.bounds.size.height - 56, keyWindow.bounds.size.width, 56);
-    CGFloat pickerY = tfFrame.origin.y - kPickerHeight - 4.0;
-    if (pickerY < 0) pickerY = 0;
-
-    CGRect pickerFrame = CGRectMake(0, pickerY, screenBounds.size.width, kPickerHeight);
-
-    // ── Créer ou réutiliser le picker ─────────────────────────────────────
+    // ── Créer le picker si besoin ─────────────────────────────────────
+    CGRect pickerFrame = CGRectMake(0, 0, UIScreen.mainScreen.bounds.size.width, kPickerHeight);
     if (!self.emotePickerView) {
-        [self _createEmotePickerViewWithFrame:pickerFrame inWindow:keyWindow];
-    } else {
-        self.emotePickerView.frame = pickerFrame;
-        [keyWindow addSubview:self.emotePickerView]; // re-attacher si nécessaire
+        [self _createEmotePickerViewWithFrame:pickerFrame inWindow:nil];
     }
+    self.emotePickerView.frame = pickerFrame;
 
     // Reset la recherche
     self.emoteSearchField.text = @"";
@@ -1192,22 +1207,35 @@ static const CGFloat kCellSize      = 40.0;
     [self.emoteCollectionView reloadData];
     [self.emoteCollectionView setContentOffset:CGPointZero animated:NO];
 
-    // ── Afficher avec animation ────────────────────────────────────────────
-    self.emotePickerView.hidden    = NO;
-    self.emotePickerView.alpha     = 0;
-    self.emotePickerView.transform = CGAffineTransformMakeTranslation(0, 20);
-    [UIView animateWithDuration:0.22
-                          delay:0
-         usingSpringWithDamping:0.85
-          initialSpringVelocity:0
-                        options:UIViewAnimationOptionCurveEaseOut
-                     animations:^{
-        self.emotePickerView.alpha     = 1;
-        self.emotePickerView.transform = CGAffineTransformIdentity;
-    } completion:nil];
+    // ── inputAccessoryView ──────────────────────────────────────────
+    // En posant le picker comme inputAccessoryView du TextEntryView,
+    // il s'affiche dans UIRemoteKeyboardWindow comme le picker Twitch natif.
+    // Le TextEntryView reste firstResponder -> insertText: fonctionne.
+    UITextView *tv = self.emotePickerTextEntryView;
+    if (tv) {
+        self.emotePickerView.hidden = NO;
+        tv.inputAccessoryView = self.emotePickerView;
+        [tv reloadInputViews];
+        if (!tv.isFirstResponder) [tv becomeFirstResponder];
+        [self log:@"✅ inputAccessoryView posé sur %@", NSStringFromClass([tv class])];
+    } else {
+        [self log:@"⚠️ TextEntryView nil — fallback fenêtre flottante"];
+        UIWindow *keyWindow = nil;
+        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes)
+            if ([scene isKindOfClass:[UIWindowScene class]])
+                for (UIWindow *w in ((UIWindowScene *)scene).windows)
+                    if (w.isKeyWindow) { keyWindow = w; break; }
+        if (!keyWindow) keyWindow = [UIApplication sharedApplication].windows.firstObject;
+        if (keyWindow) {
+            self.emotePickerView.frame = CGRectMake(0,
+                keyWindow.bounds.size.height - kPickerHeight - 56,
+                keyWindow.bounds.size.width, kPickerHeight);
+            [keyWindow addSubview:self.emotePickerView];
+            self.emotePickerView.hidden = NO;
+        }
+    }
 }
-
-- (void)_createEmotePickerViewWithFrame:(CGRect)frame inWindow:(UIWindow *)window {
+ (void)_createEmotePickerViewWithFrame:(CGRect)frame inWindow:(UIWindow *)window {
 
     // ── Couleurs dans le style Twitch dark ─────────────────────────────────
     UIColor *bgColor     = [UIColor colorWithRed:0.13 green:0.13 blue:0.15 alpha:1.0]; // #211F26
@@ -1354,7 +1382,7 @@ static const CGFloat kCellSize      = 40.0;
 
     [picker addSubview:cv];
 
-    [window addSubview:picker];
+    // NOTE: pas d'addSubview ici — la vue est attachée via inputAccessoryView
 }
 
 // ── Recherche ──────────────────────────────────────────────────────────────
@@ -1669,21 +1697,19 @@ referenceSizeForHeaderInSection:(NSInteger)section {
         }
     }
 
-    // ── Étape 2: BFS pour trouver le champ de saisie dans ChatInputView ──────
-    // On cherche (par ordre de priorité) :
-    //   A. UITextView        → chat SwiftUI sur iOS 15+
-    //   B. UITextField       → anciennes versions
-    //   C. UIKeyInput quelconque → champ custom qui implémente le protocole
-    __block id<UIKeyInput> keyInput = nil;
-    __block UITextView   *textView  = nil;
-    __block UITextField  *textField = nil;
+    // ── Étape 2: utiliser directement emotePickerTextEntryView ────────────
+    // C’est lui qui est firstResponder (inputAccessoryView) — insertText: fonctionnera.
+    // On garde le BFS en fallback si emotePickerTextEntryView est nil.
+    UITextView  *textView  = self.emotePickerTextEntryView;
+    UITextField *textField = nil;
+    id<UIKeyInput> keyInput = nil;
 
-    if (inputRoot) {
+    if (!textView && inputRoot) {
+        // Fallback BFS
         NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:inputRoot];
         while (queue.count > 0) {
             UIView *v = queue.firstObject; [queue removeObjectAtIndex:0];
             [queue addObjectsFromArray:v.subviews];
-
             if (!textView  && [v isKindOfClass:[UITextView class]])  textView  = (UITextView *)v;
             if (!textField && [v isKindOfClass:[UITextField class]]) textField = (UITextField *)v;
             if (!keyInput  && [v conformsToProtocol:@protocol(UIKeyInput)]
@@ -1704,98 +1730,45 @@ referenceSizeForHeaderInSection:(NSInteger)section {
     NSString *prefix  = (currentText.length > 0 && ![currentText hasSuffix:@" "]) ? @" " : @"";
     NSString *toAppend = [NSString stringWithFormat:@"%@%@ ", prefix, emote.emoteName];
 
-    // ── Étape 4: insertion — trois stratégies par ordre de fiabilité ──────────
-
+    // ── Étape 4: insertion ─────────────────────────────────────────────────
+    // inputAccessoryView garantit que textView EST firstResponder.
+    // insertText: passe par UITextInput que SwiftUI observe -> le @Binding est mis à jour.
     BOOL inserted = NO;
 
-    // ── Stratégie A : insertText: si le champ est DÉJÀ firstResponder ────────────
-    // C'est le chemin exact du clavier système → SwiftUI l'observe nativement.
-    // Ne tenter que si firstResponder : sinon insertText: écrit dans le vide.
-    UIView *bestInput = textView ?: textField ?: (UIView *)keyInput;
-    if (bestInput && bestInput.isFirstResponder
-        && [bestInput conformsToProtocol:@protocol(UIKeyInput)]) {
-        [(id<UIKeyInput>)bestInput insertText:toAppend];
-        [self log:@"✅ A — insertText: (déjà firstResponder) → «%@»", toAppend];
-        inserted = YES;
-    }
-
-    // ── Stratégie B : becomeFirstResponder + insertText: différé ─────────────────
-    // SEUL chemin fiable pour un UITextView hébergé dans SwiftUI.
-    //
-    // POURQUOI LE DÉLAI :
-    //   Quand l'utilisateur tape sur le picker (UICollectionView flottant),
-    //   le UITextView de Twitch perd le firstResponder AVANT que
-    //   didSelectItemAtIndexPath soit appelé. SwiftUI détecte ce resign et
-    //   recrée/réinitialise son @State interne.
-    //   Si on appelle becomeFirstResponder + insertText: dans la même
-    //   passe de RunLoop, insertText: arrive pendant que SwiftUI est encore
-    //   en train de reconstruire son arbre → le texte est ignoré ou perdu.
-    //
-    //   Solution : on donne 1 cycle de RunLoop (dispatch_async main) pour que
-    //   SwiftUI finisse son cycle, PUIS on appelle becomeFirstResponder.
-    //   Ensuite on attend encore 1 cycle avant insertText: pour que le
-    //   UITextView soit vraiment firstResponder et que SwiftUI soit prêt.
-    //
-    //   Résultat : le texte apparaît dans la chatbox ET est bien lu par
-    //   le @Binding Twitch au moment de l'envoi.
-    if (!inserted && textView) {
-        UITextView *tv = textView; // capture forte pour les blocs
-        NSString   *text = toAppend;
-        [self log:@"⏳ B — scheduling becomeFirstResponder + insertText: → «%@»", text];
-        inserted = YES; // on marque inséré pour ne pas tomber en C/D
-
-        dispatch_async(dispatch_get_main_queue(), ^{
-            // Cycle 1 : SwiftUI a eu le temps de finir son resign-cleanup
-            [tv becomeFirstResponder];
+    if (textView) {
+        // Cas normal: textView est firstResponder via inputAccessoryView
+        if (textView.isFirstResponder) {
+            textView.selectedRange = NSMakeRange(textView.text.length, 0);
+            [textView insertText:toAppend];
+            [self log:@"✅ insertText: direct (firstResponder) → «Text%@»", toAppend];
+            inserted = YES;
+        } else {
+            // Ne devrait plus arriver avec inputAccessoryView, mais fallback
+            [textView becomeFirstResponder];
             dispatch_async(dispatch_get_main_queue(), ^{
-                // Cycle 2 : UITextView est firstResponder, SwiftUI est prêt
-                tv.selectedRange = NSMakeRange(tv.text.length, 0);
-                [tv insertText:text];
-                [self log:@"✅ B — becomeFirstResponder + insertText: → «%@»", text];
+                textView.selectedRange = NSMakeRange(textView.text.length, 0);
+                [textView insertText:toAppend];
+                [self log:@"✅ insertText: (après becomeFirstResponder) → «%@»", toAppend];
             });
-        });
-    }
-
-    // ── Stratégie C : UITextField — becomeFirstResponder + insertText: différé ──
-    if (!inserted && textField) {
-        UITextField *tf  = textField;
-        NSString    *text = toAppend;
-        [self log:@"⏳ C — scheduling UITextField insertText: → «%@»", text];
+            inserted = YES;
+        }
+    } else if (textField) {
+        [textField becomeFirstResponder];
+        [(id<UIKeyInput>)textField insertText:toAppend];
+        [self log:@"✅ insertText: UITextField → «%@»", toAppend];
         inserted = YES;
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [tf becomeFirstResponder];
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [(id<UIKeyInput>)tf insertText:text];
-                [self log:@"✅ C — UITextField becomeFirstResponder + insertText: → «%@»", text];
-            });
-        });
-    }
-
-    // ── Stratégie D : UIKeyInput générique — différé ──────────────────────────
-    if (!inserted && keyInput) {
-        UIView      *kv   = (UIView *)keyInput;
-        NSString    *text = toAppend;
-        BOOL         isTV = [kv isKindOfClass:[UITextView class]];
-        [self log:@"⏳ D — scheduling UIKeyInput insertText: → «%@»", text];
+    } else if (keyInput) {
+        [(UIView *)keyInput becomeFirstResponder];
+        [(id<UIKeyInput>)keyInput insertText:toAppend];
+        [self log:@"✅ insertText: UIKeyInput → «%@»", toAppend];
         inserted = YES;
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [kv becomeFirstResponder];
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (isTV) {
-                    UITextView *tv2 = (UITextView *)kv;
-                    tv2.selectedRange = NSMakeRange(tv2.text.length, 0);
-                }
-                [(id<UIKeyInput>)kv insertText:text];
-                [self log:@"✅ D — UIKeyInput forcé firstResponder + insertText: → «%@»", text];
-            });
-        });
     }
 
     if (!inserted) {
         [self log:@"❌ didSelect: aucun champ texte trouvé — emote=%@", emote.emoteName];
     }
 
-    // Feedback haptique léger
+        // Feedback haptique léger
     UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc]
         initWithStyle:UIImpactFeedbackStyleLight];
     [haptic impactOccurred];
