@@ -30,6 +30,7 @@
 #import "SevenTVManager.h"
 #import "SevenTVSettingsController.h"
 #import "SevenTVURLProtocol.h"
+#import "SevenTVLogo.h"
 #import <objc/runtime.h>
 
 // ============================================================
@@ -1229,27 +1230,32 @@ static const CGFloat kCellSize      = 72.0;
     sep.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     [headerView addSubview:sep];
 
-    // Icône + label "7TV Emotes"
-    UILabel *titleLbl = [[UILabel alloc] initWithFrame:CGRectMake(14, 0, 110, headerH)];
-    // Texte "7TV" stylé : gras blanc
-    NSMutableAttributedString *titleStr = [[NSMutableAttributedString alloc]
-        initWithString:@"7TV  "
-            attributes:@{
-                NSFontAttributeName: [UIFont boldSystemFontOfSize:15],
-                NSForegroundColorAttributeName: [UIColor colorWithRed:0.60 green:0.35 blue:1.0 alpha:1.0]
-            }];
-    [titleStr appendAttributedString:[[NSAttributedString alloc]
-        initWithString:@"Emotes"
-            attributes:@{
-                NSFontAttributeName: [UIFont systemFontOfSize:14 weight:UIFontWeightMedium],
-                NSForegroundColorAttributeName: textColor
-            }]];
-    titleLbl.attributedText = titleStr;
+    // Logo 7TV (PNG base64, ratio correct) + label "Emotes"
+    // PNG : 76×56 px → @2x = 38×28 pt
+    NSData *_logoData = [[NSData alloc]
+        initWithBase64EncodedString:kS7TVLogoBase64 options:NSDataBase64DecodingIgnoreUnknownCharacters];
+    UIImage *_logoImg = [UIImage imageWithData:_logoData scale:2.0];
+    // UIImageView centré verticalement dans le header, respecte le ratio naturel du PNG
+    CGFloat _logoW = _logoImg ? _logoImg.size.width  : 38.0; // 38 pt
+    CGFloat _logoH = _logoImg ? _logoImg.size.height : 28.0; // 28 pt
+    CGFloat _logoY = (headerH - _logoH) / 2.0;
+    UIImageView *_logoIV = [[UIImageView alloc] initWithFrame:CGRectMake(12, _logoY, _logoW, _logoH)];
+    _logoIV.image = _logoImg;
+    _logoIV.contentMode = UIViewContentModeScaleAspectFit;
+    [headerView addSubview:_logoIV];
+
+    // Label "Emotes" à droite du logo
+    CGFloat _lblX = 12 + _logoW + 4;
+    UILabel *titleLbl = [[UILabel alloc] initWithFrame:CGRectMake(_lblX, 0, 80, headerH)];
+    titleLbl.text = @"Emotes";
+    titleLbl.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
+    titleLbl.textColor = textColor;
     [headerView addSubview:titleLbl];
 
     // Champ de recherche
+    // X = logo(38) + gap(4) + label(~60) + gap(6) = ~108 → on prend 110
     UITextField *search = [[UITextField alloc] initWithFrame:
-        CGRectMake(120, 9, frame.size.width - 120 - 48, 30)];
+        CGRectMake(110, 9, frame.size.width - 110 - 48, 30)];
     search.placeholder     = @"Rechercher une emote…";
     search.font            = [UIFont systemFontOfSize:13];
     search.returnKeyType   = UIReturnKeyDone;
@@ -1289,10 +1295,11 @@ static const CGFloat kCellSize      = 72.0;
     UICollectionViewFlowLayout *layout = [[UICollectionViewFlowLayout alloc] init];
     layout.scrollDirection        = UICollectionViewScrollDirectionVertical;
     layout.itemSize               = CGSizeMake(kCellSize, kCellSize);
-    layout.minimumInteritemSpacing = 4;
-    layout.minimumLineSpacing      = 4;
-    layout.sectionInset = UIEdgeInsetsMake(8, 8, 8, 8);
+    layout.minimumInteritemSpacing = 2;
+    layout.minimumLineSpacing      = 2;
+    layout.sectionInset = UIEdgeInsetsMake(4, 6, 4, 6);
     layout.headerReferenceSize = CGSizeMake(frame.size.width, 28.0);
+    // itemSize est géré via collectionView:layout:sizeForItemAtIndexPath:
 
     UICollectionView *cv = [[UICollectionView alloc]
         initWithFrame:CGRectMake(0, headerH, frame.size.width, kPickerHeight - headerH)
@@ -1438,11 +1445,19 @@ static const CGFloat kCellSize      = 72.0;
         topSep.backgroundColor = sepColor;
         [header addSubview:topSep];
 
-        // Label "⭐ Favoris"
-        UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(14, 4, 200, 20)];
-        lbl.text      = @"⭐  Favoris";
+        // Étoile ★ violette style Twitch
+        UIImageView *star = [[UIImageView alloc] initWithFrame:CGRectMake(14, 6, 13, 13)];
+        UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration
+            configurationWithPointSize:10 weight:UIImageSymbolWeightBold];
+        star.image = [UIImage systemImageNamed:@"star.fill" withConfiguration:cfg];
+        star.tintColor = [UIColor colorWithRed:0.60 green:0.35 blue:1.0 alpha:1.0]; // violet Twitch
+        [header addSubview:star];
+
+        // Label "Favoris" violet Twitch
+        UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(31, 5, 200, 18)];
+        lbl.text      = @"Favoris";
         lbl.font      = [UIFont boldSystemFontOfSize:11];
-        lbl.textColor = [UIColor colorWithRed:0.95 green:0.75 blue:0.20 alpha:1.0];
+        lbl.textColor = [UIColor colorWithRed:0.60 green:0.35 blue:1.0 alpha:1.0]; // violet Twitch
         [header addSubview:lbl];
 
         // Séparateur bas
@@ -1469,6 +1484,36 @@ static const CGFloat kCellSize      = 72.0;
     // Section 1 sans favoris = pas de header visible (hauteur 0 via delegate)
 
     return header;
+}
+
+// ── Taille dynamique des cellules selon ratio de l'emote ─────────────────
+
+static const CGFloat kCellMaxSize = 64.0; // dimension max (hauteur ou largeur)
+static const CGFloat kCellMinSize = 44.0; // dimension min
+
+- (CGSize)collectionView:(UICollectionView *)cv
+                  layout:(UICollectionViewLayout *)layout
+  sizeForItemAtIndexPath:(NSIndexPath *)indexPath {
+    SevenTVEmote *emote = [self _emoteForIndexPath:indexPath];
+    if (!emote || emote.width <= 0 || emote.height <= 0) {
+        return CGSizeMake(kCellSize, kCellSize); // carré par défaut
+    }
+    CGFloat ratio = (CGFloat)emote.width / (CGFloat)emote.height;
+    CGFloat w, h;
+    if (ratio >= 1.0) {
+        // Emote plus large que haute → fixer la largeur à kCellMaxSize
+        w = MIN(kCellMaxSize, kCellMaxSize * ratio);
+        h = w / ratio;
+    } else {
+        // Emote plus haute que large → fixer la hauteur à kCellMaxSize
+        h = kCellMaxSize;
+        w = h * ratio;
+    }
+    // Assurer une taille minimale
+    w = MAX(w, kCellMinSize);
+    h = MAX(h, kCellMinSize);
+    // +16 pour le label en bas
+    return CGSizeMake(ceil(w), ceil(h) + 16.0);
 }
 
 // ── Hauteur des headers (0 si inutile) ────────────────────────────────────
@@ -1500,31 +1545,34 @@ referenceSizeForHeaderInSection:(NSInteger)section {
     SevenTVEmote *emote = [self _emoteForIndexPath:indexPath];
     if (!emote) return cell;
 
-    // Image — centrée, occupe ~75% de la cellule
-    CGFloat imgSize = kCellSize * 0.62;
-    CGFloat imgX = (kCellSize - imgSize) / 2.0;
-    CGFloat imgY = 4.0;
-    UIImageView *iv = [[UIImageView alloc] initWithFrame:CGRectMake(imgX, imgY, imgSize, imgSize)];
+    // Taille réelle de la cellule (après sizeForItemAtIndexPath)
+    CGSize cs = cell.bounds.size;
+    if (cs.width < 1) cs = CGSizeMake(kCellSize, kCellSize + 16); // sécurité
+
+    CGFloat lblH = 13.0;
+    CGFloat imgAreaH = cs.height - lblH - 2.0;
+
+    // Image : aspect fit dans la zone image
+    UIImageView *iv = [[UIImageView alloc] initWithFrame:CGRectMake(0, 2, cs.width, imgAreaH - 2)];
     iv.contentMode = UIViewContentModeScaleAspectFit;
     [cell.contentView addSubview:iv];
 
     // Label nom — en bas de la cellule
-    CGFloat lblH = 14.0;
-    CGFloat lblY = kCellSize - lblH - 3.0;
-    UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(2, lblY, kCellSize - 4, lblH)];
+    UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(1, cs.height - lblH - 1, cs.width - 2, lblH)];
     lbl.text          = emote.emoteName;
-    lbl.font          = [UIFont systemFontOfSize:8.5];
+    lbl.font          = [UIFont systemFontOfSize:8.0];
     lbl.textAlignment = NSTextAlignmentCenter;
     lbl.textColor     = [UIColor colorWithRed:0.70 green:0.70 blue:0.75 alpha:1.0];
     lbl.lineBreakMode = NSLineBreakByTruncatingTail;
     [cell.contentView addSubview:lbl];
 
-    // Étoile ⭐ en haut à droite si favori (section 0 = toujours favori)
+    // Étoile favoris (section 0) : SF Symbol discret, semi-transparent
     if (indexPath.section == 0) {
-        UILabel *star = [[UILabel alloc] initWithFrame:CGRectMake(kCellSize - 14, 2, 12, 12)];
-        star.text      = @"⭐";
-        star.font      = [UIFont systemFontOfSize:8];
-        star.textAlignment = NSTextAlignmentCenter;
+        UIImageView *star = [[UIImageView alloc] initWithFrame:CGRectMake(cs.width - 13, 2, 11, 11)];
+        UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration
+            configurationWithPointSize:8 weight:UIImageSymbolWeightMedium];
+        star.image = [UIImage systemImageNamed:@"star.fill" withConfiguration:cfg];
+        star.tintColor = [[UIColor whiteColor] colorWithAlphaComponent:0.35];
         [cell.contentView addSubview:star];
     }
 
@@ -1568,35 +1616,41 @@ referenceSizeForHeaderInSection:(NSInteger)section {
     SevenTVEmote *emote = [self _emoteForIndexPath:indexPath];
     if (!emote) return;
 
-    // Insérer le nom de l'emote dans le champ texte de la ChatInputView
+    // Insérer l'emote dans le champ texte de Twitch.
+    // On utilise insertText: (UIKeyInput) qui respecte le curseur et
+    // déclenche correctement les bindings SwiftUI de Twitch.
     UIView *inputRoot = self.emotePickerTextField;
     if (inputRoot) {
-        // Chercher récursivement UITextView d'abord (Twitch utilise probablement UITextView)
-        // puis UITextField en fallback
+        // BFS illimité : UITextView en priorité, UITextField en fallback
         __block UIView *textInput = nil;
         NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:inputRoot];
-        while (queue.count > 0 && !textInput) {
+        while (queue.count > 0) {
             UIView *v = queue.firstObject; [queue removeObjectAtIndex:0];
-            if ([v isKindOfClass:[UITextView class]] || [v isKindOfClass:[UITextField class]]) {
-                textInput = v;
-                break;
-            }
+            if ([v isKindOfClass:[UITextView class]]) { textInput = v; break; }
+            if ([v isKindOfClass:[UITextField class]] && !textInput) textInput = v;
             for (UIView *sub in v.subviews) [queue addObject:sub];
         }
 
-        if ([textInput isKindOfClass:[UITextView class]]) {
-            UITextView *tv = (UITextView *)textInput;
-            NSString *current = tv.text ?: @"";
-            NSString *prefix  = (current.length > 0 && ![current hasSuffix:@" "]) ? @" " : @"";
-            tv.text = [NSString stringWithFormat:@"%@%@%@ ", current, prefix, emote.emoteName];
-            [[NSNotificationCenter defaultCenter]
-                postNotificationName:UITextViewTextDidChangeNotification object:tv];
-        } else if ([textInput isKindOfClass:[UITextField class]]) {
-            UITextField *tf = (UITextField *)textInput;
-            NSString *current = tf.text ?: @"";
-            NSString *prefix  = (current.length > 0 && ![current hasSuffix:@" "]) ? @" " : @"";
-            tf.text = [NSString stringWithFormat:@"%@%@%@ ", current, prefix, emote.emoteName];
-            [tf sendActionsForControlEvents:UIControlEventEditingChanged];
+        if (textInput) {
+            // S'assurer que le champ est actif
+            if (![textInput isFirstResponder]) [textInput becomeFirstResponder];
+
+            // Espace de séparation si nécessaire
+            NSString *currentText = @"";
+            if ([textInput isKindOfClass:[UITextView class]])
+                currentText = ((UITextView *)textInput).text ?: @"";
+            else
+                currentText = ((UITextField *)textInput).text ?: @"";
+
+            NSString *prefix = (currentText.length > 0 && ![currentText hasSuffix:@" "]) ? @" " : @"";
+            NSString *toInsert = [NSString stringWithFormat:@"%@%@ ", prefix, emote.emoteName];
+
+            // insertText: respecte la position du curseur et déclenche SwiftUI
+            [(id<UIKeyInput>)textInput insertText:toInsert];
+            [self log:@"\u2328\ufe0f Emote insérée : \u00ab%@\u00bb dans %@",
+             emote.emoteName, NSStringFromClass([textInput class])];
+        } else {
+            [self log:@"\u26a0\ufe0f didSelect: aucun champ texte trouvé dans ChatInputView"];
         }
     }
 
