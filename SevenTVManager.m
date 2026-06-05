@@ -61,7 +61,7 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
 // ============================================================
 // SevenTVManager (privé)
 // ============================================================
-@interface SevenTVManager ()
+@interface SevenTVManager () <UITextFieldDelegate>
 
 // IDs de channels dont un fetch réseau est EN COURS (anti-doublon concurrent)
 // Ne bloque PAS les futurs refreshs — seulement les requêtes simultanées.
@@ -1524,6 +1524,8 @@ static const char kS7TVTaskKey = 0;
         initWithString:@"Rechercher…"
             attributes:@{NSForegroundColorAttributeName: subColor}];
     search.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    // Déléguer à self pour intercepter le focus et éviter que le picker se ferme
+    search.delegate = (id<UITextFieldDelegate>)self;
     [search addTarget:self action:@selector(_emoteSearchChanged:)
      forControlEvents:UIControlEventEditingChanged];
     self.emoteSearchField = search;
@@ -1623,12 +1625,92 @@ static const char kS7TVTaskKey = 0;
     self.emotePickerEmotes = self.emotePickerOtherEmotes;
 }
 
-- (void)_emoteSearchChanged:(UITextField *)field {
-    NSString *query = field.text ?: @"";
+// ── UITextFieldDelegate — intercepte le focus du champ de recherche ────────
+//
+// PROBLÈME : quand emoteSearchField appelle becomeFirstResponder, UIKit
+// résigne automatiquement l'ancien firstResponder (TextEntryView).
+// Cela retire l'inputView du TextEntryView → le picker disparaît et
+// les frappes suivantes vont directement dans la chatbox de Twitch.
+//
+// SOLUTION : bloquer becomeFirstResponder (retourner NO dans le delegate),
+// et afficher à la place un UIAlertController avec un champ texte.
+// L'UIAlertController est une fenêtre modale iOS → le TextEntryView reste
+// firstResponder en arrière-plan, son inputView (le picker) ne bouge pas.
+// Quand l'utilisateur valide, on applique la recherche et on recharge la grille.
+//
+- (BOOL)textFieldShouldBeginEditing:(UITextField *)textField {
+    if (textField != self.emoteSearchField) return YES;
+
+    // Capturer la query courante pour pré-remplir l'alerte
+    NSString *currentQuery = textField.text ?: @"";
+
+    UIAlertController *alert = [UIAlertController
+        alertControllerWithTitle:@"Rechercher une emote"
+                         message:nil
+                  preferredStyle:UIAlertControllerStyleAlert];
+
+    [alert addTextFieldWithConfigurationHandler:^(UITextField *alertField) {
+        alertField.placeholder   = @"Nom de l'emote…";
+        alertField.text          = currentQuery;
+        alertField.returnKeyType = UIReturnKeySearch;
+        alertField.clearButtonMode = UITextFieldViewModeWhileEditing;
+        // Sélectionner tout le texte existant pour faciliter la réécriture
+        if (currentQuery.length > 0) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [alertField selectAll:nil];
+            });
+        }
+    }];
+
+    UIAlertAction *searchAction = [UIAlertAction
+        actionWithTitle:@"Rechercher"
+                  style:UIAlertActionStyleDefault
+                handler:^(UIAlertAction *action) {
+        NSString *query = alert.textFields.firstObject.text ?: @"";
+        // Mettre à jour le placeholder/texte du champ affiché pour feedback visuel
+        textField.text = query;
+        // Mettre à jour l'attributedPlaceholder si query vide
+        if (query.length == 0) {
+            UIColor *subColor = [UIColor colorWithWhite:0.55 alpha:1.0];
+            textField.attributedPlaceholder = [[NSAttributedString alloc]
+                initWithString:@"Rechercher…"
+                    attributes:@{NSForegroundColorAttributeName: subColor}];
+        }
+        [self _applySearchQuery:query];
+    }];
+
+    UIAlertAction *cancelAction = [UIAlertAction
+        actionWithTitle:@"Annuler"
+                  style:UIAlertActionStyleCancel
+                handler:^(UIAlertAction *action) {
+        // Vider la recherche si on annule et qu'il n'y avait pas de query
+        // (laisser la query courante intacte si l'utilisateur a juste annulé)
+    }];
+
+    [alert addAction:searchAction];
+    [alert addAction:cancelAction];
+    alert.preferredAction = searchAction;
+
+    // Présenter depuis le topViewController (le picker est inputView, pas un VC)
+    [[self topViewController] presentViewController:alert animated:YES completion:nil];
+
+    // Bloquer le becomeFirstResponder → le picker reste affiché
+    return NO;
+}
+
+- (void)_applySearchQuery:(NSString *)query {
     [self _updatePickerArraysForSearch:query];
     [self.emoteCollectionView reloadData];
     [self.emoteCollectionView setContentOffset:CGPointZero animated:NO];
 }
+
+// Appelé par UIControlEventEditingChanged (cas où le champ est modifié
+// programmatiquement — en pratique bloqué par textFieldShouldBeginEditing:)
+- (void)_emoteSearchChanged:(UITextField *)field {
+    [self _applySearchQuery:field.text ?: @""];
+}
+
+
 
 // ── Long press → toggle favori ─────────────────────────────────────────────
 
@@ -1852,7 +1934,12 @@ referenceSizeForHeaderInSection:(NSInteger)section {
 
     NSURL *emoteURL = [self cdnURLForEmote:emote];
     NSURLRequest *req = [NSURLRequest requestWithURL:emoteURL];
-    BOOL wantsAnimated = emote.isAnimated && self.showPickerAnimations;
+    // Animer UNIQUEMENT les favoris (section 0) quand showPickerAnimations est activé.
+    // Les emotes hors favoris (section 1) restent statiques même si l'option est ON :
+    // avec potentiellement 500+ emotes visibles en section 1, animer toutes déclenche
+    // un spike mémoire (chaque frame 4x ≈ 160 KB) et lag le scroll.
+    BOOL isFavoriteCell = (indexPath.section == 0);
+    BOOL wantsAnimated = emote.isAnimated && self.showPickerAnimations && isFavoriteCell;
 
     // ── Étape 1 : check cache synchrone — zéro réseau si image déjà là ────
     // SevenTVURLProtocol.sharedEmoteCache est le MÊME cache que celui utilisé
