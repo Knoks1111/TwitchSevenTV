@@ -1305,31 +1305,32 @@ static const CGFloat kCellSize      = 40.0;
     [picker addSubview:headerView];
 
     // ── Collection View — SCROLL VERTICAL UNIQUEMENT ───────────────────────
-    // 7 colonnes fixes.
-    // Espacement inter-cellule + inter-ligne = 0.5 pt (ligne blanche fine et propre).
-    // Fond de la CV = blanc → les espaces entre cellules apparaissent en blanc.
-    static const NSInteger kColumns = 7;
-    static const CGFloat kSpacing   = 0.5;
-    static const CGFloat kInset     = 2.0;
-    // Taille d'une cellule carrée : on divise la largeur disponible en 7 colonnes égales.
-    CGFloat availableW = frame.size.width - 2.0 * kInset - (kColumns - 1) * kSpacing;
-    CGFloat computedCell = floor(availableW / (CGFloat)kColumns);
-    if (computedCell < 30.0) computedCell = 30.0;
+    //
+    // Chaque cellule a sa propre taille (ratio de l'emote).
+    // La hauteur de référence = screenWidth / 6 → environ 6 emotes carrées par ligne.
+    // Les emotes larges (ratio > 1) prennent plus de largeur → moins par ligne.
+    // Les emotes étroites (ratio < 1) prennent moins → plus par ligne.
+    //
+    // Bordure : 1 pixel physique (1/scale pt) sur CHAQUE cellule via layer.border.
+    // → La bordure épouse exactement la forme de la cellule, y compris les
+    //   rangées incomplètes (pas de fond commun qui déborde).
+    //
+    // Espacement inter-cellule = 0 : les bordures adjacentes forment 2 pixels
+    // visuels, ce qui est propre et compact.
 
     UICollectionViewFlowLayout *layout = [[UICollectionViewFlowLayout alloc] init];
     layout.scrollDirection         = UICollectionViewScrollDirectionVertical;
-    layout.itemSize                = CGSizeMake(computedCell, computedCell);
-    layout.minimumInteritemSpacing = kSpacing;
-    layout.minimumLineSpacing      = kSpacing;
-    layout.sectionInset = UIEdgeInsetsMake(kInset, kInset, kInset, kInset);
-    layout.headerReferenceSize = CGSizeMake(frame.size.width, 28.0);
+    layout.minimumInteritemSpacing = 0;
+    layout.minimumLineSpacing      = 0;
+    layout.sectionInset            = UIEdgeInsetsZero;
+    layout.headerReferenceSize     = CGSizeMake(frame.size.width, 28.0);
 
     UICollectionView *cv = [[UICollectionView alloc]
         initWithFrame:CGRectMake(0, headerH, frame.size.width, kPickerHeight - headerH)
  collectionViewLayout:layout];
-    // Fond BLANC → les espaces de 0.5 pt entre les cellules transparentes
-    // apparaissent comme de fines lignes blanches nettes (pas grises, pas épaisses).
-    cv.backgroundColor        = [UIColor whiteColor];
+    // Fond sombre = même couleur que les cellules.
+    // La bordure blanche est sur chaque cellule (layer.border), pas sur le fond.
+    cv.backgroundColor        = bgColor;
     cv.autoresizingMask       = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     cv.dataSource             = (id<UICollectionViewDataSource>)self;
     cv.delegate               = (id<UICollectionViewDelegate>)self;
@@ -1511,22 +1512,42 @@ static const CGFloat kCellSize      = 40.0;
     return header;
 }
 
-// ── Taille fixe : 7 colonnes calculées dans _createEmotePickerViewWithFrame: ──
-// On re-calcule ici pour être indépendant du layout stocké (qui peut avoir bougé).
+// ── Taille variable par emote ─────────────────────────────────────────────
+//
+// Hauteur de référence = screenWidth / 6  (→ environ 6 carrés par ligne).
+// Largeur = hauteur × ratio de l'emote   (si ratio > 1 → plus large).
+// La cellule épouse le ratio naturel de l'emote, exactement comme sur 7TV PC.
+//
+// Contraintes :
+//   • largeur min : cellH * 0.25   (évite les emotes ultra-étroites)
+//   • largeur max : cv.bounds.width (pas de débordement)
+//   • hauteur min : 32 pt
 
-static const NSInteger kPickerColumns = 7;
-static const CGFloat kPickerSpacing   = 0.5;
-static const CGFloat kPickerInset     = 2.0;
+static const CGFloat kRefCols = 6.0; // hauteur de référence = screenWidth / 6
 
 - (CGSize)collectionView:(UICollectionView *)cv
                   layout:(UICollectionViewLayout *)layout
   sizeForItemAtIndexPath:(NSIndexPath *)indexPath {
-    CGFloat available = cv.bounds.size.width
-                      - 2.0 * kPickerInset
-                      - (kPickerColumns - 1) * kPickerSpacing;
-    CGFloat side = floor(available / (CGFloat)kPickerColumns);
-    if (side < 30.0) side = 30.0;
-    return CGSizeMake(side, side);
+
+    CGFloat cvW   = cv.bounds.size.width > 0 ? cv.bounds.size.width : 390.0;
+    CGFloat cellH = MAX(32.0, floor(cvW / kRefCols));
+
+    SevenTVEmote *emote = [self _emoteForIndexPath:indexPath];
+    if (!emote || emote.width <= 0 || emote.height <= 0) {
+        // Pas de dimensions connues → carré
+        return CGSizeMake(cellH, cellH);
+    }
+
+    CGFloat ratio = (CGFloat)emote.width / (CGFloat)emote.height;
+    CGFloat cellW = cellH * ratio;
+
+    // Contraintes
+    cellW = MAX(cellH * 0.25, cellW);   // min 25% de la hauteur
+    cellW = MIN(cvW, cellW);            // max = pleine largeur
+    cellW = ceil(cellW);
+    cellH = ceil(cellH);
+
+    return CGSizeMake(cellW, cellH);
 }
 
 // ── Hauteur des headers (0 si inutile) ────────────────────────────────────
@@ -1547,10 +1568,18 @@ referenceSizeForHeaderInSection:(NSInteger)section {
     UICollectionViewCell *cell = [cv dequeueReusableCellWithReuseIdentifier:kEmoteCellID
                                                                 forIndexPath:indexPath];
 
-    // Transparent — le fond du cv (sepColor) crée les mini bordures
-    cell.backgroundColor = [UIColor colorWithRed:0.13 green:0.13 blue:0.15 alpha:1.0];
-    cell.layer.cornerRadius = 0;
-    cell.clipsToBounds = YES;
+    UIColor *cellBg = [UIColor colorWithRed:0.13 green:0.13 blue:0.15 alpha:1.0];
+    cell.backgroundColor     = cellBg;
+    cell.clipsToBounds        = YES;
+    cell.layer.cornerRadius   = 0;
+
+    // ── Bordure 1 pixel physique BLANCHE autour de chaque cellule ─────────────
+    // borderWidth en points : 1 / scale → 1 pixel sur @2x, 1/3 pt sur @3x.
+    // Le résultat est une ligne fine et nette qui épouse exactement la cellule,
+    // y compris les rangées incomplètes (pas de fond commun qui déborde).
+    CGFloat onePixel = 1.0 / [UIScreen mainScreen].scale;
+    cell.layer.borderWidth = onePixel;
+    cell.layer.borderColor = [UIColor whiteColor].CGColor;
 
     // Nettoyer la cellule recyclée
     for (UIView *sub in cell.contentView.subviews) [sub removeFromSuperview];
@@ -1558,17 +1587,16 @@ referenceSizeForHeaderInSection:(NSInteger)section {
     SevenTVEmote *emote = [self _emoteForIndexPath:indexPath];
     if (!emote) return cell;
 
-    // Taille réelle de la cellule
-    CGSize cs = cell.bounds.size;
-    if (cs.width < 1) cs = CGSizeMake(kCellSize, kCellSize);
-
-    // Image remplit toute la cellule (avec un tout petit inset)
-    UIImageView *iv = [[UIImageView alloc] initWithFrame:CGRectMake(1, 1, cs.width - 2, cs.height - 2)];
+    // L'image remplit la cellule entière (aspect-fit) — pas d'inset supplémentaire
+    UIImageView *iv = [[UIImageView alloc] initWithFrame:cell.contentView.bounds];
+    iv.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     iv.contentMode = UIViewContentModeScaleAspectFit;
+    iv.backgroundColor = [UIColor clearColor];
     [cell.contentView addSubview:iv];
 
     // Étoile favoris (section 0) : petite étoile violette discrète
     if (indexPath.section == 0) {
+        CGSize cs = cell.bounds.size;
         UIImageView *star = [[UIImageView alloc] initWithFrame:CGRectMake(cs.width - 9, 1, 8, 8)];
         UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration
             configurationWithPointSize:6 weight:UIImageSymbolWeightMedium];
@@ -1578,7 +1606,7 @@ referenceSizeForHeaderInSection:(NSInteger)section {
         [cell.contentView addSubview:star];
     }
 
-    // Charger l'image STATIQUEMENT (pas d'animation dans le picker → pas de lag)
+    // Charger l'image (frame 0 seulement → statique dans le picker)
     NSURL *emoteURL = [self cdnURLForEmote:emote];
     NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration ephemeralSessionConfiguration];
     cfg.URLCache = [NSURLCache sharedURLCache];
@@ -1587,23 +1615,20 @@ referenceSizeForHeaderInSection:(NSInteger)section {
     [[sess dataTaskWithURL:emoteURL completionHandler:^(NSData *data, NSURLResponse *r, NSError *e) {
         if (!data) return;
 
-        // Décoder en IMAGE STATIQUE seulement (frame 0 si GIF/WebP animé)
         UIImage *img = nil;
         CGImageSourceRef src = CGImageSourceCreateWithData((__bridge CFDataRef)data, NULL);
         if (src) {
-            // Toujours prendre uniquement la frame 0 → pas d'animation
             CGImageRef cgImg = CGImageSourceCreateImageAtIndex(src, 0, NULL);
-            if (cgImg) {
-                img = [UIImage imageWithCGImage:cgImg];
-                CGImageRelease(cgImg);
-            }
+            if (cgImg) { img = [UIImage imageWithCGImage:cgImg]; CGImageRelease(cgImg); }
             CFRelease(src);
         }
-        if (!img) img = [UIImage imageWithData:data]; // fallback
+        if (!img) img = [UIImage imageWithData:data];
 
         dispatch_async(dispatch_get_main_queue(), ^{
-            NSIndexPath *currentPath = [cv indexPathForCell:cell];
-            if (!currentPath || currentPath.item == (NSInteger)indexPath.item) {
+            // Vérifier que la cellule n'a pas été recyclée pour un autre indexPath
+            NSIndexPath *nowPath = [cv indexPathForCell:cell];
+            if (nowPath && nowPath.section == indexPath.section
+                        && nowPath.item   == indexPath.item) {
                 iv.image = img;
             }
         });
@@ -1618,22 +1643,17 @@ referenceSizeForHeaderInSection:(NSInteger)section {
     SevenTVEmote *emote = [self _emoteForIndexPath:indexPath];
     if (!emote) return;
 
-    // Insérer l'emote dans le champ texte SANS ouvrir le clavier.
-    // On manipule directement la propriété .text puis on envoie la
-    // notification de changement pour que Twitch (SwiftUI) détecte la modif.
+    // ── Étape 1: trouver la ChatInputView ────────────────────────────────────
+    // On cherche d'abord dans la référence stockée, puis dans toute la fenêtre.
     UIView *inputRoot = self.emotePickerTextField;
 
-    // Fallback : si la référence forte est quand même nulle (premier lancement,
-    // changement de VC, etc.), on BFS la fenêtre entière pour retrouver
-    // Twitch.ChatInputView — même stratégie que dans s7tv_didMoveToWindow.
     if (!inputRoot) {
-        [self log:@"⚠️ didSelect: emotePickerTextField nil → fallback BFS fenêtre"];
+        [self log:@"⚠️ didSelect: emotePickerTextField nil → BFS fenêtre"];
         UIWindow *kw = nil;
-        for (UIScene *sc in [UIApplication sharedApplication].connectedScenes) {
+        for (UIScene *sc in [UIApplication sharedApplication].connectedScenes)
             if ([sc isKindOfClass:[UIWindowScene class]])
                 for (UIWindow *w in ((UIWindowScene *)sc).windows)
                     if (w.isKeyWindow) { kw = w; break; }
-        }
         if (!kw) kw = [UIApplication sharedApplication].windows.firstObject;
         if (kw) {
             NSMutableArray<UIView *> *bq = [NSMutableArray arrayWithObject:kw];
@@ -1642,70 +1662,112 @@ referenceSizeForHeaderInSection:(NSInteger)section {
                 [bq addObjectsFromArray:v.subviews];
                 if ([NSStringFromClass([v class]) isEqualToString:@"Twitch.ChatInputView"]) {
                     inputRoot = v;
-                    self.emotePickerTextField = v; // mémoriser pour la prochaine fois
+                    self.emotePickerTextField = v;
                     break;
                 }
             }
         }
     }
+
+    // ── Étape 2: BFS pour trouver le champ de saisie dans ChatInputView ──────
+    // On cherche (par ordre de priorité) :
+    //   A. UITextView        → chat SwiftUI sur iOS 15+
+    //   B. UITextField       → anciennes versions
+    //   C. UIKeyInput quelconque → champ custom qui implémente le protocole
+    __block id<UIKeyInput> keyInput = nil;
+    __block UITextView   *textView  = nil;
+    __block UITextField  *textField = nil;
+
     if (inputRoot) {
-        // BFS illimité : UITextView en priorité, UITextField en fallback
-        __block UIView *textInput = nil;
         NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:inputRoot];
         while (queue.count > 0) {
             UIView *v = queue.firstObject; [queue removeObjectAtIndex:0];
-            if ([v isKindOfClass:[UITextView class]]) { textInput = v; break; }
-            if ([v isKindOfClass:[UITextField class]] && !textInput) textInput = v;
-            for (UIView *sub in v.subviews) [queue addObject:sub];
+            [queue addObjectsFromArray:v.subviews];
+
+            if (!textView  && [v isKindOfClass:[UITextView class]])  textView  = (UITextView *)v;
+            if (!textField && [v isKindOfClass:[UITextField class]]) textField = (UITextField *)v;
+            if (!keyInput  && [v conformsToProtocol:@protocol(UIKeyInput)]
+                           && ![v isKindOfClass:[UIButton class]])   keyInput  = (id<UIKeyInput>)v;
         }
+    }
 
-        if (textInput) {
-            // Lire le texte actuel
-            NSString *currentText = @"";
-            if ([textInput isKindOfClass:[UITextView class]])
-                currentText = ((UITextView *)textInput).text ?: @"";
-            else
-                currentText = ((UITextField *)textInput).text ?: @"";
+    [self log:@"🔍 didSelect — textView:%@ textField:%@ keyInput:%@",
+     textView  ? NSStringFromClass([textView  class]) : @"nil",
+     textField ? NSStringFromClass([textField class]) : @"nil",
+     keyInput  ? NSStringFromClass([(UIView *)keyInput class]) : @"nil"];
 
-            // Ajouter un espace séparateur si nécessaire
-            NSString *prefix = (currentText.length > 0 && ![currentText hasSuffix:@" "]) ? @" " : @"";
-            NSString *newText = [NSString stringWithFormat:@"%@%@%@ ", currentText, prefix, emote.emoteName];
+    // ── Étape 3: construire le texte à insérer ────────────────────────────────
+    NSString *currentText = @"";
+    if (textView)       currentText = textView.text  ?: @"";
+    else if (textField) currentText = textField.text ?: @"";
 
-            // Écrire directement sans becomeFirstResponder (pas d'ouverture clavier)
-            if ([textInput isKindOfClass:[UITextView class]]) {
-                UITextView *tv = (UITextView *)textInput;
-                tv.text = newText;
-                // Curseur en fin de texte
-                tv.selectedRange = NSMakeRange(newText.length, 0);
-                // Notifier Twitch du changement (SwiftUI binding)
-                [[NSNotificationCenter defaultCenter]
-                    postNotificationName:UITextViewTextDidChangeNotification
-                                  object:tv];
-                // Aussi tenter le delegate au cas où Twitch l'écoute
-                if ([tv.delegate respondsToSelector:@selector(textViewDidChange:)])
-                    [tv.delegate textViewDidChange:tv];
-            } else if ([textInput isKindOfClass:[UITextField class]]) {
-                UITextField *tf = (UITextField *)textInput;
-                tf.text = newText;
-                // Notifier Twitch du changement
-                [tf sendActionsForControlEvents:UIControlEventEditingChanged];
-                [[NSNotificationCenter defaultCenter]
-                    postNotificationName:UITextFieldTextDidChangeNotification
-                                  object:tf];
-            }
-            [self log:@"\u2328\ufe0f Emote insérée : \u00ab%@\u00bb dans %@",
-             emote.emoteName, NSStringFromClass([textInput class])];
-        } else {
-            [self log:@"\u26a0\ufe0f didSelect: aucun champ texte trouvé dans ChatInputView"];
-        }
+    NSString *prefix  = (currentText.length > 0 && ![currentText hasSuffix:@" "]) ? @" " : @"";
+    NSString *toAppend = [NSString stringWithFormat:@"%@%@ ", prefix, emote.emoteName];
+    NSString *newText  = [currentText stringByAppendingString:toAppend];
+
+    // ── Étape 4: insertion — trois stratégies par ordre de fiabilité ──────────
+
+    BOOL inserted = NO;
+
+    // Stratégie A : UIKeyInput.insertText: — le chemin que le clavier système utilise.
+    // Fonctionne même avec les champs SwiftUI (qui exposent UIKeyInput via leur hôte UIKit).
+    // On le tente UNIQUEMENT si le champ a déjà le focus (isFirstResponder), sinon
+    // insertText: insère dans le vide.
+    UIView *bestInput = textView ?: textField ?: (UIView *)keyInput;
+    if (bestInput && bestInput.isFirstResponder
+        && [bestInput conformsToProtocol:@protocol(UIKeyInput)]) {
+        [(id<UIKeyInput>)bestInput insertText:toAppend];
+        [self log:@"✅ A — insertText: (firstResponder) → «%@»", toAppend];
+        inserted = YES;
+    }
+
+    // Stratégie B : UITextView — setter + toutes les notifications/delegates.
+    if (!inserted && textView) {
+        textView.text = newText;
+        textView.selectedRange = NSMakeRange(newText.length, 0);
+        [[NSNotificationCenter defaultCenter]
+            postNotificationName:UITextViewTextDidChangeNotification object:textView];
+        if ([textView.delegate respondsToSelector:@selector(textViewDidChange:)])
+            [textView.delegate textViewDidChange:textView];
+        // KVC path utilisé par certains frameworks SwiftUI
+        [textView setValue:newText forKey:@"text"];
+        [self log:@"✅ B — UITextView.text = «%@»", newText];
+        inserted = YES;
+    }
+
+    // Stratégie C : UITextField — setter + sendActions + notification.
+    if (!inserted && textField) {
+        textField.text = newText;
+        [textField sendActionsForControlEvents:UIControlEventEditingChanged];
+        [[NSNotificationCenter defaultCenter]
+            postNotificationName:UITextFieldTextDidChangeNotification object:textField];
+        [self log:@"✅ C — UITextField.text = «%@»", newText];
+        inserted = YES;
+    }
+
+    // Stratégie D : UIKeyInput.insertText: SANS first responder (dernier recours).
+    // On rend le champ first responder, insère, puis retire le focus.
+    if (!inserted && keyInput) {
+        UIView *kv = (UIView *)keyInput;
+        [kv becomeFirstResponder];
+        [(id<UIKeyInput>)kv insertText:toAppend];
+        // Retirer le focus après un court délai pour éviter l'affichage du clavier
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            [kv resignFirstResponder];
+        });
+        [self log:@"✅ D — insertText: (forced firstResponder) → «%@»", toAppend];
+        inserted = YES;
+    }
+
+    if (!inserted) {
+        [self log:@"❌ didSelect: aucun champ texte trouvé — emote=%@", emote.emoteName];
     }
 
     // Feedback haptique léger
     UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc]
         initWithStyle:UIImpactFeedbackStyleLight];
     [haptic impactOccurred];
-
-    // NE PAS fermer le picker → l'utilisateur peut insérer plusieurs emotes
 }
 
 
