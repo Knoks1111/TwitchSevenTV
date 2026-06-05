@@ -16,7 +16,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release download ipa-base \
+          gh release download ipa-storage \
             --repo "${{ github.repository }}" \
             --pattern "${{ github.event.inputs.ipa_filename }}" \
             --output Twitch_modded.ipa
