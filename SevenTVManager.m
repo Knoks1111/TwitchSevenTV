@@ -1154,8 +1154,13 @@ static const CGFloat kCellSize      = 40.0;
         }
     }
 
-    // ── Basculer : picker déjà posé comme inputAccessoryView → retirer ───────
-    if (self.emotePickerTextEntryView &&
+    // ── Basculer : picker déjà affiché → retirer ────────────────────────────
+    // GUARD : self.emotePickerView doit être non-nil en premier.
+    // Sans ce guard, si emotePickerView == nil, la comparaison
+    // tv.inputAccessoryView == nil == self.emotePickerView → TRUE au premier tap →
+    // _hideEmotePicker est appelé avant même que le picker ait été créé → bug d'ouverture.
+    if (self.emotePickerView &&
+        self.emotePickerTextEntryView &&
         self.emotePickerTextEntryView.inputAccessoryView == self.emotePickerView) {
         [self _hideEmotePicker];
         return;
