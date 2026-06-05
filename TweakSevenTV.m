@@ -1281,7 +1281,8 @@ static void s7tv_swizzle_attachment(void) {
 // ────────────────────────────────────────────────────────────
 
 // Contrôle depuis les paramètres 7TV (accessible via SevenTVManager)
-BOOL s_tapLogEnabled = YES;
+// Défaut NO — SevenTVManager.init synchronise cette valeur avec la préférence sauvegardée.
+BOOL s_tapLogEnabled = NO;
 static NSInteger s_tapLogCount = 0;
 
 // Helper : infos supplémentaires sur une vue pour le log

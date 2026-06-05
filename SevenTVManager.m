@@ -163,9 +163,7 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
         _isEnabled             = YES;
         _showAnimated          = YES;
         _showPickerAnimations  = NO;   // Désactivé par défaut (perf)
-        _showFloatingButton    = YES;  // Bouton visible par défaut
         _debugLogging          = (S7TV_DEBUG == 1);
-        _tapLogging            = NO;   // Tap logger désactivé par défaut
 
         _globalEmotes      = @{};
         _channelEmotes     = @{};
@@ -183,6 +181,11 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
         _emotePickerOtherEmotes    = @[];
 
         [self loadPreferences];
+        // Synchroniser s_tapLogEnabled avec la préférence chargée.
+        // Sans ça, s_tapLogEnabled reste YES (défaut TweakSevenTV.m) même si
+        // l'utilisateur l'a désactivé lors d'une session précédente.
+        extern BOOL s_tapLogEnabled;
+        s_tapLogEnabled = _tapLogging;
         [self ensureCacheDirectory];
     }
     return self;
@@ -218,7 +221,9 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
                                                attributes:nil
                                                     error:&err];
     if (err) {
-        NSLog(@"[TwitchSevenTV] ⚠️ Impossible de créer le dossier cache: %@", err.localizedDescription);
+        // Ne pas utiliser [self log:] ici — on est dans init avant que debugLogging soit chargé.
+        // Erreur silencieuse : le cache sera simplement non disponible.
+        (void)err;
     }
     self.cacheDirectory = dir;
 }
@@ -399,9 +404,7 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
     if ([prefs objectForKey:@"s7tv_enabled"]           != nil) _isEnabled            = [prefs boolForKey:@"s7tv_enabled"];
     if ([prefs objectForKey:@"s7tv_animated"]          != nil) _showAnimated          = [prefs boolForKey:@"s7tv_animated"];
     if ([prefs objectForKey:@"s7tv_picker_anim"]       != nil) _showPickerAnimations  = [prefs boolForKey:@"s7tv_picker_anim"];
-    if ([prefs objectForKey:@"s7tv_floating_btn"]      != nil) _showFloatingButton    = [prefs boolForKey:@"s7tv_floating_btn"];
     if ([prefs objectForKey:@"s7tv_debug"]             != nil) _debugLogging          = [prefs boolForKey:@"s7tv_debug"];
-    if ([prefs objectForKey:@"s7tv_tap_log"]           != nil) _tapLogging            = [prefs boolForKey:@"s7tv_tap_log"];
     // Charger les favoris (array d'IDs 7TV)
     NSArray *savedFavs = [prefs arrayForKey:@"s7tv_favorites"];
     if (savedFavs) {
@@ -411,12 +414,10 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
 
 - (void)savePreferences {
     NSUserDefaults *prefs = [NSUserDefaults standardUserDefaults];
-    [prefs setBool:self.isEnabled            forKey:@"s7tv_enabled"];
-    [prefs setBool:self.showAnimated         forKey:@"s7tv_animated"];
+    [prefs setBool:self.isEnabled           forKey:@"s7tv_enabled"];
+    [prefs setBool:self.showAnimated        forKey:@"s7tv_animated"];
     [prefs setBool:self.showPickerAnimations forKey:@"s7tv_picker_anim"];
-    [prefs setBool:self.showFloatingButton   forKey:@"s7tv_floating_btn"];
-    [prefs setBool:self.debugLogging         forKey:@"s7tv_debug"];
-    [prefs setBool:self.tapLogging           forKey:@"s7tv_tap_log"];
+    [prefs setBool:self.debugLogging        forKey:@"s7tv_debug"];
     [prefs synchronize];
 }
 
@@ -429,21 +430,10 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
 - (void)setIsEnabled:(BOOL)v              { _isEnabled            = v; [self savePreferences]; }
 - (void)setShowAnimated:(BOOL)v           { _showAnimated          = v; [self savePreferences]; }
 - (void)setShowPickerAnimations:(BOOL)v   { _showPickerAnimations  = v; [self savePreferences]; }
-- (void)setShowFloatingButton:(BOOL)v {
-    _showFloatingButton = v;
-    [self savePreferences];
-    dispatch_async(dispatch_get_main_queue(), ^{
-        self.floatingWindow.hidden = !v;
-    });
-}
 - (void)setDebugLogging:(BOOL)v {
     _debugLogging  = v;
     [self savePreferences];
-    [self log:@"🖥️ Logs console %@", v ? @"activés" : @"désactivés"];
-}
-- (void)setTapLogging:(BOOL)v {
-    _tapLogging = v;
-    [self savePreferences];
+    // Synchroniser le tap logger avec l'état des logs
     extern BOOL s_tapLogEnabled;
     s_tapLogEnabled = v;
     [self log:@"👆 Tap logger %@", v ? @"activé" : @"désactivé"];
@@ -2113,6 +2103,9 @@ referenceSizeForHeaderInSection:(NSInteger)section {
 // ============================================================
 
 - (void)log:(NSString *)format, ... {
+    // Logs complètement désactivés → rien du tout (ni buffer, ni NSLog, ni notification)
+    if (!self.debugLogging) return;
+
     va_list args;
     va_start(args, format);
     NSString *msg = [[NSString alloc] initWithFormat:format arguments:args];
@@ -2131,7 +2124,7 @@ referenceSizeForHeaderInSection:(NSInteger)section {
     }
     [self.logLock unlock];
 
-    if (self.debugLogging) NSLog(@"[TwitchSevenTV] %@", msg);
+    NSLog(@"[TwitchSevenTV] %@", msg);
 
     dispatch_async(dispatch_get_main_queue(), ^{
         [[NSNotificationCenter defaultCenter]
