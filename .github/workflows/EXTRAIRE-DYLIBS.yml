@@ -21,8 +21,11 @@ jobs:
             --pattern "${{ github.event.inputs.ipa_filename }}" \
             --output Twitch_modded.ipa
           unzip -q Twitch_modded.ipa -d IPA_extracted
-          echo "=== Frameworks disponibles ==="
-          ls IPA_extracted/Payload/Twitch.app/Frameworks/
+          echo "=== Dylibs trouvées ==="
+          find IPA_extracted/ -name "*.dylib"
+          echo "=== Fin du scan ==="
+          mkdir -p dylibs_output
+          find IPA_extracted/ -name "*.dylib" -exec cp {} dylibs_output/ \;
       - name: 📤 Upload des dylibs
         uses: actions/upload-artifact@v4
         with:
