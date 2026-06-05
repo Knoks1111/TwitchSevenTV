@@ -82,6 +82,12 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
 @property (nonatomic, strong) NSArray<SevenTVEmote *> *emotePickerEmotes;
 @property (nonatomic, strong) NSArray<SevenTVEmote *> *emotePickerAllEmotes;
 
+// Favoris : IDs 7TV des emotes mise en favoris (persisté dans NSUserDefaults)
+@property (nonatomic, strong) NSMutableSet<NSString *> *favoriteEmoteIDs;
+// Arrays filtrés pour l'affichage dans le picker (2 sections)
+@property (nonatomic, strong) NSArray<SevenTVEmote *> *emotePickerFavoriteEmotes;
+@property (nonatomic, strong) NSArray<SevenTVEmote *> *emotePickerOtherEmotes;
+
 // Buffer de logs in-app
 @property (nonatomic, strong) NSMutableArray<NSString *> *logBuffer;
 @property (nonatomic, strong) NSLock *logLock;
@@ -159,6 +165,10 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
 
         _logBuffer = [NSMutableArray arrayWithCapacity:256];
         _logLock   = [[NSLock alloc] init];
+
+        _favoriteEmoteIDs        = [NSMutableSet set];
+        _emotePickerFavoriteEmotes = @[];
+        _emotePickerOtherEmotes    = @[];
 
         [self loadPreferences];
         [self ensureCacheDirectory];
@@ -377,6 +387,11 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
     if ([prefs objectForKey:@"s7tv_enabled"]  != nil) _isEnabled    = [prefs boolForKey:@"s7tv_enabled"];
     if ([prefs objectForKey:@"s7tv_animated"] != nil) _showAnimated = [prefs boolForKey:@"s7tv_animated"];
     if ([prefs objectForKey:@"s7tv_debug"]    != nil) _debugLogging = [prefs boolForKey:@"s7tv_debug"];
+    // Charger les favoris (array d'IDs 7TV)
+    NSArray *savedFavs = [prefs arrayForKey:@"s7tv_favorites"];
+    if (savedFavs) {
+        _favoriteEmoteIDs = [NSMutableSet setWithArray:savedFavs];
+    }
 }
 
 - (void)savePreferences {
@@ -384,6 +399,12 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
     [prefs setBool:self.isEnabled    forKey:@"s7tv_enabled"];
     [prefs setBool:self.showAnimated forKey:@"s7tv_animated"];
     [prefs setBool:self.debugLogging forKey:@"s7tv_debug"];
+    [prefs synchronize];
+}
+
+- (void)_saveFavorites {
+    NSUserDefaults *prefs = [NSUserDefaults standardUserDefaults];
+    [prefs setObject:self.favoriteEmoteIDs.allObjects forKey:@"s7tv_favorites"];
     [prefs synchronize];
 }
 
@@ -1120,6 +1141,7 @@ static const CGFloat kCellSize      = 72.0;
     }
     self.emotePickerAllEmotes = [all copy];
     self.emotePickerEmotes    = self.emotePickerAllEmotes;
+    [self _updatePickerArraysForSearch:@""];
 
     // ── Trouver la fenêtre clé ─────────────────────────────────────────────
     UIWindow *keyWindow = nil;
@@ -1153,7 +1175,7 @@ static const CGFloat kCellSize      = 72.0;
 
     // Reset la recherche
     self.emoteSearchField.text = @"";
-    self.emotePickerEmotes = self.emotePickerAllEmotes;
+    [self _updatePickerArraysForSearch:@""];
     [self.emoteCollectionView reloadData];
     [self.emoteCollectionView setContentOffset:CGPointZero animated:NO];
 
@@ -1270,6 +1292,7 @@ static const CGFloat kCellSize      = 72.0;
     layout.minimumInteritemSpacing = 4;
     layout.minimumLineSpacing      = 4;
     layout.sectionInset = UIEdgeInsetsMake(8, 8, 8, 8);
+    layout.headerReferenceSize = CGSizeMake(frame.size.width, 28.0);
 
     UICollectionView *cv = [[UICollectionView alloc]
         initWithFrame:CGRectMake(0, headerH, frame.size.width, kPickerHeight - headerH)
@@ -1285,7 +1308,17 @@ static const CGFloat kCellSize      = 72.0;
     cv.showsVerticalScrollIndicator   = YES;
 
     [cv registerClass:[UICollectionViewCell class] forCellWithReuseIdentifier:kEmoteCellID];
+    [cv registerClass:[UICollectionReusableView class]
+   forSupplementaryViewOfKind:UICollectionElementKindSectionHeader
+          withReuseIdentifier:@"S7TVSectionHeader"];
     self.emoteCollectionView = cv;
+
+    // Long press → mettre en favori
+    UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc]
+        initWithTarget:self action:@selector(_handleLongPressOnPicker:)];
+    lp.minimumPressDuration = 0.5;
+    [cv addGestureRecognizer:lp];
+
     [picker addSubview:cv];
 
     [window addSubview:picker];
@@ -1293,20 +1326,80 @@ static const CGFloat kCellSize      = 72.0;
 
 // ── Recherche ──────────────────────────────────────────────────────────────
 
-- (void)_emoteSearchChanged:(UITextField *)field {
-    NSString *query = [field.text stringByTrimmingCharactersInSet:
-                       [NSCharacterSet whitespaceCharacterSet]];
-    if (query.length == 0) {
-        self.emotePickerEmotes = self.emotePickerAllEmotes;
-    } else {
-        NSString *lower = query.lowercaseString;
-        self.emotePickerEmotes = [self.emotePickerAllEmotes filteredArrayUsingPredicate:
-            [NSPredicate predicateWithBlock:^BOOL(SevenTVEmote *e, NSDictionary *_) {
-                return [e.emoteName.lowercaseString containsString:lower];
-            }]];
+// ── Méthode centrale de filtrage : met à jour les 2 sections ──────────────
+
+- (void)_updatePickerArraysForSearch:(NSString *)query {
+    NSString *q = [query stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+    NSString *lower = q.lowercaseString;
+
+    NSMutableArray<SevenTVEmote *> *favs   = [NSMutableArray array];
+    NSMutableArray<SevenTVEmote *> *others = [NSMutableArray array];
+
+    for (SevenTVEmote *e in self.emotePickerAllEmotes) {
+        BOOL matches = (q.length == 0) || [e.emoteName.lowercaseString containsString:lower];
+        if (!matches) continue;
+        if ([self.favoriteEmoteIDs containsObject:e.emoteID]) {
+            [favs addObject:e];
+        } else {
+            [others addObject:e];
+        }
     }
+    self.emotePickerFavoriteEmotes = [favs copy];
+    self.emotePickerOtherEmotes    = [others copy];
+    // Maintenir emotePickerEmotes pour compatibilité
+    self.emotePickerEmotes = self.emotePickerOtherEmotes;
+}
+
+- (void)_emoteSearchChanged:(UITextField *)field {
+    NSString *query = field.text ?: @"";
+    [self _updatePickerArraysForSearch:query];
     [self.emoteCollectionView reloadData];
     [self.emoteCollectionView setContentOffset:CGPointZero animated:NO];
+}
+
+// ── Long press → toggle favori ─────────────────────────────────────────────
+
+- (void)_handleLongPressOnPicker:(UILongPressGestureRecognizer *)gr {
+    if (gr.state != UIGestureRecognizerStateBegan) return;
+
+    CGPoint pt = [gr locationInView:self.emoteCollectionView];
+    NSIndexPath *ip = [self.emoteCollectionView indexPathForItemAtPoint:pt];
+    if (!ip) return;
+
+    SevenTVEmote *emote = [self _emoteForIndexPath:ip];
+    if (!emote) return;
+
+    BOOL isFav = [self.favoriteEmoteIDs containsObject:emote.emoteID];
+    if (isFav) {
+        [self.favoriteEmoteIDs removeObject:emote.emoteID];
+        [self log:@"💔 Favori retiré : %@", emote.emoteName];
+    } else {
+        [self.favoriteEmoteIDs addObject:emote.emoteID];
+        [self log:@"⭐ Favori ajouté : %@", emote.emoteName];
+    }
+    [self _saveFavorites];
+
+    // Haptique
+    UINotificationFeedbackGenerator *haptic = [[UINotificationFeedbackGenerator alloc] init];
+    [haptic notificationOccurred:UINotificationFeedbackTypeSuccess];
+
+    // Rebuild les arrays et recharger
+    NSString *q = self.emoteSearchField.text ?: @"";
+    [self _updatePickerArraysForSearch:q];
+    [self.emoteCollectionView reloadData];
+}
+
+// ── Helper : emote à partir d'un indexPath (section 0=favs, 1=others) ──────
+
+- (SevenTVEmote *)_emoteForIndexPath:(NSIndexPath *)ip {
+    if (ip.section == 0) {
+        if ((NSUInteger)ip.item < self.emotePickerFavoriteEmotes.count)
+            return self.emotePickerFavoriteEmotes[(NSUInteger)ip.item];
+    } else {
+        if ((NSUInteger)ip.item < self.emotePickerOtherEmotes.count)
+            return self.emotePickerOtherEmotes[(NSUInteger)ip.item];
+    }
+    return nil;
 }
 
 - (void)_emotePickerCloseTapped {
@@ -1315,8 +1408,80 @@ static const CGFloat kCellSize      = 72.0;
 
 // ── UICollectionViewDataSource ─────────────────────────────────────────────
 
+- (NSInteger)numberOfSectionsInCollectionView:(UICollectionView *)cv {
+    return 2; // Section 0 = favoris, Section 1 = toutes les autres
+}
+
 - (NSInteger)collectionView:(UICollectionView *)cv numberOfItemsInSection:(NSInteger)section {
-    return (NSInteger)self.emotePickerEmotes.count;
+    if (section == 0) return (NSInteger)self.emotePickerFavoriteEmotes.count;
+    return (NSInteger)self.emotePickerOtherEmotes.count;
+}
+
+// ── Headers de section ────────────────────────────────────────────────────
+
+- (UICollectionReusableView *)collectionView:(UICollectionView *)cv
+           viewForSupplementaryElementOfKind:(NSString *)kind
+                                 atIndexPath:(NSIndexPath *)indexPath {
+    UICollectionReusableView *header = [cv dequeueReusableSupplementaryViewOfKind:kind
+                                                               withReuseIdentifier:@"S7TVSectionHeader"
+                                                                      forIndexPath:indexPath];
+    // Nettoyer
+    for (UIView *sub in header.subviews) [sub removeFromSuperview];
+
+    UIColor *sepColor  = [UIColor colorWithRed:0.25 green:0.25 blue:0.28 alpha:1.0];
+    UIColor *textColor = [UIColor colorWithRed:0.60 green:0.60 blue:0.65 alpha:1.0];
+    header.backgroundColor = [UIColor colorWithRed:0.13 green:0.13 blue:0.15 alpha:1.0];
+
+    if (indexPath.section == 0 && self.emotePickerFavoriteEmotes.count > 0) {
+        // Séparateur haut
+        UIView *topSep = [[UIView alloc] initWithFrame:CGRectMake(8, 0, cv.bounds.size.width - 16, 0.5)];
+        topSep.backgroundColor = sepColor;
+        [header addSubview:topSep];
+
+        // Label "⭐ Favoris"
+        UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(14, 4, 200, 20)];
+        lbl.text      = @"⭐  Favoris";
+        lbl.font      = [UIFont boldSystemFontOfSize:11];
+        lbl.textColor = [UIColor colorWithRed:0.95 green:0.75 blue:0.20 alpha:1.0];
+        [header addSubview:lbl];
+
+        // Séparateur bas
+        UIView *botSep = [[UIView alloc] initWithFrame:CGRectMake(8, 27.5, cv.bounds.size.width - 16, 0.5)];
+        botSep.backgroundColor = sepColor;
+        [header addSubview:botSep];
+
+    } else if (indexPath.section == 1 && self.emotePickerFavoriteEmotes.count > 0) {
+        // Séparateur entre favoris et toutes les emotes
+        UIView *topSep = [[UIView alloc] initWithFrame:CGRectMake(8, 0, cv.bounds.size.width - 16, 0.5)];
+        topSep.backgroundColor = sepColor;
+        [header addSubview:topSep];
+
+        UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(14, 4, 200, 20)];
+        lbl.text      = @"Toutes les emotes";
+        lbl.font      = [UIFont boldSystemFontOfSize:11];
+        lbl.textColor = textColor;
+        [header addSubview:lbl];
+
+        UIView *botSep = [[UIView alloc] initWithFrame:CGRectMake(8, 27.5, cv.bounds.size.width - 16, 0.5)];
+        botSep.backgroundColor = sepColor;
+        [header addSubview:botSep];
+    }
+    // Section 1 sans favoris = pas de header visible (hauteur 0 via delegate)
+
+    return header;
+}
+
+// ── Hauteur des headers (0 si inutile) ────────────────────────────────────
+
+- (CGSize)collectionView:(UICollectionView *)cv
+                  layout:(UICollectionViewLayout *)layout
+referenceSizeForHeaderInSection:(NSInteger)section {
+    if (section == 0) {
+        // Toujours visible même si vide (pour guider l'utilisateur)
+        return self.emotePickerFavoriteEmotes.count > 0 ? CGSizeMake(cv.bounds.size.width, 28) : CGSizeZero;
+    }
+    // Section 1 : header "Toutes les emotes" seulement si favoris non vides
+    return self.emotePickerFavoriteEmotes.count > 0 ? CGSizeMake(cv.bounds.size.width, 28) : CGSizeZero;
 }
 
 - (UICollectionViewCell *)collectionView:(UICollectionView *)cv
@@ -1332,7 +1497,8 @@ static const CGFloat kCellSize      = 72.0;
     // Nettoyer la cellule recyclée
     for (UIView *sub in cell.contentView.subviews) [sub removeFromSuperview];
 
-    SevenTVEmote *emote = self.emotePickerEmotes[(NSUInteger)indexPath.item];
+    SevenTVEmote *emote = [self _emoteForIndexPath:indexPath];
+    if (!emote) return cell;
 
     // Image — centrée, occupe ~75% de la cellule
     CGFloat imgSize = kCellSize * 0.62;
@@ -1352,6 +1518,15 @@ static const CGFloat kCellSize      = 72.0;
     lbl.textColor     = [UIColor colorWithRed:0.70 green:0.70 blue:0.75 alpha:1.0];
     lbl.lineBreakMode = NSLineBreakByTruncatingTail;
     [cell.contentView addSubview:lbl];
+
+    // Étoile ⭐ en haut à droite si favori (section 0 = toujours favori)
+    if (indexPath.section == 0) {
+        UILabel *star = [[UILabel alloc] initWithFrame:CGRectMake(kCellSize - 14, 2, 12, 12)];
+        star.text      = @"⭐";
+        star.font      = [UIFont systemFontOfSize:8];
+        star.textAlignment = NSTextAlignmentCenter;
+        [cell.contentView addSubview:star];
+    }
 
     // Charger l'image STATIQUEMENT (pas d'animation dans le picker → pas de lag)
     NSURL *emoteURL = [self cdnURLForEmote:emote];
@@ -1390,7 +1565,8 @@ static const CGFloat kCellSize      = 72.0;
 // ── UICollectionViewDelegate ───────────────────────────────────────────────
 
 - (void)collectionView:(UICollectionView *)cv didSelectItemAtIndexPath:(NSIndexPath *)indexPath {
-    SevenTVEmote *emote = self.emotePickerEmotes[(NSUInteger)indexPath.item];
+    SevenTVEmote *emote = [self _emoteForIndexPath:indexPath];
+    if (!emote) return;
 
     // Insérer le nom de l'emote dans le champ texte de la ChatInputView
     UIView *inputRoot = self.emotePickerTextField;

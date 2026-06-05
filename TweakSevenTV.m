@@ -45,6 +45,7 @@
 #import <ImageIO/ImageIO.h>
 #import "SevenTVManager.h"
 #import "SevenTVURLProtocol.h"
+#import "SevenTVLogo.h"
 
 
 // ────────────────────────────────────────────────────────────
@@ -636,38 +637,12 @@ static const char kS7TVBitsHijacked    = 6;
                 }
             }
 
-            // 2. Remplacer l'image par le texte "7TV" stylé (blanc gras, fond transparent)
-            //    → on crée une UIImage à partir d'un label rendu en bitmap
-            UIColor *purple = [UIColor colorWithRed:0.55 green:0.25 blue:0.95 alpha:1.0];
-
-            // Générer une image "7TV" texte blanc gras sur fond transparent
-            CGFloat iconSize = 28.0;
-            UIGraphicsBeginImageContextWithOptions(CGSizeMake(iconSize, iconSize), NO, 0);
-            // Fond arrondi très sombre (optionnel, comme dans le screenshot)
-            UIBezierPath *bg = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(1,4,iconSize-2,iconSize-8)
-                                                          cornerRadius:4];
-            [[UIColor colorWithWhite:0 alpha:0.0] setFill];
-            [bg fill];
-            // Texte "7TV" — "7" légèrement plus petit, "TV" normal
-            NSMutableAttributedString *aStr = [[NSMutableAttributedString alloc]
-                initWithString:@"7"
-                    attributes:@{
-                        NSFontAttributeName: [UIFont boldSystemFontOfSize:13],
-                        NSForegroundColorAttributeName: [UIColor whiteColor]
-                    }];
-            [aStr appendAttributedString:[[NSAttributedString alloc]
-                initWithString:@"TV"
-                    attributes:@{
-                        NSFontAttributeName: [UIFont boldSystemFontOfSize:11],
-                        NSForegroundColorAttributeName: [UIColor whiteColor]
-                    }]];
-            CGSize textSize = [aStr size];
-            CGRect textRect = CGRectMake((iconSize - textSize.width) / 2.0,
-                                         (iconSize - textSize.height) / 2.0,
-                                         textSize.width, textSize.height);
-            [aStr drawInRect:textRect];
-            UIImage *icon7tv = UIGraphicsGetImageFromCurrentImageContext();
-            UIGraphicsEndImageContext();
+            // 2. Remplacer l'image par le vrai logo 7TV (PNG transparent, encodé en base64)
+            NSData *logoData = [[NSData alloc]
+                initWithBase64EncodedString:kS7TVLogoBase64
+                                   options:NSDataBase64DecodingIgnoreUnknownCharacters];
+            // scale:2.0 → le PNG fait 56 px = 28 pt @2x
+            UIImage *icon7tv = [UIImage imageWithData:logoData scale:2.0];
 
             if (icon7tv) {
                 for (NSNumber *stateNum in @[@(UIControlStateNormal),
@@ -676,7 +651,8 @@ static const char kS7TVBitsHijacked    = 6;
                                              @(UIControlStateDisabled)]) {
                     [bitsBtn setImage:icon7tv forState:stateNum.unsignedIntegerValue];
                 }
-                // Pas de tint (l'image est déjà en couleur native)
+                bitsBtn.imageView.contentMode = UIViewContentModeScaleAspectFit;
+                // Pas de tint forcé : l'image garde ses vraies couleurs holographiques
                 bitsBtn.tintColor = [UIColor whiteColor];
             }
 
