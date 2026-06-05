@@ -1197,7 +1197,7 @@ static const CGFloat kCellSize      = 40.0;
     // ── Créer le picker si besoin ─────────────────────────────────────
     CGRect pickerFrame = CGRectMake(0, 0, UIScreen.mainScreen.bounds.size.width, kPickerHeight);
     if (!self.emotePickerView) {
-        [self _createEmotePickerViewWithFrame:pickerFrame inWindow:nil];
+        [self _createEmotePickerViewWithFrame:pickerFrame];
     }
     self.emotePickerView.frame = pickerFrame;
 
@@ -1235,7 +1235,7 @@ static const CGFloat kCellSize      = 40.0;
         }
     }
 }
- (void)_createEmotePickerViewWithFrame:(CGRect)frame inWindow:(UIWindow *)window {
+- (void)_createEmotePickerViewWithFrame:(CGRect)frame {
 
     // ── Couleurs dans le style Twitch dark ─────────────────────────────────
     UIColor *bgColor     = [UIColor colorWithRed:0.13 green:0.13 blue:0.15 alpha:1.0]; // #211F26
