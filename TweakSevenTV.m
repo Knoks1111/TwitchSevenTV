@@ -645,6 +645,18 @@ static const char kS7TVBitsHijacked    = 6;
             UIImage *icon7tv = [UIImage imageWithData:logoData scale:2.0];
 
             if (icon7tv) {
+                // Redimensionner le logo pour correspondre à la taille du bouton Emote natif
+                CGFloat targetH = emoticonBtn
+                    ? MIN(emoticonBtn.bounds.size.height, emoticonBtn.bounds.size.width) * 0.75
+                    : 22.0;
+                if (targetH < 14) targetH = 22.0;
+                CGFloat targetW = targetH * (icon7tv.size.width / MAX(icon7tv.size.height, 1.0));
+                UIGraphicsBeginImageContextWithOptions(CGSizeMake(targetW, targetH), NO, [UIScreen mainScreen].scale);
+                [icon7tv drawInRect:CGRectMake(0, 0, targetW, targetH)];
+                UIImage *resizedIcon = UIGraphicsGetImageFromCurrentImageContext();
+                UIGraphicsEndImageContext();
+                if (resizedIcon) icon7tv = resizedIcon;
+
                 for (NSNumber *stateNum in @[@(UIControlStateNormal),
                                              @(UIControlStateHighlighted),
                                              @(UIControlStateSelected),

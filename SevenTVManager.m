@@ -1097,10 +1097,10 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
 // ID de cellule pour la collection
 static NSString *const kEmoteCellID = @"S7TVEmoteCell";
 
-// Hauteur du picker (plus grand pour voir plus d'emotes)
+// Hauteur du picker
 static const CGFloat kPickerHeight  = 280.0;
-// Taille de chaque cellule (carré)
-static const CGFloat kCellSize      = 72.0;
+// Taille de chaque cellule par défaut (carré)
+static const CGFloat kCellSize      = 40.0;
 
 - (void)toggleEmotePickerForChatInputView:(UIView *)chatInputView {
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -1295,16 +1295,17 @@ static const CGFloat kCellSize      = 72.0;
     UICollectionViewFlowLayout *layout = [[UICollectionViewFlowLayout alloc] init];
     layout.scrollDirection        = UICollectionViewScrollDirectionVertical;
     layout.itemSize               = CGSizeMake(kCellSize, kCellSize);
-    layout.minimumInteritemSpacing = 2;
-    layout.minimumLineSpacing      = 2;
-    layout.sectionInset = UIEdgeInsetsMake(4, 6, 4, 6);
+    layout.minimumInteritemSpacing = 1;
+    layout.minimumLineSpacing      = 1;
+    layout.sectionInset = UIEdgeInsetsMake(2, 2, 2, 2);
     layout.headerReferenceSize = CGSizeMake(frame.size.width, 28.0);
     // itemSize est géré via collectionView:layout:sizeForItemAtIndexPath:
 
     UICollectionView *cv = [[UICollectionView alloc]
         initWithFrame:CGRectMake(0, headerH, frame.size.width, kPickerHeight - headerH)
  collectionViewLayout:layout];
-    cv.backgroundColor        = bgColor;
+    // Le fond du cv sert de "mini bordure" entre les cellules transparentes
+    cv.backgroundColor        = sepColor;
     cv.autoresizingMask       = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     cv.dataSource             = (id<UICollectionViewDataSource>)self;
     cv.delegate               = (id<UICollectionViewDelegate>)self;
@@ -1488,8 +1489,8 @@ static const CGFloat kCellSize      = 72.0;
 
 // ── Taille dynamique des cellules selon ratio de l'emote ─────────────────
 
-static const CGFloat kCellMaxSize = 64.0; // dimension max (hauteur ou largeur)
-static const CGFloat kCellMinSize = 44.0; // dimension min
+static const CGFloat kCellMaxSize = 36.0; // dimension max
+static const CGFloat kCellMinSize = 22.0; // dimension min
 
 - (CGSize)collectionView:(UICollectionView *)cv
                   layout:(UICollectionViewLayout *)layout
@@ -1512,8 +1513,8 @@ static const CGFloat kCellMinSize = 44.0; // dimension min
     // Assurer une taille minimale
     w = MAX(w, kCellMinSize);
     h = MAX(h, kCellMinSize);
-    // +16 pour le label en bas
-    return CGSizeMake(ceil(w), ceil(h) + 16.0);
+    // Pas de +16 : plus de label de nom
+    return CGSizeMake(ceil(w), ceil(h));
 }
 
 // ── Hauteur des headers (0 si inutile) ────────────────────────────────────
@@ -1534,9 +1535,9 @@ referenceSizeForHeaderInSection:(NSInteger)section {
     UICollectionViewCell *cell = [cv dequeueReusableCellWithReuseIdentifier:kEmoteCellID
                                                                 forIndexPath:indexPath];
 
-    // Fond sombre style Twitch, coins arrondis légers
-    cell.backgroundColor = [UIColor colorWithRed:0.18 green:0.18 blue:0.21 alpha:1.0];
-    cell.layer.cornerRadius = 6;
+    // Transparent — le fond du cv (sepColor) crée les mini bordures
+    cell.backgroundColor = [UIColor colorWithRed:0.13 green:0.13 blue:0.15 alpha:1.0];
+    cell.layer.cornerRadius = 0;
     cell.clipsToBounds = YES;
 
     // Nettoyer la cellule recyclée
@@ -1545,34 +1546,23 @@ referenceSizeForHeaderInSection:(NSInteger)section {
     SevenTVEmote *emote = [self _emoteForIndexPath:indexPath];
     if (!emote) return cell;
 
-    // Taille réelle de la cellule (après sizeForItemAtIndexPath)
+    // Taille réelle de la cellule
     CGSize cs = cell.bounds.size;
-    if (cs.width < 1) cs = CGSizeMake(kCellSize, kCellSize + 16); // sécurité
+    if (cs.width < 1) cs = CGSizeMake(kCellSize, kCellSize);
 
-    CGFloat lblH = 13.0;
-    CGFloat imgAreaH = cs.height - lblH - 2.0;
-
-    // Image : aspect fit dans la zone image
-    UIImageView *iv = [[UIImageView alloc] initWithFrame:CGRectMake(0, 2, cs.width, imgAreaH - 2)];
+    // Image remplit toute la cellule (avec un tout petit inset)
+    UIImageView *iv = [[UIImageView alloc] initWithFrame:CGRectMake(1, 1, cs.width - 2, cs.height - 2)];
     iv.contentMode = UIViewContentModeScaleAspectFit;
     [cell.contentView addSubview:iv];
 
-    // Label nom — en bas de la cellule
-    UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(1, cs.height - lblH - 1, cs.width - 2, lblH)];
-    lbl.text          = emote.emoteName;
-    lbl.font          = [UIFont systemFontOfSize:8.0];
-    lbl.textAlignment = NSTextAlignmentCenter;
-    lbl.textColor     = [UIColor colorWithRed:0.70 green:0.70 blue:0.75 alpha:1.0];
-    lbl.lineBreakMode = NSLineBreakByTruncatingTail;
-    [cell.contentView addSubview:lbl];
-
-    // Étoile favoris (section 0) : SF Symbol discret, semi-transparent
+    // Étoile favoris (section 0) : petite étoile violette discrète
     if (indexPath.section == 0) {
-        UIImageView *star = [[UIImageView alloc] initWithFrame:CGRectMake(cs.width - 13, 2, 11, 11)];
+        UIImageView *star = [[UIImageView alloc] initWithFrame:CGRectMake(cs.width - 9, 1, 8, 8)];
         UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration
-            configurationWithPointSize:8 weight:UIImageSymbolWeightMedium];
+            configurationWithPointSize:6 weight:UIImageSymbolWeightMedium];
         star.image = [UIImage systemImageNamed:@"star.fill" withConfiguration:cfg];
-        star.tintColor = [[UIColor whiteColor] colorWithAlphaComponent:0.35];
+        star.tintColor = [[UIColor colorWithRed:0.60 green:0.35 blue:1.0 alpha:1.0]
+                          colorWithAlphaComponent:0.7];
         [cell.contentView addSubview:star];
     }
 
@@ -1616,9 +1606,9 @@ referenceSizeForHeaderInSection:(NSInteger)section {
     SevenTVEmote *emote = [self _emoteForIndexPath:indexPath];
     if (!emote) return;
 
-    // Insérer l'emote dans le champ texte de Twitch.
-    // On utilise insertText: (UIKeyInput) qui respecte le curseur et
-    // déclenche correctement les bindings SwiftUI de Twitch.
+    // Insérer l'emote dans le champ texte SANS ouvrir le clavier.
+    // On manipule directement la propriété .text puis on envoie la
+    // notification de changement pour que Twitch (SwiftUI) détecte la modif.
     UIView *inputRoot = self.emotePickerTextField;
     if (inputRoot) {
         // BFS illimité : UITextView en priorité, UITextField en fallback
@@ -1632,21 +1622,39 @@ referenceSizeForHeaderInSection:(NSInteger)section {
         }
 
         if (textInput) {
-            // S'assurer que le champ est actif
-            if (![textInput isFirstResponder]) [textInput becomeFirstResponder];
-
-            // Espace de séparation si nécessaire
+            // Lire le texte actuel
             NSString *currentText = @"";
             if ([textInput isKindOfClass:[UITextView class]])
                 currentText = ((UITextView *)textInput).text ?: @"";
             else
                 currentText = ((UITextField *)textInput).text ?: @"";
 
+            // Ajouter un espace séparateur si nécessaire
             NSString *prefix = (currentText.length > 0 && ![currentText hasSuffix:@" "]) ? @" " : @"";
-            NSString *toInsert = [NSString stringWithFormat:@"%@%@ ", prefix, emote.emoteName];
+            NSString *newText = [NSString stringWithFormat:@"%@%@%@ ", currentText, prefix, emote.emoteName];
 
-            // insertText: respecte la position du curseur et déclenche SwiftUI
-            [(id<UIKeyInput>)textInput insertText:toInsert];
+            // Écrire directement sans becomeFirstResponder (pas d'ouverture clavier)
+            if ([textInput isKindOfClass:[UITextView class]]) {
+                UITextView *tv = (UITextView *)textInput;
+                tv.text = newText;
+                // Curseur en fin de texte
+                tv.selectedRange = NSMakeRange(newText.length, 0);
+                // Notifier Twitch du changement (SwiftUI binding)
+                [[NSNotificationCenter defaultCenter]
+                    postNotificationName:UITextViewTextDidChangeNotification
+                                  object:tv];
+                // Aussi tenter le delegate au cas où Twitch l'écoute
+                if ([tv.delegate respondsToSelector:@selector(textViewDidChange:)])
+                    [tv.delegate textViewDidChange:tv];
+            } else if ([textInput isKindOfClass:[UITextField class]]) {
+                UITextField *tf = (UITextField *)textInput;
+                tf.text = newText;
+                // Notifier Twitch du changement
+                [tf sendActionsForControlEvents:UIControlEventEditingChanged];
+                [[NSNotificationCenter defaultCenter]
+                    postNotificationName:UITextFieldTextDidChangeNotification
+                                  object:tf];
+            }
             [self log:@"\u2328\ufe0f Emote insérée : \u00ab%@\u00bb dans %@",
              emote.emoteName, NSStringFromClass([textInput class])];
         } else {
@@ -1659,7 +1667,7 @@ referenceSizeForHeaderInSection:(NSInteger)section {
         initWithStyle:UIImpactFeedbackStyleLight];
     [haptic impactOccurred];
 
-    [self _hideEmotePicker];
+    // NE PAS fermer le picker → l'utilisateur peut insérer plusieurs emotes
 }
 
 
