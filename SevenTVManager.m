@@ -1448,13 +1448,14 @@ static const char kS7TVTaskKey = 0;
 }
 - (void)_createEmotePickerViewWithFrame:(CGRect)frame {
 
-    // ── Couleurs dans le style Twitch dark ─────────────────────────────────
-    UIColor *bgColor     = [UIColor colorWithRed:0.13 green:0.13 blue:0.15 alpha:1.0]; // #211F26
-    UIColor *headerColor = [UIColor colorWithRed:0.10 green:0.10 blue:0.12 alpha:1.0]; // plus sombre
-    UIColor *sepColor    = [UIColor colorWithRed:0.25 green:0.25 blue:0.28 alpha:1.0];
+    // ── Couleurs alignées sur la palette des paramètres 7TV ───────────────
+    // Identiques à S7TVBg(), S7TVCellBg(), S7TVAccent(), S7TVGray()
+    UIColor *bgColor     = [UIColor colorWithRed:0.055 green:0.055 blue:0.063 alpha:1.0]; // #0E0E10 — S7TVBg
+    UIColor *headerColor = [UIColor colorWithRed:0.122 green:0.122 blue:0.137 alpha:1.0]; // #1F1F23 — S7TVCellBg
+    UIColor *sepColor    = [UIColor colorWithRed:0.165 green:0.165 blue:0.180 alpha:1.0]; // #2A2A2E — séparateur Twitch
     UIColor *textColor   = [UIColor whiteColor];
-    UIColor *subColor    = [UIColor colorWithRed:0.60 green:0.60 blue:0.65 alpha:1.0];
-    UIColor *searchBg    = [UIColor colorWithRed:0.20 green:0.20 blue:0.23 alpha:1.0];
+    UIColor *subColor    = [UIColor colorWithWhite:0.55 alpha:1.0];                        // S7TVGray
+    UIColor *searchBg    = [UIColor colorWithRed:0.122 green:0.122 blue:0.137 alpha:1.0]; // #1F1F23 — S7TVCellBg
 
     // ── Conteneur principal ────────────────────────────────────────────────
     UIView *picker = [[UIView alloc] initWithFrame:frame];
@@ -1700,9 +1701,9 @@ static const char kS7TVTaskKey = 0;
     // Nettoyer
     for (UIView *sub in header.subviews) [sub removeFromSuperview];
 
-    UIColor *sepColor  = [UIColor colorWithRed:0.25 green:0.25 blue:0.28 alpha:1.0];
-    UIColor *textColor = [UIColor colorWithRed:0.60 green:0.60 blue:0.65 alpha:1.0];
-    header.backgroundColor = [UIColor colorWithRed:0.13 green:0.13 blue:0.15 alpha:1.0];
+    UIColor *sepColor  = [UIColor colorWithRed:0.165 green:0.165 blue:0.180 alpha:1.0]; // #2A2A2E — séparateur Twitch
+    UIColor *textColor = [UIColor colorWithWhite:0.55 alpha:1.0];                        // S7TVGray
+    header.backgroundColor = [UIColor colorWithRed:0.055 green:0.055 blue:0.063 alpha:1.0]; // #0E0E10 — S7TVBg
 
     if (indexPath.section == 0 && self.emotePickerFavoriteEmotes.count > 0) {
         // Séparateur haut
@@ -1807,15 +1808,15 @@ referenceSizeForHeaderInSection:(NSInteger)section {
     UICollectionViewCell *cell = [cv dequeueReusableCellWithReuseIdentifier:kEmoteCellID
                                                                 forIndexPath:indexPath];
 
-    UIColor *cellBg = [UIColor colorWithRed:0.13 green:0.13 blue:0.15 alpha:1.0];
+    UIColor *cellBg = [UIColor colorWithRed:0.055 green:0.055 blue:0.063 alpha:1.0]; // #0E0E10 — S7TVBg
     cell.backgroundColor     = cellBg;
     cell.clipsToBounds        = YES;
     cell.layer.cornerRadius   = 0;
 
-    // ── Bordure 1 pixel physique BLANCHE autour de chaque cellule ─────────────
+    // ── Bordure 1 pixel physique séparateur Twitch autour de chaque cellule ──
     CGFloat onePixel = 1.0 / [UIScreen mainScreen].scale;
     cell.layer.borderWidth = onePixel;
-    cell.layer.borderColor = [UIColor whiteColor].CGColor;
+    cell.layer.borderColor = [UIColor colorWithRed:0.165 green:0.165 blue:0.180 alpha:1.0].CGColor; // #2A2A2E
 
     // ── Annuler la tâche réseau de la cellule recyclée ─────────────────────
     // Sans ça, une cellule recyclée peut afficher une image obsolète
