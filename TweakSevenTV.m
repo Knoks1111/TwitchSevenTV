@@ -544,18 +544,33 @@ static const char kS7TVAttachDuration = 4;
 
 
 // ────────────────────────────────────────────────────────────
-// MARK: - Injection bouton 7TV dans la barre de saisie Twitch
+// MARK: - Hijack du bouton Bits → bouton 7TV
 //
-// Stratégie: hook sur NSObject.didMoveToWindow.
-// Dès qu'une vue "Twitch.ChatInputView" apparaît dans la hiérarchie,
-// on cherche le ChatInputViewEmoticonButton pour se positionner
-// juste à sa gauche, et on injecte notre bouton violet.
+// Stratégie (déduite des logs de diagnostic) :
 //
-// kS7TVTextFieldTagged posé sur ChatInputView (guard anti-doublon)
-// ET sur le bouton (pour retrouver la ChatInputView au tap).
+//   Twitch.ChatInputView contient, dans un UIView container, ces boutons:
+//     • Twitch.ChatInputViewBitsButton      accID='chat_input_bits_button'
+//     • Twitch.ChatInputViewEmoticonButton  accID='chat_input_emoticon_button'
+//     • TwitchCoreUI.MinimumHitAreaButton   accID='chat_settings_button'
+//
+//   On NE crée PAS de nouveau bouton. On RÉUTILISE ChatInputViewBitsButton :
+//     1. Remplacer son image par l'icône 7TV sparkles + tint violet
+//     2. Remplacer son accessibilityLabel par "7TV Emotes"
+//     3. Retirer l'action originale (bitsButtonTapped) et brancher la nôtre
+//     4. Stocker la référence à ChatInputView pour le picker
+//
+//   Avantages : position native, frame native, layout Twitch inchangé,
+//   visible uniquement si Twitch décide de montrer le bouton Bits.
+//
+//   Fallback : si Bits introuvable (streamer sans Bits), on injecte
+//   un bouton à gauche du bouton Emote comme avant.
+//
+// kS7TVTextFieldTagged : guard anti-doublon sur ChatInputView
+// kS7TVBitsHijacked    : marqueur posé sur le ChatInputViewBitsButton hijacké
 // ────────────────────────────────────────────────────────────
 
 static const char kS7TVTextFieldTagged = 5;
+static const char kS7TVBitsHijacked    = 6;
 
 @interface UIView (S7TVChatInputHook)
 - (void)s7tv_didMoveToWindow;
@@ -567,132 +582,151 @@ static const char kS7TVTextFieldTagged = 5;
     [self s7tv_didMoveToWindow]; // appel original
 
     // Filtrer : seule Twitch.ChatInputView nous intéresse
-    if (![NSStringFromClass([self class]) isEqualToString:@"Twitch.ChatInputView"]) return;
+    NSString *selfClass = NSStringFromClass([self class]);
+    if (![selfClass isEqualToString:@"Twitch.ChatInputView"]) return;
     UIView *chatInputView = self;
 
-    // Guard anti-doublon : on ne touche cette vue qu'une seule fois
+    // Guard anti-doublon
     if (objc_getAssociatedObject(chatInputView, &kS7TVTextFieldTagged)) return;
     objc_setAssociatedObject(chatInputView, &kS7TVTextFieldTagged, @YES,
                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
-    // Attendre que le layout soit finalisé avant de chercher les sous-vues
+    // Attendre que le layout Twitch soit finalisé
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
 
-        // ── 1. Chercher ChatInputViewEmoticonButton RÉCURSIVEMENT ─────────────
-        // On ne peut pas compter sur les frames au moment de didMoveToWindow
-        // (layout pas encore finalisé). On cherche par nom de classe dans
-        // toute la hiérarchie de chatInputView.
-        __block UIView *emoticonBtn = nil;
+        SevenTVManager *mgr = [SevenTVManager sharedManager];
+
+        // ── BFS : chercher ChatInputViewBitsButton ET EmoticonButton ─────────
+        __block UIButton *bitsBtn     = nil;
+        __block UIView   *emoticonBtn = nil;
         NSMutableArray<UIView *> *bfs = [NSMutableArray arrayWithArray:chatInputView.subviews];
-        while (bfs.count > 0 && !emoticonBtn) {
+        while (bfs.count > 0) {
             UIView *v = bfs.firstObject; [bfs removeObjectAtIndex:0];
+            [bfs addObjectsFromArray:v.subviews];
             NSString *cn = NSStringFromClass([v class]);
+            if ([cn containsString:@"BitsButton"] || [cn containsString:@"bitsButton"] ||
+                [[v accessibilityIdentifier] isEqualToString:@"chat_input_bits_button"]) {
+                bitsBtn = (UIButton *)v;
+            }
             if ([cn containsString:@"Emoticon"] || [cn containsString:@"emoticon"]) {
                 emoticonBtn = v;
+            }
+            if (bitsBtn && emoticonBtn) break;
+        }
+
+        // ── CAS A : Bouton Bits trouvé → HIJACK ──────────────────────────────
+        if (bitsBtn && ![objc_getAssociatedObject(bitsBtn, &kS7TVBitsHijacked) boolValue]) {
+
+            // Marquer comme hijacké (guard re-entrée)
+            objc_setAssociatedObject(bitsBtn, &kS7TVBitsHijacked, @YES,
+                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+            // 1. Retirer TOUTES les actions Twitch sur TouchUpInside
+            NSSet *targets = [bitsBtn allTargets];
+            for (id tgt in targets) {
+                NSArray *actions = [bitsBtn actionsForTarget:tgt
+                                            forControlEvent:UIControlEventTouchUpInside];
+                for (NSString *action in actions) {
+                    [bitsBtn removeTarget:tgt
+                                   action:NSSelectorFromString(action)
+                         forControlEvents:UIControlEventTouchUpInside];
+                    [mgr log:@"🔌 Bits: action retirée — %@->%@",
+                     NSStringFromClass([tgt class]), action];
+                }
+            }
+
+            // 2. Remplacer l'image par l'icône 7TV (sparkles violet)
+            UIImageSymbolConfiguration *symCfg = [UIImageSymbolConfiguration
+                configurationWithPointSize:16 weight:UIImageSymbolWeightMedium];
+            UIImage *icon7tv = [UIImage systemImageNamed:@"sparkles"
+                                        withConfiguration:symCfg];
+            UIColor *purple = [UIColor colorWithRed:0.55 green:0.25 blue:0.95 alpha:1.0];
+
+            if (icon7tv) {
+                // Remplacer pour tous les états
+                for (NSNumber *stateNum in @[@(UIControlStateNormal),
+                                             @(UIControlStateHighlighted),
+                                             @(UIControlStateSelected),
+                                             @(UIControlStateDisabled)]) {
+                    [bitsBtn setImage:icon7tv forState:stateNum.unsignedIntegerValue];
+                }
+                bitsBtn.tintColor = purple;
+            }
+
+            // 3. Accessibilité
+            bitsBtn.accessibilityLabel = @"7TV Emotes";
+
+            // 4. Stocker la référence ChatInputView pour le picker
+            objc_setAssociatedObject(bitsBtn, &kS7TVTextFieldTagged, chatInputView,
+                                     OBJC_ASSOCIATION_ASSIGN);
+
+            // 5. Brancher notre action
+            [bitsBtn addTarget:mgr
+                        action:@selector(s7tv_emoteButtonTappedForButton:)
+              forControlEvents:UIControlEventTouchUpInside];
+
+            [mgr log:@"✅ Bouton Bits hijacké → 7TV (frame=%.0f,%.0f,%.0f,%.0f)",
+             bitsBtn.frame.origin.x, bitsBtn.frame.origin.y,
+             bitsBtn.frame.size.width, bitsBtn.frame.size.height];
+
+        // ── CAS B : Pas de bouton Bits → Fallback: injecter à gauche de Emote ─
+        } else if (!bitsBtn) {
+
+            [mgr log:@"⚠️ ChatInputViewBitsButton introuvable — fallback injection"];
+
+            UIView *target = emoticonBtn.superview ?: chatInputView;
+
+            // Guard anti-doublon sur le tag 0x7777
+            for (UIView *sub in target.subviews) {
+                if (sub.tag == 0x7777) return;
+            }
+
+            UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
+            btn.tag = 0x7777;
+
+            UIImageSymbolConfiguration *symCfg = [UIImageSymbolConfiguration
+                configurationWithPointSize:15 weight:UIImageSymbolWeightMedium];
+            UIImage *icon = [UIImage systemImageNamed:@"sparkles" withConfiguration:symCfg];
+            UIColor *purple = [UIColor colorWithRed:0.55 green:0.25 blue:0.95 alpha:1.0];
+
+            if (icon) {
+                [btn setImage:icon forState:UIControlStateNormal];
+                btn.tintColor = purple;
             } else {
-                [bfs addObjectsFromArray:v.subviews];
+                [btn setTitle:@"7TV" forState:UIControlStateNormal];
+                [btn setTitleColor:purple forState:UIControlStateNormal];
+                btn.titleLabel.font = [UIFont boldSystemFontOfSize:10];
             }
-        }
 
-        // ── 2. Le container est le superview direct de l'emoticonBtn ─────────
-        // D'après les logs : UIView frame=(60,8,274,40) dans ChatInputView
-        UIView *target = emoticonBtn.superview ?: chatInputView;
+            CGFloat btnSize = 36.0;
+            CGFloat btnX = emoticonBtn
+                ? (emoticonBtn.frame.origin.x - btnSize - 4.0)
+                : MAX(0, target.frame.size.width - btnSize - 4.0);
+            CGFloat btnY = emoticonBtn
+                ? (emoticonBtn.frame.origin.y + (emoticonBtn.frame.size.height - btnSize) / 2.0)
+                : (target.frame.size.height - btnSize) / 2.0;
+            if (btnX < 0) btnX = 0;
 
-        // Vérifier qu'on n'a pas déjà le bouton (protection re-entrante)
-        for (UIView *sub in target.subviews) {
-            if (sub.tag == 0x7777) return;
-        }
+            btn.frame = CGRectMake(btnX, btnY, btnSize, btnSize);
+            btn.autoresizingMask = UIViewAutoresizingFlexibleRightMargin
+                                 | UIViewAutoresizingFlexibleTopMargin
+                                 | UIViewAutoresizingFlexibleBottomMargin;
 
-        // ── 3. Créer le bouton 7TV ────────────────────────────────────────────
-        UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
-        btn.tag = 0x7777;
+            objc_setAssociatedObject(btn, &kS7TVTextFieldTagged, chatInputView,
+                                     OBJC_ASSOCIATION_ASSIGN);
+            [btn addTarget:mgr
+                    action:@selector(s7tv_emoteButtonTappedForButton:)
+          forControlEvents:UIControlEventTouchUpInside];
 
-        UIImageSymbolConfiguration *symCfg = [UIImageSymbolConfiguration
-            configurationWithPointSize:15 weight:UIImageSymbolWeightMedium];
-        UIImage *icon = [UIImage systemImageNamed:@"sparkles" withConfiguration:symCfg];
-        if (icon) {
-            [btn setImage:icon forState:UIControlStateNormal];
-            btn.tintColor = [UIColor colorWithRed:0.55 green:0.25 blue:0.95 alpha:1.0];
+            [target addSubview:btn];
+            [target bringSubviewToFront:btn];
+
+            [mgr log:@"🎹 Bouton 7TV fallback injecté — x=%.0f y=%.0f", btnX, btnY];
+
         } else {
-            [btn setTitle:@"7TV" forState:UIControlStateNormal];
-            [btn setTitleColor:[UIColor colorWithRed:0.55 green:0.25 blue:0.95 alpha:1.0]
-                      forState:UIControlStateNormal];
-            btn.titleLabel.font = [UIFont boldSystemFontOfSize:10];
+            [mgr log:@"ℹ️ Bouton Bits déjà hijacké, rien à faire"];
         }
-
-        // ── 4. Positionner à gauche du bouton emote Twitch ────────────────────
-        CGFloat btnSize = 36.0;
-        CGFloat btnX, btnY;
-
-        if (emoticonBtn) {
-            btnX = emoticonBtn.frame.origin.x - btnSize - 4.0;
-            btnY = emoticonBtn.frame.origin.y
-                 + (emoticonBtn.frame.size.height - btnSize) / 2.0;
-        } else {
-            btnX = MAX(0, target.frame.size.width - btnSize - 4.0);
-            btnY = (target.frame.size.height - btnSize) / 2.0;
-        }
-        if (btnX < 0) btnX = 0;
-
-        btn.frame = CGRectMake(btnX, btnY, btnSize, btnSize);
-        btn.autoresizingMask = UIViewAutoresizingFlexibleRightMargin
-                             | UIViewAutoresizingFlexibleTopMargin
-                             | UIViewAutoresizingFlexibleBottomMargin;
-
-        // Stocker la référence à chatInputView (pour l'insertion de texte)
-        objc_setAssociatedObject(btn, &kS7TVTextFieldTagged, chatInputView,
-                                 OBJC_ASSOCIATION_ASSIGN);
-
-        [btn addTarget:[SevenTVManager sharedManager]
-                action:@selector(s7tv_emoteButtonTappedForButton:)
-      forControlEvents:UIControlEventTouchUpInside];
-
-        [target addSubview:btn];
-        [target bringSubviewToFront:btn];
-
-        [[SevenTVManager sharedManager]
-            log:@"🎹 Bouton 7TV injecté — target:%@ emoticonBtn:%@ x=%.0f y=%.0f",
-            NSStringFromClass([target class]),
-            emoticonBtn ? NSStringFromClass([emoticonBtn class]) : @"(introuvable)",
-            btnX, btnY];
-
-        // ── DIAGNOSTIC: Scanner TOUS les boutons de ChatInputView ─────────────
-        SevenTVManager *mgr2 = [SevenTVManager sharedManager];
-        [mgr2 log:@"🔎 Scan des boutons dans ChatInputView:"];
-        NSMutableArray<UIView *> *scanQ = [NSMutableArray arrayWithArray:chatInputView.subviews];
-        NSInteger btnIdx = 0;
-        while (scanQ.count > 0) {
-            UIView *sv = scanQ.firstObject; [scanQ removeObjectAtIndex:0];
-            [scanQ addObjectsFromArray:sv.subviews];
-
-            NSString *cls      = NSStringFromClass([sv class]);
-            NSString *accLabel = sv.accessibilityLabel ?: @"";
-            NSString *accID    = sv.accessibilityIdentifier ?: @"";
-
-            if ([sv isKindOfClass:[UIButton class]]) {
-                UIButton *b = (UIButton *)sv;
-                btnIdx++;
-                NSString *titleN = [b titleForState:UIControlStateNormal] ?: @"";
-                NSString *titleS = [b titleForState:UIControlStateSelected] ?: @"";
-                UIImage  *imgN   = [b imageForState:UIControlStateNormal];
-                UIImage  *imgBg  = [b backgroundImageForState:UIControlStateNormal];
-                [mgr2 log:@"  BTN[%ld] %@ frame=(%.0f,%.0f,%.0f,%.0f) tag=%ld title='%@'/'%@' img=%@ bg=%@ accLabel='%@' accID='%@'",
-                 (long)btnIdx, cls,
-                 sv.frame.origin.x, sv.frame.origin.y, sv.frame.size.width, sv.frame.size.height,
-                 (long)sv.tag, titleN, titleS,
-                 imgN ? imgN.description : @"nil",
-                 imgBg ? imgBg.description : @"nil",
-                 accLabel, accID];
-            } else if ([cls containsString:@"Bit"] || [cls containsString:@"bit"] ||
-                       [cls containsString:@"Cheer"] || [cls containsString:@"Coin"] ||
-                       accLabel.length > 0 || accID.length > 0) {
-                [mgr2 log:@"  VIEW %@ frame=(%.0f,%.0f,%.0f,%.0f) accLabel='%@' accID='%@'",
-                 cls, sv.frame.origin.x, sv.frame.origin.y, sv.frame.size.width, sv.frame.size.height,
-                 accLabel, accID];
-            }
-        }
-        [mgr2 log:@"🔎 Fin scan — %ld boutons trouvés dans ChatInputView", (long)btnIdx];
     });
 }
 
