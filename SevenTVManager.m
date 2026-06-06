@@ -1257,11 +1257,11 @@ static NSString *const kEmoteCellID = @"S7TVEmoteCell";
 
 // Hauteur du picker — dynamique selon l'orientation
 // Portrait : 280pt (place suffisante, clavier caché)
-// Paysage  : 170pt (hauteur écran réduite, on économise l'espace)
+// Paysage  : 120pt (hauteur écran réduite, on économise l'espace)
 static CGFloat S7TVPickerHeight(void) {
     CGSize screen = UIScreen.mainScreen.bounds.size;
     BOOL landscape = screen.width > screen.height;
-    return landscape ? 170.0 : 280.0;
+    return landscape ? 120.0 : 280.0;
 }
 
 // Taille de chaque cellule par défaut (carré)
