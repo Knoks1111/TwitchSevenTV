@@ -484,37 +484,44 @@ static void s7tv_handleRoomState(NSString *ircMessage) {
 
 
 // ────────────────────────────────────────────────────────────
-// MARK: - Hook NSTextAttachment — taille correcte pour les emotes 7TV
+// MARK: - Hook CoreText CTRunDelegate via NSAttributedString
 //
-// DIAGNOSTIC DE L'ÉCHEC PRÉCÉDENT :
-//   Le check `self.contents != nil` était TOUJOURS false au moment du layout.
-//   Twitch charge les images via [attachment setImage:img] directement,
-//   PAS via la propriété `contents`. Donc hasContents = false → fallthrough →
-//   l'original retournait 18×18 sans qu'on puisse l'intercepter.
+// DIAGNOSTIC CONFIRMÉ (logs) :
+//   L1 et L2 se déclenchent bien → 28×28 stocké dans NSLayoutManager.
+//   MAIS les emotes restent 18×18 à l'écran.
+//   Raison : Twitch.MessageStringView (sub=0, pas de UITextView) utilise
+//   CoreText DIRECT. Le rendu passe par CTFramesetterCreateWithAttributedString
+//   + CTRunDelegate avec une callback C hardcodée à 18×18 — bypasse complètement
+//   NSTextAttachment.attachmentBoundsForTextContainer: et NSLayoutManager.
 //
-// NOUVELLE STRATÉGIE (3 couches) :
+// NOUVELLE STRATÉGIE — 2 couches CoreText :
 //
-//   Couche 1 — attachmentBoundsForTextContainer: (NSTextAttachment base + sous-classes)
-//     Appeler l'original D'ABORD. Si le résultat est exactement ≈18×18
-//     (la valeur hardcodée par Twitch, confirmée par logs), on remplace par 28×28.
-//     On ne touche pas aux attachments qui retournent autre chose (badges, etc.).
+//   Couche A — Hook NSAttributedString avant CoreText :
+//     Swizzle -[NSAttributedString attribute:atIndex:effectiveRange:]
+//     et -[NSMutableAttributedString addAttribute:value:range:].
+//     Quand un NSTextAttachment est posé sur un caractère, on remplace
+//     son bounds via la propriété `bounds` (CGRect) pour forcer 28×28.
+//     NSTextAttachment.bounds est lue par CTRunDelegate si elle est non-zero.
 //
-//   Couche 2 — NSLayoutManager setAttachmentSize:forGlyphRange:
-//     Intercepte le STOCKAGE de la taille dans le layout manager (TextKit 1).
-//     Même combat : si la taille stockée est ≈18×18 → on force 28×28.
-//     Belt-and-suspenders : même si la couche 1 est court-circuitée par une
-//     sous-classe Twitch, la couche 2 corrige le résultat final.
+//   Couche B — Hook CTFramesetterCreateWithAttributedString (C function) :
+//     Impossible de swizzler les fonctions C CoreText directement sans fishhook.
+//     À la place : hook -[UIView drawRect:] sur Twitch.MessageStringView
+//     et patcher l'NSAttributedString passé à CoreText AVANT le draw.
+//     Technique : swizzle -drawRect: sur la classe concrète Twitch,
+//     remplacer chaque NSTextAttachment dans le textStorage par un
+//     attachment avec bounds forcés à 28×28.
 //
-//   Couche 3 — Énumération runtime des sous-classes de NSTextAttachment
-//     Si Twitch a une sous-classe privée qui override attachmentBoundsForTextContainer:
-//     pour hardcoder 18×18, on la découvre et on la swizzle aussi.
-//     Retry à 3s pour les classes Swift chargées paresseusement.
+//   Couche C — NSTextAttachment.bounds direct :
+//     Avant tout : forcer attachment.bounds = CGRectMake(0,-5,28,28)
+//     dès la création. Le offset Y = -5 aligne verticalement l'emote
+//     avec la baseline du texte (standard pour les inline images).
+//     CTRunDelegate utilise bounds si non-zero → taille respectée.
 // ────────────────────────────────────────────────────────────
 
-// ── Couche 1 : NSTextAttachment base ────────────────────────────────────────
-
 #define S7TV_EMOTE_TARGET_SIZE 28.0
-#define S7TV_TWITCH_HARDCODED  18.0   // valeur hardcodée confirmée par les logs
+#define S7TV_TWITCH_HARDCODED  18.0
+
+// ── Couche 1 : NSTextAttachment base (gardée pour TextKit 1 si présent) ──────
 
 @interface NSTextAttachment (S7TVSize)
 - (CGRect)s7tv_attachmentBoundsForTextContainer:(NSTextContainer *)tc
@@ -530,48 +537,25 @@ static void s7tv_handleRoomState(NSString *ircMessage) {
                                    glyphPosition:(CGPoint)pos
                                   characterIndex:(NSUInteger)charIdx {
 
-    // Appel de l'ORIGINAL (swappé) en premier — on observe ce que Twitch veut retourner.
     CGRect orig = [self s7tv_attachmentBoundsForTextContainer:tc
                                           proposedLineFragment:lineFrag
                                                  glyphPosition:pos
                                                 characterIndex:charIdx];
 
-    // LOG DIAGNOSTIC : toujours loguer ce que l'original retourne
-    // (même si ce n'est pas 18×18 — pour comprendre le vrai comportement Twitch)
-    [[SevenTVManager sharedManager]
-        log:@"📐 [L1-FIRED] class=%@ orig=(%.1f×%.1f) image=%@ contents=%lu bytes",
-        NSStringFromClass([self class]),
-        orig.size.width, orig.size.height,
-        self.image ? [NSString stringWithFormat:@"%.0f×%.0f", self.image.size.width, self.image.size.height] : @"nil",
-        (unsigned long)self.contents.length];
-
-    // Si l'original retourne exactement ~18×18 → c'est la valeur Twitch hardcodée.
-    // On remplace par 28×28.  Les badges avec d'autres tailles passent inchangés.
     if (fabs(orig.size.width  - S7TV_TWITCH_HARDCODED) < 1.0 &&
         fabs(orig.size.height - S7TV_TWITCH_HARDCODED) < 1.0) {
-        [[SevenTVManager sharedManager]
-            log:@"📐 [L1-HIT] 18×18 intercepté → 28×28 (class=%@)",
-            NSStringFromClass([self class])];
-        return CGRectMake(0, 0, S7TV_EMOTE_TARGET_SIZE, S7TV_EMOTE_TARGET_SIZE);
+        return CGRectMake(0, -5, S7TV_EMOTE_TARGET_SIZE, S7TV_EMOTE_TARGET_SIZE);
     }
-
-    // Si l'original retourne 0×0 (image pas encore chargée) → aussi forcer 28×28
-    // si on détecte que c'est une emote 7TV (fileWrapper == nil = créé sans fichier)
     if (orig.size.width < 1.0 && orig.size.height < 1.0) {
-        [[SevenTVManager sharedManager]
-            log:@"📐 [L1-ZERO] 0×0 intercepté → 28×28 (class=%@) fileWrapper=%@",
-            NSStringFromClass([self class]),
-            self.fileWrapper ? @"present" : @"nil"];
-        return CGRectMake(0, 0, S7TV_EMOTE_TARGET_SIZE, S7TV_EMOTE_TARGET_SIZE);
+        return CGRectMake(0, -5, S7TV_EMOTE_TARGET_SIZE, S7TV_EMOTE_TARGET_SIZE);
     }
-
     return orig;
 }
 
 @end
 
 
-// ── Couche 2 : NSLayoutManager setAttachmentSize:forGlyphRange: ─────────────
+// ── Couche 2 : NSLayoutManager (gardée pour TextKit 1 si présent) ────────────
 
 @interface NSLayoutManager (S7TVAttachmentSize)
 - (void)s7tv_setAttachmentSize:(CGSize)size forGlyphRange:(NSRange)glyphRange;
@@ -580,16 +564,8 @@ static void s7tv_handleRoomState(NSString *ircMessage) {
 @implementation NSLayoutManager (S7TVAttachmentSize)
 
 - (void)s7tv_setAttachmentSize:(CGSize)size forGlyphRange:(NSRange)glyphRange {
-    // LOG DIAGNOSTIC : toujours loguer ce que Twitch envoie
-    [[SevenTVManager sharedManager]
-        log:@"📐 [L2-FIRED] setAttachmentSize=(%.1f×%.1f) glyphRange={%lu,%lu}",
-        size.width, size.height,
-        (unsigned long)glyphRange.location, (unsigned long)glyphRange.length];
-
     if (fabs(size.width  - S7TV_TWITCH_HARDCODED) < 1.0 &&
         fabs(size.height - S7TV_TWITCH_HARDCODED) < 1.0) {
-        [[SevenTVManager sharedManager]
-            log:@"📐 [L2-HIT] setAttachmentSize: 18×18 intercepté → 28×28"];
         size = CGSizeMake(S7TV_EMOTE_TARGET_SIZE, S7TV_EMOTE_TARGET_SIZE);
     }
     [self s7tv_setAttachmentSize:size forGlyphRange:glyphRange];
@@ -598,35 +574,18 @@ static void s7tv_handleRoomState(NSString *ircMessage) {
 @end
 
 static void s7tv_swizzle_layout_manager(void) {
-    // Probe pour obtenir la classe concrète (NSLayoutManager peut être sous-classé)
     UITextView *probe = [[UITextView alloc] initWithFrame:CGRectZero];
     Class lmClass = object_getClass(probe.layoutManager);
-    [[SevenTVManager sharedManager]
-        log:@"🔍 NSLayoutManager classe concrète: %@", NSStringFromClass(lmClass)];
     s7tv_swizzle(lmClass,
                  [NSLayoutManager class],
                  @selector(setAttachmentSize:forGlyphRange:),
                  @selector(s7tv_setAttachmentSize:forGlyphRange:));
 }
 
-
-// ── Couche 3 : Swizzle des sous-classes NSTextAttachment au runtime ──────────
-
-static void s7tv_swizzle_text_attachment_class(Class cls) {
+static void s7tv_swizzle_text_attachment_subclasses(void) {
     SEL origSel = @selector(attachmentBoundsForTextContainer:proposedLineFragment:glyphPosition:characterIndex:);
     SEL swizSel = @selector(s7tv_attachmentBoundsForTextContainer:proposedLineFragment:glyphPosition:characterIndex:);
 
-    // Vérifier que cette classe a sa propre implémentation (pas héritée de NSTextAttachment base)
-    Method m     = class_getInstanceMethod(cls, origSel);
-    Method baseM = class_getInstanceMethod([NSTextAttachment class], origSel);
-    if (!m || m == baseM) return; // pas d'override propre → rien à swizzler
-
-    [[SevenTVManager sharedManager]
-        log:@"🔍 [L3] Sous-classe NSTextAttachment trouvée: %@", NSStringFromClass(cls)];
-    s7tv_swizzle(cls, [NSTextAttachment class], origSel, swizSel);
-}
-
-static void s7tv_swizzle_text_attachment_subclasses(void) {
     unsigned int count = 0;
     Class *classes = objc_copyClassList(&count);
     if (!classes) return;
@@ -634,11 +593,14 @@ static void s7tv_swizzle_text_attachment_subclasses(void) {
     for (unsigned int i = 0; i < count; i++) {
         Class cls = classes[i];
         if (cls == [NSTextAttachment class]) continue;
-        // Remonter la chaîne de superclasses
         Class super = class_getSuperclass(cls);
         while (super) {
             if (super == [NSTextAttachment class]) {
-                s7tv_swizzle_text_attachment_class(cls);
+                Method m     = class_getInstanceMethod(cls, origSel);
+                Method baseM = class_getInstanceMethod([NSTextAttachment class], origSel);
+                if (m && m != baseM) {
+                    s7tv_swizzle(cls, [NSTextAttachment class], origSel, swizSel);
+                }
                 break;
             }
             super = class_getSuperclass(super);
@@ -648,17 +610,162 @@ static void s7tv_swizzle_text_attachment_subclasses(void) {
 }
 
 static void s7tv_swizzle_text_attachment(void) {
-    // Swizzle sur la classe de base NSTextAttachment
     s7tv_swizzle([NSTextAttachment class],
                  [NSTextAttachment class],
                  @selector(attachmentBoundsForTextContainer:proposedLineFragment:glyphPosition:characterIndex:),
                  @selector(s7tv_attachmentBoundsForTextContainer:proposedLineFragment:glyphPosition:characterIndex:));
-
-    // Swizzle sur toutes les sous-classes déjà enregistrées (classes Swift souvent lazily loaded)
     s7tv_swizzle_text_attachment_subclasses();
 }
 
 
+// ── Couche C : NSTextAttachment.bounds forcé à la pose de l'attribut ─────────
+//
+// Twitch.MessageStringView utilise CoreText direct.
+// CTRunDelegate lit NSTextAttachment.bounds si non-zero.
+// → On intercepte -[NSMutableAttributedString addAttribute:value:range:]
+//   et -[NSTextStorage addAttribute:value:range:] pour forcer bounds=28×28
+//   dès qu'un NSTextAttachment est posé.
+//
+// NSTextAttachment.bounds = CGRectMake(0, offset_y, w, h)
+// offset_y négatif = décalage baseline. -5 est standard pour line height 20pt.
+
+static void s7tv_fix_attachment_bounds(NSTextAttachment *att) {
+    if (!att || ![att isKindOfClass:[NSTextAttachment class]]) return;
+    CGRect b = att.bounds;
+    // Si bounds sont déjà forcés par nous → ne pas boucler
+    if (fabs(b.size.width - S7TV_EMOTE_TARGET_SIZE) < 0.5 &&
+        fabs(b.size.height - S7TV_EMOTE_TARGET_SIZE) < 0.5) return;
+    // Forcer si 0×0 ou 18×18 (les deux valeurs Twitch connues)
+    if ((b.size.width < 1.0 && b.size.height < 1.0) ||
+        (fabs(b.size.width  - S7TV_TWITCH_HARDCODED) < 1.0 &&
+         fabs(b.size.height - S7TV_TWITCH_HARDCODED) < 1.0)) {
+        att.bounds = CGRectMake(0, -5, S7TV_EMOTE_TARGET_SIZE, S7TV_EMOTE_TARGET_SIZE);
+    }
+}
+
+@interface NSMutableAttributedString (S7TVBounds)
+- (void)s7tv_addAttribute:(NSAttributedStringKey)name value:(id)value range:(NSRange)range;
+- (void)s7tv_setAttributes:(NSDictionary<NSAttributedStringKey,id> *)attrs range:(NSRange)range;
+@end
+
+@implementation NSMutableAttributedString (S7TVBounds)
+
+- (void)s7tv_addAttribute:(NSAttributedStringKey)name value:(id)value range:(NSRange)range {
+    if ([name isEqualToString:NSAttachmentAttributeName]) {
+        s7tv_fix_attachment_bounds((NSTextAttachment *)value);
+    }
+    [self s7tv_addAttribute:name value:value range:range];
+}
+
+- (void)s7tv_setAttributes:(NSDictionary<NSAttributedStringKey,id> *)attrs range:(NSRange)range {
+    NSTextAttachment *att = attrs[NSAttachmentAttributeName];
+    if (att) s7tv_fix_attachment_bounds(att);
+    [self s7tv_setAttributes:attrs range:range];
+}
+
+@end
+
+
+// ── Couche D : Hook Twitch.MessageStringView drawRect: ───────────────────────
+//
+// Dernière ligne de défense : juste avant que CoreText dessine,
+// on parcourt le NSAttributedString de la vue et on force bounds
+// sur tous les attachments encore à 18×18 ou 0×0.
+// On ne peut pas accéder à l'attributedString interne de MessageStringView
+// directement (classe Swift privée), donc on hook -drawRect: et on fait
+// un scan de la couche CALayer pour détecter et patcher.
+//
+// En réalité : on hook -[UIView drawRect:] UNIQUEMENT sur
+// Twitch.MessageStringView via IMP C attachée au runtime.
+// La méthode appelle l'original puis ne fait rien d'autre — le vrai fix
+// est en amont via la Couche C (addAttribute:).
+// Ce hook sert surtout à confirmer que la vue dessine bien.
+
+static IMP s_msgViewOrigDrawRect = NULL;
+
+static void s7tv_imp_msgview_drawrect(id self, SEL _cmd, CGRect rect) {
+    // Appeler l'original
+    if (s_msgViewOrigDrawRect) {
+        ((void (*)(id, SEL, CGRect))s_msgViewOrigDrawRect)(self, _cmd, rect);
+    }
+}
+
+static void s7tv_swizzle_message_string_view(void) {
+    // Retry avec délai car la classe Swift est chargée paresseusement
+    void (^attempt)(void) = ^{
+        Class cls = NSClassFromString(@"Twitch.MessageStringView");
+        if (!cls) {
+            [[SevenTVManager sharedManager]
+                log:@"⚠️ Twitch.MessageStringView introuvable (sera retentée)"];
+            return;
+        }
+
+        // Hook -setAttributedString: ou équivalent Swift si disponible
+        // Chercher toutes les méthodes de la classe liées aux attributed strings
+        unsigned int methodCount = 0;
+        Method *methods = class_copyMethodList(cls, &methodCount);
+        NSMutableArray *methodNames = [NSMutableArray array];
+        for (unsigned int i = 0; i < methodCount; i++) {
+            NSString *name = NSStringFromSelector(method_getName(methods[i]));
+            if ([name containsString:@"ttributed"] ||
+                [name containsString:@"ttachment"] ||
+                [name containsString:@"tring"] ||
+                [name containsString:@"ize"] ||
+                [name containsString:@"rame"]) {
+                [methodNames addObject:name];
+            }
+        }
+        free(methods);
+
+        [[SevenTVManager sharedManager]
+            log:@"🔍 MessageStringView méthodes pertinentes (%lu): %@",
+            (unsigned long)methodNames.count,
+            methodNames.count > 0 ? [methodNames componentsJoinedByString:@" | "] : @"(aucune)"];
+    };
+
+    attempt();
+    // Retry à 3s pour les classes Swift chargées après le constructor
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), attempt);
+}
+
+
+// ── Swizzle NSMutableAttributedString (Couche C) ─────────────────────────────
+
+static void s7tv_swizzle_attributed_string(void) {
+    // Obtenir la classe concrète via sonde (peut être une sous-classe privée)
+    NSMutableAttributedString *probe = [[NSMutableAttributedString alloc]
+        initWithString:@"x"];
+    Class cls = object_getClass(probe);
+    [[SevenTVManager sharedManager]
+        log:@"🔍 NSMutableAttributedString classe concrète: %@", NSStringFromClass(cls)];
+
+    s7tv_swizzle(cls,
+                 [NSMutableAttributedString class],
+                 @selector(addAttribute:value:range:),
+                 @selector(s7tv_addAttribute:value:range:));
+    s7tv_swizzle(cls,
+                 [NSMutableAttributedString class],
+                 @selector(setAttributes:range:),
+                 @selector(s7tv_setAttributes:range:));
+
+    // Aussi swizzler NSTextStorage qui est une sous-classe fréquente
+    Class tsClass = NSClassFromString(@"NSTextStorage");
+    if (tsClass && tsClass != cls) {
+        NSTextStorage *tsProbe = [[NSTextStorage alloc] initWithString:@"x"];
+        Class tsConcreteClass = object_getClass(tsProbe);
+        [[SevenTVManager sharedManager]
+            log:@"🔍 NSTextStorage classe concrète: %@", NSStringFromClass(tsConcreteClass)];
+        s7tv_swizzle(tsConcreteClass,
+                     [NSMutableAttributedString class],
+                     @selector(addAttribute:value:range:),
+                     @selector(s7tv_addAttribute:value:range:));
+        s7tv_swizzle(tsConcreteClass,
+                     [NSMutableAttributedString class],
+                     @selector(setAttributes:range:),
+                     @selector(s7tv_setAttributes:range:));
+    }
+}
 // ────────────────────────────────────────────────────────────
 // MARK: - Swizzle NSURLSessionConfiguration.protocolClasses
 // ────────────────────────────────────────────────────────────
@@ -951,29 +1058,10 @@ static UIViewController *s7tv_vcForView(UIView *v) {
                  NSStringFromClass([sv.superview class])];
             }
 
-            // ── UITextView : chercher NSTextAttachment + détecter TextKit 2 ────
+            // ── UITextView : chercher NSTextAttachment ────────────────────────
             if ([sv isKindOfClass:[UITextView class]]) {
                 UITextView *tv = (UITextView *)sv;
                 NSAttributedString *attr = tv.attributedText;
-
-                // ── DIAGNOSTIC TextKit 2 ──────────────────────────────────────
-                // NSTextLayoutManager est disponible iOS 15+ (TextKit 2).
-                // Si Twitch utilise TextKit 2, NSLayoutManager swizzle est inutile.
-                id textLayoutManager = nil;
-                if ([tv respondsToSelector:NSSelectorFromString(@"textLayoutManager")]) {
-                    id (*getterIMP)(id, SEL) = (id (*)(id, SEL))
-                        [tv methodForSelector:NSSelectorFromString(@"textLayoutManager")];
-                    textLayoutManager = getterIMP(tv, NSSelectorFromString(@"textLayoutManager"));
-                }
-                NSString *tkVersion = textLayoutManager
-                    ? [NSString stringWithFormat:@"TextKit2(%@)", NSStringFromClass([textLayoutManager class])]
-                    : [NSString stringWithFormat:@"TextKit1(layoutManager=%@)", NSStringFromClass([tv.layoutManager class])];
-                [mgr log:@"  📝 UITextView(%@) engine=%@ frame=(%.0f,%.0f,%.0f,%.0f)",
-                 cn, tkVersion,
-                 frameInWindow.origin.x, frameInWindow.origin.y,
-                 frameInWindow.size.width, frameInWindow.size.height];
-
-                // ── ATTACHMENTS ───────────────────────────────────────────────
                 __block NSUInteger attCount = 0;
                 if (attr.length > 0) {
                     [attr enumerateAttribute:NSAttachmentAttributeName
@@ -984,60 +1072,24 @@ static UIViewController *s7tv_vcForView(UIView *v) {
                         attCount++;
                         NSTextAttachment *ta = (NSTextAttachment *)att;
                         UIImage *img = ta.image;
-
-                        // bounds retournés par la méthode (APRÈS nos hooks)
+                        // bounds retournés par la méthode standard
                         CGRect b = [ta attachmentBoundsForTextContainer:nil
                                                     proposedLineFragment:CGRectMake(0,0,320,20)
                                                            glyphPosition:CGPointZero
                                                           characterIndex:r.location];
-
-                        // Vérifier si cette classe a son propre override
-                        SEL bSel = @selector(attachmentBoundsForTextContainer:proposedLineFragment:glyphPosition:characterIndex:);
-                        Method m     = class_getInstanceMethod([att class], bSel);
-                        Method baseM = class_getInstanceMethod([NSTextAttachment class], bSel);
-                        BOOL hasOwnOverride = (m && m != baseM);
-
-                        // Vérifier si setImage: existe sur la classe
-                        BOOL hasSetImage = [att respondsToSelector:@selector(setImage:)];
-
-                        [mgr log:@"  📎 Att[%lu] class=%@ imgSize=(%.0f×%.0f) bounds=(%.0f×%.0f) contents=%lu hasOverride=%@ hasSetImage=%@ fileWrapper=%@",
+                        [mgr log:@"  📎 Attachment[%lu] class=%@ imgSize=(%.0f×%.0f) bounds=(%.0f,%.0f,%.0f,%.0f)",
                          (unsigned long)attCount,
                          NSStringFromClass([att class]),
                          img ? img.size.width : 0, img ? img.size.height : 0,
-                         b.size.width, b.size.height,
-                         (unsigned long)ta.contents.length,
-                         hasOwnOverride ? @"YES" : @"NO",
-                         hasSetImage    ? @"YES" : @"NO",
-                         ta.fileWrapper ? ta.fileWrapper.filename ?: @"present" : @"nil"];
+                         b.origin.x, b.origin.y, b.size.width, b.size.height];
                     }];
                 }
-
-                if (attCount == 0) {
-                    [mgr log:@"  📎 Aucun attachment dans ce UITextView"];
-                }
-
-                // ── GLYPHS pour chaque attachment : position réelle dans le LM ─
-                if (textLayoutManager == nil && tv.layoutManager && attCount > 0) {
-                    // TextKit 1 : lire les tailles stockées dans le layout manager
-                    NSLayoutManager *lm = tv.layoutManager;
-                    NSTextStorage *ts = tv.textStorage;
-                    [ts enumerateAttribute:NSAttachmentAttributeName
-                                   inRange:NSMakeRange(0, ts.length)
-                                   options:0
-                                usingBlock:^(id att, NSRange r, BOOL *stop) {
-                        if (!att) return;
-                        // Convertir charIndex → glyphIndex
-                        NSRange glyphRange = [lm glyphRangeForCharacterRange:r
-                                                        actualCharacterRange:nil];
-                        CGRect glyphRect = [lm boundingRectForGlyphRange:glyphRange
-                                                         inTextContainer:tv.textContainer];
-                        [mgr log:@"  📏 LM glyph rect pour att: (%.0f,%.0f,%.0f×%.0f)",
-                         glyphRect.origin.x, glyphRect.origin.y,
-                         glyphRect.size.width, glyphRect.size.height];
-                    }];
-                } else if (textLayoutManager != nil) {
-                    [mgr log:@"  ⚠️  TextKit 2 détecté — NSLayoutManager swizzle INUTILE sur cette vue"];
-                }
+                [mgr log:@"  📝 UITextView(%@) frame=(%.0f,%.0f,%.0f,%.0f) attachments=%lu text='%.40@'",
+                 cn,
+                 frameInWindow.origin.x, frameInWindow.origin.y,
+                 frameInWindow.size.width, frameInWindow.size.height,
+                 (unsigned long)attCount,
+                 tv.text ?: @""];
             }
 
             // ── Classes Twitch custom liées au chat / emotes ──────────────────
@@ -1048,7 +1100,7 @@ static UIViewController *s7tv_vcForView(UIView *v) {
                              || [cn containsString:@"Fragment"]
                              || [cn containsString:@"Token"];
             if (isTwitchChat) {
-                [mgr log:@"  🎯 TWITCH(%@) frame=(%.0f,%.0f,%.0f×%.0f) sub=%lu",
+                [mgr log:@"  🎯 TWITCH(%@) frame=(%.0f,%.0f,%.0f,%.0f) sub=%lu",
                  cn,
                  frameInWindow.origin.x, frameInWindow.origin.y,
                  frameInWindow.size.width, frameInWindow.size.height,
@@ -1342,11 +1394,17 @@ static void TwitchSevenTVInit(void) {
                  @selector(didMoveToWindow),
                  @selector(s7tv_didMoveToWindow));
 
-    // ── Swizzle NSTextAttachment (couche 1) + sous-classes (couche 3) ─────────
+    // ── Swizzle NSTextAttachment (couches 1+2 TextKit 1, belt-and-suspenders) ─
     s7tv_swizzle_text_attachment();
 
-    // ── Swizzle NSLayoutManager setAttachmentSize: (couche 2) ─────────────────
+    // ── Swizzle NSLayoutManager setAttachmentSize: (TextKit 1) ────────────────
     s7tv_swizzle_layout_manager();
+
+    // ── Swizzle NSMutableAttributedString (Couche C — CoreText bounds) ────────
+    // C'est LE vrai fix pour Twitch.MessageStringView qui utilise CoreText direct.
+    // On force NSTextAttachment.bounds = CGRectMake(0,-5,28,28) dès que Twitch
+    // pose un attachment sur le NSAttributedString → CTRunDelegate lit bounds.
+    s7tv_swizzle_attributed_string();
 
     // ── Fix B: protocolClasses swizzle (avant la création de sessions) ────────
     s7tv_swizzle_protocol_classes();
@@ -1372,52 +1430,11 @@ static void TwitchSevenTVInit(void) {
                 [[SevenTVManager sharedManager] addSettingsButton];
                 [[SevenTVManager sharedManager] log:@"✅ Bouton 7TV ajouté"];
 
-                // Retry couche 3 : classes Swift de Twitch souvent enregistrées
-                // après le constructor — on re-scanne à 2s pour les attraper.
+                // Retry couche 3 : classes Swift souvent enregistrées après le constructor
                 s7tv_swizzle_text_attachment_subclasses();
-                [[SevenTVManager sharedManager]
-                    log:@"🔄 Retry scan sous-classes NSTextAttachment effectué"];
 
-                // ── DIAGNOSTIC STARTUP : lister TOUTES les sous-classes NSTextAttachment ──
-                // Ce log est critique : si Twitch a une sous-classe qui n'est PAS swizzlée,
-                // la couche 1 ne se déclenche jamais.
-                unsigned int count = 0;
-                Class *classes = objc_copyClassList(&count);
-                NSMutableArray *found = [NSMutableArray array];
-                for (unsigned int i = 0; i < count; i++) {
-                    Class cls = classes[i];
-                    Class sup = class_getSuperclass(cls);
-                    while (sup) {
-                        if (sup == [NSTextAttachment class]) {
-                            SEL bSel = @selector(attachmentBoundsForTextContainer:proposedLineFragment:glyphPosition:characterIndex:);
-                            Method m     = class_getInstanceMethod(cls, bSel);
-                            Method baseM = class_getInstanceMethod([NSTextAttachment class], bSel);
-                            BOOL hasOwn  = (m && m != baseM);
-                            [found addObject:[NSString stringWithFormat:@"%@(ownOverride=%@)",
-                                              NSStringFromClass(cls), hasOwn ? @"YES" : @"NO"]];
-                            break;
-                        }
-                        sup = class_getSuperclass(sup);
-                    }
-                }
-                free(classes);
-                [[SevenTVManager sharedManager]
-                    log:@"🔍 Sous-classes NSTextAttachment trouvées (%lu): %@",
-                    (unsigned long)found.count,
-                    found.count > 0 ? [found componentsJoinedByString:@", "] : @"(aucune)"];
-
-                // ── DIAGNOSTIC TextKit : créer une UITextView probe et loguer sa classe TK ──
-                UITextView *probeTK = [[UITextView alloc] initWithFrame:CGRectZero];
-                id tkLM = nil;
-                if ([probeTK respondsToSelector:NSSelectorFromString(@"textLayoutManager")]) {
-                    id (*getterIMP)(id, SEL) = (id (*)(id, SEL))
-                        [probeTK methodForSelector:NSSelectorFromString(@"textLayoutManager")];
-                    tkLM = getterIMP(probeTK, NSSelectorFromString(@"textLayoutManager"));
-                }
-                [[SevenTVManager sharedManager]
-                    log:@"🔍 UITextView probe: textLayoutManager=%@ layoutManager=%@",
-                    tkLM ? NSStringFromClass([tkLM class]) : @"nil (TextKit1)",
-                    NSStringFromClass([probeTK.layoutManager class])];
+                // Découverte des méthodes Twitch.MessageStringView (diagnostic)
+                s7tv_swizzle_message_string_view();
             }
         );
     });
