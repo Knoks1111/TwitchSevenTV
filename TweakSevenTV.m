@@ -600,41 +600,29 @@ static void s7tv_handleRoomState(NSString *ircMessage) {
 @implementation UIImageView (S7TVEmoteSize)
 
 - (void)s7tv_didMoveToSuperview {
-    [self s7tv_didMoveToSuperview]; // appel original
+    [self s7tv_didMoveToSuperview];
 
-    // Filtre rapide : seulement si frame est exactement 18×18
     CGRect f = self.frame;
     if (!(fabs(f.size.width  - S7TV_TWITCH_HARDCODED) < 0.5 &&
           fabs(f.size.height - S7TV_TWITCH_HARDCODED) < 0.5)) return;
+    if (self.image == nil) return;
 
-    // Remonter la hiérarchie (max 6 niveaux) pour détecter MessageStringView
-    UIView *ancestor = self.superview;
-    BOOL inMessageView = NO;
-    for (int i = 0; i < 6 && ancestor; i++) {
-        if ([NSStringFromClass([ancestor class]) isEqualToString:@"Twitch.MessageStringView"]) {
-            inMessageView = YES;
-            break;
-        }
-        ancestor = ancestor.superview;
+    static NSInteger s_diagCount = 0;
+    s_diagCount++;
+    if (s_diagCount > 5) return;
+
+    NSMutableString *hier = [NSMutableString stringWithFormat:
+        @"\U0001f50d UIImageView 18x18 #%ld imgSize=(%.0fx%.0f) hier:",
+        (long)s_diagCount, self.image.size.width, self.image.size.height];
+    UIView *v = self.superview;
+    for (int i = 0; i < 10 && v; i++) {
+        [hier appendFormat:@"\n  [%d] %@ (%.0f,%.0f,%.0f,%.0f)",
+         i, NSStringFromClass([v class]),
+         v.frame.origin.x, v.frame.origin.y,
+         v.frame.size.width, v.frame.size.height];
+        v = v.superview;
     }
-
-    if (!inMessageView) return;
-
-    // Frame centré agrandi à 28×28
-    CGFloat cx = f.origin.x + f.size.width  / 2.0;
-    CGFloat cy = f.origin.y + f.size.height / 2.0;
-    self.frame = CGRectMake(cx - S7TV_EMOTE_TARGET_SIZE / 2.0,
-                            cy - S7TV_EMOTE_TARGET_SIZE / 2.0,
-                            S7TV_EMOTE_TARGET_SIZE,
-                            S7TV_EMOTE_TARGET_SIZE);
-
-    static NSInteger s_eCount = 0;
-    s_eCount++;
-    if (s_eCount <= 10 || (s_eCount % 200) == 0) {
-        [[SevenTVManager sharedManager]
-            log:@"\U0001f5bc UIImageView patch #%ld → 28×28 (parent=%@)",
-            (long)s_eCount, NSStringFromClass([self.superview class])];
-    }
+    [[SevenTVManager sharedManager] log:@"%@", hier];
 }
 
 @end
