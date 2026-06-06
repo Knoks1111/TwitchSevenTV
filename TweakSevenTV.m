@@ -961,7 +961,9 @@ static UIViewController *s7tv_vcForView(UIView *v) {
                 // Si Twitch utilise TextKit 2, NSLayoutManager swizzle est inutile.
                 id textLayoutManager = nil;
                 if ([tv respondsToSelector:NSSelectorFromString(@"textLayoutManager")]) {
-                    textLayoutManager = [tv performSelector:NSSelectorFromString(@"textLayoutManager")];
+                    id (*getterIMP)(id, SEL) = (id (*)(id, SEL))
+                        [tv methodForSelector:NSSelectorFromString(@"textLayoutManager")];
+                    textLayoutManager = getterIMP(tv, NSSelectorFromString(@"textLayoutManager"));
                 }
                 NSString *tkVersion = textLayoutManager
                     ? [NSString stringWithFormat:@"TextKit2(%@)", NSStringFromClass([textLayoutManager class])]
@@ -1408,7 +1410,9 @@ static void TwitchSevenTVInit(void) {
                 UITextView *probeTK = [[UITextView alloc] initWithFrame:CGRectZero];
                 id tkLM = nil;
                 if ([probeTK respondsToSelector:NSSelectorFromString(@"textLayoutManager")]) {
-                    tkLM = [probeTK performSelector:NSSelectorFromString(@"textLayoutManager")];
+                    id (*getterIMP)(id, SEL) = (id (*)(id, SEL))
+                        [probeTK methodForSelector:NSSelectorFromString(@"textLayoutManager")];
+                    tkLM = getterIMP(probeTK, NSSelectorFromString(@"textLayoutManager"));
                 }
                 [[SevenTVManager sharedManager]
                     log:@"🔍 UITextView probe: textLayoutManager=%@ layoutManager=%@",
