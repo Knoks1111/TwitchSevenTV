@@ -1401,10 +1401,10 @@ static void s7tv_swizzle_account_menu(void) {
 
 // Contexte wrappé pour chaque CTRunDelegate intercepté
 typedef struct {
-    void                    *origRefCon;
-    CTRunDelegateGetValueCallback origGetAscent;
-    CTRunDelegateGetValueCallback origGetDescent;
-    CTRunDelegateGetValueCallback origGetWidth;
+    void                         *origRefCon;
+    CTRunDelegateGetAscentCallback  origGetAscent;
+    CTRunDelegateGetDescentCallback origGetDescent;
+    CTRunDelegateGetWidthCallback   origGetWidth;
     CTRunDelegateDeallocateCallback origDealloc;
 } S7TVRunDelegateCtx;
 
