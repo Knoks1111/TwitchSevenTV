@@ -640,10 +640,41 @@ static void s7tv_handleRoomState(NSString *ircMessage) {
 @end
 
 static void s7tv_swizzle_imageview_frame(void) {
-    s7tv_swizzle([UIImageView class],
-                 [UIImageView class],
-                 @selector(didMoveToSuperview),
-                 @selector(s7tv_didMoveToSuperview));
+    // Ne PAS utiliser s7tv_swizzle ici : didMoveToSuperview est défini sur UIView,
+    // class_getInstanceMethod remonte la hiérarchie et le swizzle affecte toutes
+    // les sous-classes (UIButton etc.) → crash "unrecognized selector".
+    // Solution : ajouter la méthode DIRECTEMENT sur UIImageView avec class_addMethod,
+    // puis pointer l'original via class_getInstanceMethod sur UIView.
+
+    SEL origSel = @selector(didMoveToSuperview);
+    SEL newSel  = @selector(s7tv_didMoveToSuperview);
+
+    // Récupérer l'IMP de notre méthode swizzlée depuis la category
+    Method newMethod = class_getInstanceMethod([UIImageView class], newSel);
+    if (!newMethod) {
+        [[SevenTVManager sharedManager] log:@"⚠️ s7tv_didMoveToSuperview introuvable sur UIImageView"];
+        return;
+    }
+
+    // Ajouter didMoveToSuperview directement sur UIImageView (override local)
+    // en pointant notre IMP — si déjà définie localement, remplacer
+    IMP newIMP = method_getImplementation(newMethod);
+    BOOL added = class_addMethod([UIImageView class], origSel, newIMP,
+                                  method_getTypeEncoding(newMethod));
+    if (!added) {
+        // Méthode déjà présente localement sur UIImageView → remplacer
+        Method existingMethod = class_getInstanceMethod([UIImageView class], origSel);
+        method_setImplementation(existingMethod, newIMP);
+    }
+
+    // Remplacer notre sélecteur swizzlé par l'original UIView (pour l'appel récursif)
+    Method origOnUIView = class_getInstanceMethod([UIView class], origSel);
+    if (origOnUIView) {
+        Method newOnImageView = class_getInstanceMethod([UIImageView class], newSel);
+        method_setImplementation(newOnImageView, method_getImplementation(origOnUIView));
+    }
+
+    [[SevenTVManager sharedManager] log:@"✅ swizzle OK [UIImageView] didMoveToSuperview"];
 }
 
 static void s7tv_swizzle_layout_manager(void) {
