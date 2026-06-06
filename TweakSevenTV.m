@@ -575,6 +575,74 @@ static void s7tv_handleRoomState(NSString *ircMessage) {
 
 @end
 
+// ── Couche E : UIImageView setFrame: dans Twitch.MessageStringView ────────────
+//
+// DIAGNOSTIC TAP #4 :
+//   🖼 UIImageView frame=(8,552,18,18) imgSize=(24×24) parent=UIStackView
+//   → La UIImageView est créée à 18×18 par Twitch dans un UIStackView
+//     lui-même enfant de Twitch.MessageStringView (sub=0).
+//   → CoreText ne dessine PAS l'image : il réserve l'espace via CTRunDelegate,
+//     puis Twitch place une vraie UIImageView à côté du texte.
+//   → imgSize=(24×24) prouve que l'image 7TV est bien chargée en 24px
+//     mais son frame UIKit est forcé à 18×18 par Twitch.
+//
+// FIX : swizzler -[UIImageView setFrame:] et détecter le pattern :
+//   frame.size == {18,18} ET superview == UIStackView ET
+//   l'ancêtre contient une Twitch.MessageStringView
+//   → forcer frame à {28,28} centré sur le même point
+//
+// Optimisation : on remonte la hiérarchie max 4 niveaux (perf).
+
+@interface UIImageView (S7TVEmoteSize)
+- (void)s7tv_setFrame:(CGRect)frame;
+@end
+
+@implementation UIImageView (S7TVEmoteSize)
+
+- (void)s7tv_setFrame:(CGRect)frame {
+    // Filtre rapide : seulement si frame est exactement 18×18
+    if (fabs(frame.size.width  - S7TV_TWITCH_HARDCODED) < 0.5 &&
+        fabs(frame.size.height - S7TV_TWITCH_HARDCODED) < 0.5) {
+
+        // Remonter la hiérarchie (max 5 niveaux) pour détecter MessageStringView
+        UIView *ancestor = self.superview;
+        BOOL inMessageView = NO;
+        for (int i = 0; i < 5 && ancestor; i++) {
+            if ([NSStringFromClass([ancestor class]) isEqualToString:@"Twitch.MessageStringView"]) {
+                inMessageView = YES;
+                break;
+            }
+            ancestor = ancestor.superview;
+        }
+
+        if (inMessageView) {
+            // Centrer le frame agrandi sur le même centre
+            CGFloat cx = frame.origin.x + frame.size.width  / 2.0;
+            CGFloat cy = frame.origin.y + frame.size.height / 2.0;
+            frame = CGRectMake(cx - S7TV_EMOTE_TARGET_SIZE / 2.0,
+                               cy - S7TV_EMOTE_TARGET_SIZE / 2.0,
+                               S7TV_EMOTE_TARGET_SIZE,
+                               S7TV_EMOTE_TARGET_SIZE);
+            static NSInteger s_eCount = 0;
+            s_eCount++;
+            if (s_eCount <= 10 || (s_eCount % 200) == 0) {
+                [[SevenTVManager sharedManager]
+                    log:@"\U0001f5bc UIImageView patch #%ld → 28×28", (long)s_eCount];
+            }
+        }
+    }
+    [self s7tv_setFrame:frame];
+}
+
+@end
+
+static void s7tv_swizzle_imageview_frame(void) {
+    s7tv_swizzle([UIImageView class],
+                 [UIImageView class],
+                 @selector(setFrame:),
+                 @selector(s7tv_setFrame:));
+}
+
 static void s7tv_swizzle_layout_manager(void) {
     UITextView *probe = [[UITextView alloc] initWithFrame:CGRectZero];
     Class lmClass = object_getClass(probe.layoutManager);
@@ -1568,12 +1636,13 @@ static void TwitchSevenTVInit(void) {
     // ── Couche C : NSMutableAttributedString (belt-and-suspenders) ─────────────
     s7tv_swizzle_attributed_string();
 
-    // ── Couche D : fishhook CTFramesetterCreateWithAttributedString ───────────
-    // C'est le vrai point d'entrée CoreText. Twitch appelle cette fonction C
-    // avec le NSAttributedString AVANT que addAttribute: soit rappelé sur nos
-    // bounds. On intercepte ici pour patcher les bounds 18×18→28×28 juste
-    // AVANT que CoreText ne calcule le layout.
+    // ── Couche D : fishhook CoreText ──────────────────────────────────────────
     s7tv_hook_coretext_framesetter();
+
+    // ── Couche E : UIImageView setFrame: 18×18→28×28 dans MessageStringView ──
+    // Twitch place une UIImageView réelle à 18×18 pour chaque emote inline.
+    // CoreText gère seulement l'espace réservé ; l'image est une vue UIKit séparée.
+    s7tv_swizzle_imageview_frame();
 
     // ── Fix B: protocolClasses swizzle (avant la création de sessions) ────────
     s7tv_swizzle_protocol_classes();
