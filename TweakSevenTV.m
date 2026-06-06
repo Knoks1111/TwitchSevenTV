@@ -476,68 +476,76 @@ static void s7tv_handleRoomState(NSString *ircMessage) {
                     }
 
                     // ── Router vers le chat custom si activé ──────────────
+                    // IMPORTANT: tout ce bloc est dispatché sur le main thread.
+                    // NSNotificationCenter délivre synchroniquement sur le thread
+                    // appelant → si on poste depuis un background thread, les
+                    // observers (SevenTVChatOverlayView, UITableView, AutoLayout)
+                    // reçoivent la notification sur ce background thread → crash.
+                    // On capture textToProcess avant le dispatch (immuable, safe).
                     if ([SevenTVManager sharedManager].useCustomChat) {
-                        // Gérer CLEARCHAT (ban/timeout)
-                        if ([textToProcess containsString:@"CLEARCHAT"]) {
-                            NSRange clearchatRange = [textToProcess rangeOfString:@"CLEARCHAT #"];
-                            if (clearchatRange.location != NSNotFound) {
-                                // Format: CLEARCHAT #channel :username  (avec username = ban)
-                                // ou     CLEARCHAT #channel             (purge complète)
-                                NSRange colonRange = [textToProcess
-                                    rangeOfString:@":"
-                                    options:0
-                                    range:NSMakeRange(clearchatRange.location + clearchatRange.length,
-                                                      textToProcess.length - clearchatRange.location - clearchatRange.length)];
-                                if (colonRange.location != NSNotFound) {
-                                    NSString *bannedUser = [[textToProcess substringFromIndex:colonRange.location + 1]
-                                        stringByTrimmingCharactersInSet:
-                                            [NSCharacterSet whitespaceAndNewlineCharacterSet]];
-                                    if (bannedUser.length > 0) {
-                                        [[NSNotificationCenter defaultCenter]
-                                            postNotificationName:@"S7TVChatClear"
-                                                          object:nil
-                                                        userInfo:@{@"username": bannedUser}];
+                        NSString *capturedText = textToProcess;
+                        dispatch_async(dispatch_get_main_queue(), ^{
+
+                            // Gérer CLEARCHAT (ban/timeout)
+                            if ([capturedText containsString:@"CLEARCHAT"]) {
+                                NSRange clearchatRange = [capturedText rangeOfString:@"CLEARCHAT #"];
+                                if (clearchatRange.location != NSNotFound) {
+                                    NSRange colonRange = [capturedText
+                                        rangeOfString:@":"
+                                        options:0
+                                        range:NSMakeRange(clearchatRange.location + clearchatRange.length,
+                                                          capturedText.length - clearchatRange.location - clearchatRange.length)];
+                                    if (colonRange.location != NSNotFound) {
+                                        NSString *bannedUser = [[capturedText substringFromIndex:colonRange.location + 1]
+                                            stringByTrimmingCharactersInSet:
+                                                [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+                                        if (bannedUser.length > 0) {
+                                            [[NSNotificationCenter defaultCenter]
+                                                postNotificationName:@"S7TVChatClear"
+                                                              object:nil
+                                                            userInfo:@{@"username": bannedUser}];
+                                        }
                                     }
                                 }
                             }
-                        }
 
-                        // Gérer CLEARMSG (suppression d'un message)
-                        if ([textToProcess containsString:@"CLEARMSG"]) {
-                            NSRange targetIDRange = [textToProcess rangeOfString:@"target-msg-id="];
-                            if (targetIDRange.location != NSNotFound) {
-                                NSString *afterID = [textToProcess
-                                    substringFromIndex:targetIDRange.location + targetIDRange.length];
-                                NSMutableString *msgID = [NSMutableString string];
-                                for (NSUInteger i = 0; i < afterID.length; i++) {
-                                    unichar c = [afterID characterAtIndex:i];
-                                    if (c == ';' || c == ' ' || c == '\r' || c == '\n') break;
-                                    [msgID appendFormat:@"%C", c];
+                            // Gérer CLEARMSG (suppression d'un message)
+                            if ([capturedText containsString:@"CLEARMSG"]) {
+                                NSRange targetIDRange = [capturedText rangeOfString:@"target-msg-id="];
+                                if (targetIDRange.location != NSNotFound) {
+                                    NSString *afterID = [capturedText
+                                        substringFromIndex:targetIDRange.location + targetIDRange.length];
+                                    NSMutableString *msgID = [NSMutableString string];
+                                    for (NSUInteger i = 0; i < afterID.length; i++) {
+                                        unichar c = [afterID characterAtIndex:i];
+                                        if (c == ';' || c == ' ' || c == '\r' || c == '\n') break;
+                                        [msgID appendFormat:@"%C", c];
+                                    }
+                                    if (msgID.length > 0) {
+                                        [[NSNotificationCenter defaultCenter]
+                                            postNotificationName:@"S7TVChatDeleteMessage"
+                                                          object:nil
+                                                        userInfo:@{@"messageId": [msgID copy]}];
+                                    }
                                 }
-                                if (msgID.length > 0) {
+                            }
+
+                            // Parser le PRIVMSG en SevenTVChatMessage
+                            // On split par \r\n car IRC peut envoyer plusieurs lignes
+                            NSArray<NSString *> *lines =
+                                [capturedText componentsSeparatedByString:@"\r\n"];
+                            for (NSString *line in lines) {
+                                if (![line containsString:@" PRIVMSG "]) continue;
+                                SevenTVChatMessage *msg =
+                                    [SevenTVChatMessage messageFromIRCString:line];
+                                if (msg) {
                                     [[NSNotificationCenter defaultCenter]
-                                        postNotificationName:@"S7TVChatDeleteMessage"
+                                        postNotificationName:@"S7TVNewChatMessage"
                                                       object:nil
-                                                    userInfo:@{@"messageId": [msgID copy]}];
+                                                    userInfo:@{@"message": msg}];
                                 }
                             }
-                        }
-
-                        // Parser le PRIVMSG en SevenTVChatMessage
-                        // On split par \r\n car IRC peut envoyer plusieurs lignes
-                        NSArray<NSString *> *lines =
-                            [textToProcess componentsSeparatedByString:@"\r\n"];
-                        for (NSString *line in lines) {
-                            if (![line containsString:@" PRIVMSG "]) continue;
-                            SevenTVChatMessage *msg =
-                                [SevenTVChatMessage messageFromIRCString:line];
-                            if (msg) {
-                                [[NSNotificationCenter defaultCenter]
-                                    postNotificationName:@"S7TVNewChatMessage"
-                                                  object:nil
-                                                userInfo:@{@"message": msg}];
-                            }
-                        }
+                        }); // fin dispatch_async main
                     }
 
                     NSString *modified = [[SevenTVManager sharedManager]
