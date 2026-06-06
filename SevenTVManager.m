@@ -117,6 +117,31 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
 
 
 // ============================================================
+// MARK: - S7TVSettingsNavController
+//
+// UINavigationController dédié au menu 7TV.
+// Bloque la rotation en portrait uniquement → le modal ne passe
+// jamais en plein écran paysage, quelle que soit l'orientation
+// de l'iPhone. Comportement identique aux menus système iOS
+// (App Store, Paramètres sheets) qui restent en portrait.
+// ============================================================
+@interface S7TVSettingsNavController : UINavigationController
+@end
+
+@implementation S7TVSettingsNavController
+
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations {
+    return UIInterfaceOrientationMaskPortrait;
+}
+
+- (BOOL)shouldAutorotate {
+    return NO;
+}
+
+@end
+
+
+// ============================================================
 // MARK: - SevenTVFloatingWindow
 //
 // UIWindow dont le hitTest ne capte les touches QUE si une
@@ -2202,15 +2227,9 @@ referenceSizeForHeaderInSection:(NSInteger)section {
         SevenTVSettingsController *vc = [[SevenTVSettingsController alloc] init];
         // Quand ouvert depuis le bouton flottant → modal avec bouton Close
         vc.openedAsModal = YES;
-        UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
-
-        // FormSheet : taille fixe 400×580 pt en portrait ET paysage.
-        // Sans ça, iOS utilise automatic → plein écran en paysage sur iPhone.
-        // preferredContentSize est respecté par UIModalPresentationFormSheet
-        // sur iPhone iOS 16+ (sheet détachée, fond assombri).
-        nav.modalPresentationStyle = UIModalPresentationFormSheet;
-        nav.preferredContentSize   = CGSizeMake(400, 580);
-
+        // S7TVSettingsNavController bloque la rotation en portrait →
+        // le modal ne passe jamais en plein écran paysage.
+        S7TVSettingsNavController *nav = [[S7TVSettingsNavController alloc] initWithRootViewController:vc];
         [[self topViewController] presentViewController:nav animated:YES completion:nil];
     });
 }
