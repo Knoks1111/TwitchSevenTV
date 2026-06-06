@@ -122,7 +122,26 @@
     }
 
     msg.segments = [segments copy];
-    msg.badges   = @[]; // badges non implémentés pour l'instant
+
+    // ── 5. Parser les badges depuis le tag IRC badges= ────────────────────────
+    // Format: badges=broadcaster/1,subscriber/0,premium/1
+    // Chaque entrée = "badgeName/badgeVersion"
+    NSString *badgesTag = tags[@"badges"];
+    if (badgesTag.length > 0) {
+        NSMutableArray<NSDictionary *> *badges = [NSMutableArray array];
+        for (NSString *entry in [badgesTag componentsSeparatedByString:@","]) {
+            if (!entry.length) continue;
+            NSArray<NSString *> *parts = [entry componentsSeparatedByString:@"/"];
+            NSString *name    = parts.firstObject;
+            NSString *version = parts.count > 1 ? parts[1] : @"1";
+            if (name.length > 0) {
+                [badges addObject:@{@"name": name, @"version": version}];
+            }
+        }
+        msg.badges = [badges copy];
+    } else {
+        msg.badges = @[];
+    }
 
     return msg;
 }
