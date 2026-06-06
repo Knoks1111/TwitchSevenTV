@@ -385,7 +385,7 @@ typedef NS_ENUM(NSInteger, S7TVHomeRow) {
         case S7TVHomeRowEmotes:
             sfName   = @"face.smiling";
             title    = @"Emotes 7TV";
-            subtitle = @"Animées, picker, bouton flottant";
+            subtitle = @"Animées, picker";
             iconTint = S7TVAccent();
             break;
         case S7TVHomeRowStats:
@@ -396,7 +396,7 @@ typedef NS_ENUM(NSInteger, S7TVHomeRow) {
         case S7TVHomeRowDebug:
             sfName   = @"ant.fill";
             title    = @"Débogage";
-            subtitle = @"Logs console et tap logger";
+            subtitle = @"Logs, tap logger, bouton flottant";
             break;
         default:
             return [[UITableViewCell alloc] init];
@@ -457,7 +457,7 @@ typedef NS_ENUM(NSInteger, S7TVHomeRow) {
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tv { return 2; }
 
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s {
-    return s == 0 ? 1 : 3;
+    return s == 0 ? 1 : 2;
 }
 
 - (CGFloat)tableView:(UITableView *)tv heightForHeaderInSection:(NSInteger)s {
@@ -498,11 +498,6 @@ typedef NS_ENUM(NSInteger, S7TVHomeRow) {
                     [UIColor colorWithWhite:0.75 alpha:1.0],
                     mgr.showPickerAnimations,
                     self, @selector(togglePickerAnimations:));
-        case 2: return S7TVSwitchCell(@"Bouton flottant 7TV",
-                    @"circle.grid.2x1.fill",
-                    [UIColor colorWithWhite:0.75 alpha:1.0],
-                    mgr.showFloatingButton,
-                    self, @selector(toggleFloatingButton:));
         default: return [[UITableViewCell alloc] init];
     }
 }
@@ -514,7 +509,6 @@ typedef NS_ENUM(NSInteger, S7TVHomeRow) {
 - (void)toggleEnabled:(UISwitch *)sw          { [SevenTVManager sharedManager].isEnabled           = sw.isOn; }
 - (void)toggleAnimated:(UISwitch *)sw         { [SevenTVManager sharedManager].showAnimated         = sw.isOn; }
 - (void)togglePickerAnimations:(UISwitch *)sw { [SevenTVManager sharedManager].showPickerAnimations = sw.isOn; }
-- (void)toggleFloatingButton:(UISwitch *)sw   { [SevenTVManager sharedManager].showFloatingButton   = sw.isOn; }
 
 @end
 
@@ -704,7 +698,7 @@ typedef NS_ENUM(NSInteger, S7TVHomeRow) {
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tv { return 3; }
 
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s {
-    switch (s) { case 0: return 2; case 1: return 1; case 2: return 1; default: return 0; }
+    switch (s) { case 0: return 3; case 1: return 1; case 2: return 1; default: return 0; }
 }
 
 - (CGFloat)tableView:(UITableView *)tv heightForHeaderInSection:(NSInteger)s {
@@ -745,6 +739,11 @@ typedef NS_ENUM(NSInteger, S7TVHomeRow) {
                         [UIColor colorWithWhite:0.75 alpha:1.0],
                         mgr.tapLogging,
                         self, @selector(toggleTapLog:));
+            case 2: return S7TVSwitchCell(@"Bouton flottant 7TV",
+                        @"circle.grid.2x1.fill",
+                        [UIColor colorWithWhite:0.75 alpha:1.0],
+                        mgr.showFloatingButton,
+                        self, @selector(toggleFloatingButton:));
         }
     }
 
@@ -846,7 +845,8 @@ typedef NS_ENUM(NSInteger, S7TVHomeRow) {
     }
 }
 
-- (void)toggleDebug:(UISwitch *)sw  { [SevenTVManager sharedManager].debugLogging = sw.isOn; }
-- (void)toggleTapLog:(UISwitch *)sw { [SevenTVManager sharedManager].tapLogging   = sw.isOn; }
+- (void)toggleDebug:(UISwitch *)sw        { [SevenTVManager sharedManager].debugLogging    = sw.isOn; }
+- (void)toggleTapLog:(UISwitch *)sw       { [SevenTVManager sharedManager].tapLogging       = sw.isOn; }
+- (void)toggleFloatingButton:(UISwitch *)sw { [SevenTVManager sharedManager].showFloatingButton = sw.isOn; }
 
 @end

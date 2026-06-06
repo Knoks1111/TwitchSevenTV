@@ -2203,6 +2203,14 @@ referenceSizeForHeaderInSection:(NSInteger)section {
         // Quand ouvert depuis le bouton flottant → modal avec bouton Close
         vc.openedAsModal = YES;
         UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
+
+        // FormSheet : taille fixe 400×580 pt en portrait ET paysage.
+        // Sans ça, iOS utilise automatic → plein écran en paysage sur iPhone.
+        // preferredContentSize est respecté par UIModalPresentationFormSheet
+        // sur iPhone iOS 16+ (sheet détachée, fond assombri).
+        nav.modalPresentationStyle = UIModalPresentationFormSheet;
+        nav.preferredContentSize   = CGSizeMake(400, 580);
+
         [[self topViewController] presentViewController:nav animated:YES completion:nil];
     });
 }
