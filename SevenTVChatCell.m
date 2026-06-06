@@ -65,6 +65,32 @@ static void S7TVEnsureBadgeMaps(void) {
         s_badgeImgMap = [NSMutableDictionary dictionary];
     });
 }
+// Image transparente 1x1 — fallback garanti non-nil pour NSTextAttachment.
+// UIGraphicsGetImageFromCurrentImageContext peut retourner nil sous pression mémoire.
+static UIImage *S7TVPlaceholderImage(CGSize size) {
+    if (size.width <= 0) size.width = 1;
+    if (size.height <= 0) size.height = 1;
+    UIGraphicsBeginImageContextWithOptions(size, NO, 0);
+    UIImage *img = UIGraphicsGetImageFromCurrentImageContext();
+    UIGraphicsEndImageContext();
+    if (!img) {
+        // Dernier recours : créer un CGImage 1x1 directement
+        uint8_t pixel[4] = {0, 0, 0, 0};
+        CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+        CGContextRef ctx = CGBitmapContextCreate(pixel, 1, 1, 8, 4, cs,
+            kCGImageAlphaPremultipliedLast);
+        CGImageRef cgImg = CGBitmapContextCreateImage(ctx);
+        img = [UIImage imageWithCGImage:cgImg
+                                  scale:[UIScreen mainScreen].scale
+                            orientation:UIImageOrientationUp];
+        CGImageRelease(cgImg);
+        CGContextRelease(ctx);
+        CGColorSpaceRelease(cs);
+    }
+    return img;
+}
+
+
 
 // Charge le JSON de badges depuis l'API publique Twitch et peuple s_badgeURLMap
 // Appelé une seule fois (guard interne). Thread-safe (dispatch_async sur serial queue).
@@ -254,7 +280,10 @@ static void S7TVFetchBadgeImage(NSString *badgeKey, void(^completion)(UIImage *)
                       proposedLineFragment:(CGRect)lineFrag
                              glyphPosition:(CGPoint)position
                             characterIndex:(NSUInteger)charIndex {
-    return CGRectMake(0, self.baselineOffset, self.targetSize.width, self.targetSize.height);
+    // Guard : targetSize zéro crashe le layout engine (division par zéro)
+    CGFloat w = self.targetSize.width  > 0 ? self.targetSize.width  : 1.0;
+    CGFloat h = self.targetSize.height > 0 ? self.targetSize.height : 1.0;
+    return CGRectMake(0, self.baselineOffset, w, h);
 }
 
 @end
@@ -301,6 +330,10 @@ static void S7TVFetchBadgeImage(NSString *badgeKey, void(^completion)(UIImage *)
         tv.backgroundColor    = [UIColor clearColor];
         tv.textContainerInset = UIEdgeInsetsMake(3, 8, 3, 8);
         tv.textContainer.lineFragmentPadding = 0;
+        // CRITIQUE : lineBreakMode doit être WordWrap pour que le layout engine
+        // calcule correctement la hauteur avec UITableViewAutomaticDimension.
+        // Sans ça, le textView peut retourner une hauteur 0 → crash layout.
+        tv.textContainer.lineBreakMode = NSLineBreakByWordWrapping;
         tv.translatesAutoresizingMaskIntoConstraints = NO;
 
         [self.contentView addSubview:tv];
@@ -337,6 +370,17 @@ static void S7TVFetchBadgeImage(NSString *badgeKey, void(^completion)(UIImage *)
 - (void)configureWithMessage:(SevenTVChatMessage *)message {
     self.currentMessage = message;
 
+    @try {
+    [self _unsafeConfigureWithMessage:message];
+    } @catch (NSException *ex) {
+        [[SevenTVManager sharedManager] log:@"💥 configureWithMessage crash: %@ — %@",
+         ex.name, ex.reason];
+        // Fallback texte brut
+        self.textView.text = [NSString stringWithFormat:@"%@: [erreur rendu]", message.username ?: @"?"];
+    }
+}
+
+- (void)_unsafeConfigureWithMessage:(SevenTVChatMessage *)message {
     if (message.isDeleted) {
         NSDictionary *deletedAttrs = @{
             NSFontAttributeName: [UIFont italicSystemFontOfSize:13],
@@ -378,11 +422,8 @@ static void S7TVFetchBadgeImage(NSString *badgeKey, void(^completion)(UIImage *)
         if (img) {
             att.image = img;
         } else {
-            // Placeholder transparent — sera remplacé au prochain reload
-            UIGraphicsBeginImageContextWithOptions(
-                CGSizeMake(kBadgeTargetSize, kBadgeTargetSize), NO, 0);
-            att.image = UIGraphicsGetImageFromCurrentImageContext();
-            UIGraphicsEndImageContext();
+            // Placeholder garanti non-nil (image nil dans NSTextAttachment = crash layout engine)
+            att.image = S7TVPlaceholderImage(CGSizeMake(kBadgeTargetSize, kBadgeTargetSize));
             needsBadgeFetch = YES;
         }
 
@@ -464,13 +505,8 @@ static void S7TVFetchBadgeImage(NSString *badgeKey, void(^completion)(UIImage *)
             }
 
             if (!attachment.image) {
-                UIGraphicsBeginImageContextWithOptions(targetSize, NO, 0);
-                [[UIColor colorWithWhite:0.25 alpha:0.6] setFill];
-                [[UIBezierPath bezierPathWithRoundedRect:
-                    CGRectMake(0, 0, targetSize.width, targetSize.height)
-                    cornerRadius:3] fill];
-                attachment.image = UIGraphicsGetImageFromCurrentImageContext();
-                UIGraphicsEndImageContext();
+                // Placeholder garanti non-nil
+                attachment.image = S7TVPlaceholderImage(targetSize);
             }
 
             [attrStr appendAttributedString:
@@ -482,5 +518,7 @@ static void S7TVFetchBadgeImage(NSString *badgeKey, void(^completion)(UIImage *)
 
     self.textView.attributedText = attrStr;
 }
+
+} // fin _unsafeConfigureWithMessage
 
 @end
