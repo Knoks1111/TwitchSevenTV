@@ -307,7 +307,12 @@ typedef NS_ENUM(NSInteger, S7TVHomeRow) {
     }
 }
 
-- (void)closeTapped { [self dismissViewControllerAnimated:YES completion:nil]; }
+- (void)closeTapped {
+    [self dismissViewControllerAnimated:YES completion:^{
+        [[NSNotificationCenter defaultCenter]
+            postNotificationName:@"S7TVMenuDidDismiss" object:nil];
+    }];
+}
 
 // ── TableView ──
 

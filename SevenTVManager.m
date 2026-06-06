@@ -78,6 +78,8 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
 @property (nonatomic, weak)   UIButton *settingsButton;
 // Fenêtre dédiée au bouton flottant (strong = reste en vie toute la session)
 @property (nonatomic, strong) UIWindow *floatingWindow;
+// Fenêtre dédiée au menu settings (créée au tap, détruite à la fermeture)
+@property (nonatomic, strong) UIWindow *menuWindow;
 
 // Picker d'emotes inline (affiché au-dessus de la barre de saisie)
 @property (nonatomic, strong) UIView              *emotePickerView;
@@ -174,7 +176,10 @@ static const CGFloat kS7TVMenuHeight = 520.0;
 }
 
 - (void)dimmingTapped {
-    [self.presentingViewController dismissViewControllerAnimated:YES completion:nil];
+    [self.presentingViewController dismissViewControllerAnimated:YES completion:^{
+        [[NSNotificationCenter defaultCenter]
+            postNotificationName:@"S7TVMenuDidDismiss" object:nil];
+    }];
 }
 
 // Frame du menu : centré horizontalement, collé en bas, taille fixe.
@@ -1256,7 +1261,7 @@ static NSString *const kEmoteCellID = @"S7TVEmoteCell";
 static CGFloat S7TVPickerHeight(void) {
     CGSize screen = UIScreen.mainScreen.bounds.size;
     BOOL landscape = screen.width > screen.height;
-    return landscape ? 180.0 : 280.0;
+    return landscape ? 150.0 : 280.0;
 }
 
 // Taille de chaque cellule par défaut (carré)
@@ -2333,13 +2338,50 @@ referenceSizeForHeaderInSection:(NSInteger)section {
 
 - (void)settingsButtonTapped:(UIButton *)sender {
     dispatch_async(dispatch_get_main_queue(), ^{
+        // ── Créer une UIWindow dédiée au menu ────────────────────────────────
+        // On présente depuis NOTRE fenêtre (pas Twitch) → le containerView du
+        // UIPresentationController est 100% sous notre contrôle → taille fixe
+        // respectée en portrait ET en paysage, quelle que soit la config Twitch.
+        UIWindowScene *scene = nil;
+        for (UIScene *s in [UIApplication sharedApplication].connectedScenes)
+            if ([s isKindOfClass:[UIWindowScene class]]) { scene = (UIWindowScene *)s; break; }
+
+        UIWindow *menuWin = scene
+            ? [[UIWindow alloc] initWithWindowScene:scene]
+            : [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+        menuWin.windowLevel     = UIWindowLevelStatusBar + 2; // au-dessus du bouton flottant
+        menuWin.backgroundColor = [UIColor clearColor];
+
+        // rootVC transparent — sert uniquement de présentateur
+        UIViewController *rootVC = [[UIViewController alloc] init];
+        rootVC.view.backgroundColor = [UIColor clearColor];
+        menuWin.rootViewController = rootVC;
+        menuWin.hidden = NO;
+        self.menuWindow = menuWin; // retenu fortement jusqu'à la fermeture
+
         SevenTVSettingsController *vc = [[SevenTVSettingsController alloc] init];
         vc.openedAsModal = YES;
-        // S7TVSettingsNavController utilise UIModalPresentationCustom +
-        // S7TVPresentationController → taille fixe 360×520pt, centré,
-        // portrait ET paysage, indépendant du rootVC de Twitch.
+        // S7TVSettingsNavController : UIModalPresentationCustom +
+        // S7TVPresentationController → 360×520pt centré dans menuWin.
         S7TVSettingsNavController *nav = [[S7TVSettingsNavController alloc] initWithRootViewController:vc];
-        [[self topViewController] presentViewController:nav animated:YES completion:nil];
+
+        __weak typeof(self) weakSelf = self;
+        [rootVC presentViewController:nav animated:YES completion:nil];
+
+        // Libérer la fenêtre quand le menu est fermé
+        // On observe la disparition du nav via viewDidDisappear dans une catégorie légère.
+        // Méthode simple : polling via le completion du dismiss depuis le bouton Close.
+        // Le bouton Close appelle dismissViewControllerAnimated:completion: →
+        // on swizzle pas, on utilise un bloc de notification.
+        [[NSNotificationCenter defaultCenter] addObserverForName:@"S7TVMenuDidDismiss"
+                                                          object:nil
+                                                           queue:[NSOperationQueue mainQueue]
+                                                      usingBlock:^(NSNotification *n) {
+            weakSelf.menuWindow.hidden = YES;
+            weakSelf.menuWindow = nil;
+            [[NSNotificationCenter defaultCenter] removeObserver:n.object
+                                                            name:@"S7TVMenuDidDismiss" object:nil];
+        }];
     });
 }
 
