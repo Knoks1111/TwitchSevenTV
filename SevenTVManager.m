@@ -1264,6 +1264,17 @@ static CGFloat S7TVPickerHeight(void) {
     return landscape ? 120.0 : 280.0;
 }
 
+// Sous-classe UIView qui impose sa hauteur a UIKit via intrinsicContentSize.
+// Sans ca, quand la vue est utilisee comme inputView, UIKit ignore la frame
+// et calcule sa propre hauteur (souvent le double de ce qu'on veut).
+@interface S7TVPickerView : UIView
+@end
+@implementation S7TVPickerView
+- (CGSize)intrinsicContentSize {
+    return CGSizeMake(UIViewNoIntrinsicMetric, S7TVPickerHeight());
+}
+@end
+
 // Taille de chaque cellule par défaut (carré)
 static const CGFloat kCellSize = 40.0;
 
@@ -1591,7 +1602,7 @@ static const char kS7TVTaskKey = 0;
     UIColor *searchBg    = [UIColor colorWithRed:0.122 green:0.122 blue:0.137 alpha:1.0]; // #1F1F23 — S7TVCellBg
 
     // ── Conteneur principal ────────────────────────────────────────────────
-    UIView *picker = [[UIView alloc] initWithFrame:frame];
+    S7TVPickerView *picker = [[S7TVPickerView alloc] initWithFrame:frame];
     picker.backgroundColor    = bgColor;
     picker.layer.shadowColor  = [UIColor blackColor].CGColor;
     picker.layer.shadowOffset = CGSizeMake(0, -3);
