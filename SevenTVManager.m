@@ -117,25 +117,114 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
 
 
 // ============================================================
+// MARK: - S7TVPresentationController
+//
+// UIPresentationController custom : positionne le menu 7TV dans
+// le coin inférieur droit, taille fixe 360×520pt.
+// Fonctionne en portrait ET paysage, sur iOS 13+, dans n'importe
+// quelle app hôte — indépendant du rootViewController de Twitch.
+//
+// Pourquoi pas UISheetPresentationController / FormSheet :
+//   - Sur iPhone, iOS ignore preferredContentSize pour FormSheet.
+//   - sheetPresentationController.detents custom (iOS 16+) donne
+//     50% en paysage sur certains appareils car la hauteur de
+//     résolution est celle de l'écran physique, pas du contenu.
+//   - UIPresentationController est la seule API qui donne un
+//     contrôle total sur la frame finale du modal.
+// ============================================================
+
+static const CGFloat kS7TVMenuWidth  = 360.0;
+static const CGFloat kS7TVMenuHeight = 520.0;
+
+@interface S7TVPresentationController : UIPresentationController
+@property (nonatomic, strong) UIView *dimmingView;
+@end
+
+@implementation S7TVPresentationController
+
+- (void)presentationTransitionWillBegin {
+    // Fond semi-transparent derrière le menu
+    UIView *dim = [[UIView alloc] initWithFrame:self.containerView.bounds];
+    dim.backgroundColor = [UIColor colorWithWhite:0 alpha:0.5];
+    dim.alpha = 0;
+    dim.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [self.containerView insertSubview:dim atIndex:0];
+    self.dimmingView = dim;
+
+    // Tap sur le fond → dismiss
+    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc]
+        initWithTarget:self action:@selector(dimmingTapped)];
+    [dim addGestureRecognizer:tap];
+
+    id<UIViewControllerTransitionCoordinator> coord = self.presentingViewController.transitionCoordinator;
+    if (coord) {
+        [coord animateAlongsideTransition:^(id ctx) { dim.alpha = 1; } completion:nil];
+    } else {
+        dim.alpha = 1;
+    }
+}
+
+- (void)dismissalTransitionWillBegin {
+    id<UIViewControllerTransitionCoordinator> coord = self.presentingViewController.transitionCoordinator;
+    if (coord) {
+        [coord animateAlongsideTransition:^(id ctx) { self.dimmingView.alpha = 0; } completion:nil];
+    } else {
+        self.dimmingView.alpha = 0;
+    }
+}
+
+- (void)dimmingTapped {
+    [self.presentingViewController dismissViewControllerAnimated:YES completion:nil];
+}
+
+// Frame du menu : centré horizontalement, collé en bas, taille fixe.
+- (CGRect)frameOfPresentedViewInContainerView {
+    CGRect container = self.containerView.bounds;
+    CGFloat x = (container.size.width  - kS7TVMenuWidth)  / 2.0;
+    CGFloat y = (container.size.height - kS7TVMenuHeight) / 2.0;
+    // Centré verticalement mais pas plus haut que 40pt du bord
+    y = MAX(40.0, y);
+    return CGRectMake(x, y, kS7TVMenuWidth, kS7TVMenuHeight);
+}
+
+- (void)containerViewWillLayoutSubviews {
+    [super containerViewWillLayoutSubviews];
+    self.dimmingView.frame     = self.containerView.bounds;
+    self.presentedView.frame   = [self frameOfPresentedViewInContainerView];
+    // Coins arrondis sur le menu
+    self.presentedView.layer.cornerRadius  = 16;
+    self.presentedView.layer.masksToBounds = YES;
+}
+
+@end
+
+
+// ============================================================
 // MARK: - S7TVSettingsNavController
 //
-// UINavigationController dédié au menu 7TV.
-// Bloque la rotation en portrait uniquement → le modal ne passe
-// jamais en plein écran paysage, quelle que soit l'orientation
-// de l'iPhone. Comportement identique aux menus système iOS
-// (App Store, Paramètres sheets) qui restent en portrait.
+// UINavigationController qui fournit son propre transitioningDelegate
+// → utilise S7TVPresentationController pour un placement et une
+//   taille totalement contrôlés (360×520pt, centré).
 // ============================================================
-@interface S7TVSettingsNavController : UINavigationController
+@interface S7TVSettingsNavController : UINavigationController <UIViewControllerTransitioningDelegate>
 @end
 
 @implementation S7TVSettingsNavController
 
-- (UIInterfaceOrientationMask)supportedInterfaceOrientations {
-    return UIInterfaceOrientationMaskPortrait;
+- (instancetype)initWithRootViewController:(UIViewController *)root {
+    self = [super initWithRootViewController:root];
+    if (self) {
+        self.modalPresentationStyle = UIModalPresentationCustom;
+        self.transitioningDelegate  = self;
+    }
+    return self;
 }
 
-- (BOOL)shouldAutorotate {
-    return NO;
+- (UIPresentationController *)presentationControllerForPresentedViewController:(UIViewController *)presented
+                                                      presentingViewController:(UIViewController *)presenting
+                                                          sourceViewController:(UIViewController *)source {
+    return [[S7TVPresentationController alloc]
+        initWithPresentedViewController:presented presentingViewController:presenting];
 }
 
 @end
@@ -2246,33 +2335,10 @@ referenceSizeForHeaderInSection:(NSInteger)section {
     dispatch_async(dispatch_get_main_queue(), ^{
         SevenTVSettingsController *vc = [[SevenTVSettingsController alloc] init];
         vc.openedAsModal = YES;
+        // S7TVSettingsNavController utilise UIModalPresentationCustom +
+        // S7TVPresentationController → taille fixe 360×520pt, centré,
+        // portrait ET paysage, indépendant du rootVC de Twitch.
         S7TVSettingsNavController *nav = [[S7TVSettingsNavController alloc] initWithRootViewController:vc];
-
-        // ── Sheet de hauteur fixe (portrait ET paysage) ──────────────────────
-        // UISheetPresentationController (iOS 15+) : detent custom à 580pt.
-        // En paysage sur iPhone, une "automatic" sheet passe en plein écran ;
-        // un detent de hauteur fixe reste compact quelle que soit l'orientation.
-        if (@available(iOS 15.0, *)) {
-            UISheetPresentationController *sheet = nav.sheetPresentationController;
-            if (sheet) {
-                if (@available(iOS 16.0, *)) {
-                    // Detent custom : hauteur fixe 580pt indépendante de l'écran
-                    UISheetPresentationControllerDetent *fixed =
-                        [UISheetPresentationControllerDetent
-                            customDetentWithIdentifier:@"s7tvFixed"
-                            resolver:^CGFloat(id<UISheetPresentationControllerDetentResolutionContext> ctx) {
-                                return 580.0;
-                            }];
-                    sheet.detents = @[fixed];
-                } else {
-                    // iOS 15 : medium (≈50% écran) — suffisant pour le menu
-                    sheet.detents = @[UISheetPresentationControllerDetent.mediumDetent];
-                }
-                sheet.prefersScrollingExpandsWhenScrolledToEdge = NO;
-                sheet.prefersGrabberVisible = YES;
-            }
-        }
-
         [[self topViewController] presentViewController:nav animated:YES completion:nil];
     });
 }
