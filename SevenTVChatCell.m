@@ -1,18 +1,19 @@
 /*
  * SevenTVChatCell.m
  *
- * Layout : NSTextAttachment pour les emotes et badges dans un NSAttributedString,
- * affiché dans un UITextView non-scrollable (self-sizing).
+ * FIX v3 — Badges :
+ *   Les badges Twitch IRC (broadcaster/1, subscriber/0...) utilisent un
+ *   nom symbolique, pas un UUID. L'URL publique sans auth est :
+ *     https://badges.twitch.tv/v1/badges/global/display?language=en
+ *   On charge ce JSON une seule fois au démarrage pour construire la map
+ *   badgeName+version → imageURL, puis on télécharge les images.
+ *   Pour les badges channel-specific : même endpoint avec /channels/{id}/.
  *
- * FIX v2 :
- *   - Emotes : lookup cache via l'URL CDN réelle (cdn.7tv.app/emote/ID/4x.webp)
- *              et non plus l'URL Twitch fake. Les deux étaient différentes → miss sys.
- *   - Badges : parsés depuis msg.badges (tableau de @{name, version}) et affichés
- *              à gauche du pseudo via NSTextAttachment, images depuis l'API Twitch
- *              Badges (cdn.7tv.app ne fournit pas les badges Twitch).
+ *   On utilise une NSURLSession singleton (pas une nouvelle session par appel)
+ *   pour éviter la fuite de sessions et la limite iOS.
  *
- * Taille emotes : hauteur cible 22pt (ligne de texte 14pt), largeur = 22 * (w/h).
- * Taille badges : 18×18pt, légèrement plus petit que les emotes.
+ * FIX v2 — Emotes :
+ *   Clé de cache = URL CDN réelle (cdn.7tv.app), pas l'URL Twitch fake.
  */
 
 #import "SevenTVChatCell.h"
@@ -24,16 +25,217 @@ NSString * const kSevenTVChatCellReuseID = @"SevenTVChatCell";
 static const CGFloat kEmoteTargetHeight = 22.0;
 static const CGFloat kBadgeTargetSize   = 18.0;
 
-// Cache mémoire des images de badges (URL → UIImage)
-// Partagé entre toutes les cellules, jamais vidé (peu d'entrées uniques)
-static NSMutableDictionary<NSString *, UIImage *> *s_badgeImageCache = nil;
-static dispatch_once_t s_badgeCacheOnce;
 
-static NSMutableDictionary<NSString *, UIImage *> *S7TVBadgeImageCache(void) {
-    dispatch_once(&s_badgeCacheOnce, ^{
-        s_badgeImageCache = [NSMutableDictionary dictionary];
+// ────────────────────────────────────────────────────────────
+// MARK: - Session singleton pour les badges
+// ────────────────────────────────────────────────────────────
+
+static NSURLSession *S7TVBadgeSession(void) {
+    static NSURLSession *s = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        // ephemeralSessionConfiguration : isolation du sharedURLCache Twitch
+        // protocolClasses non surchargé → hérite de la config Twitch swizzlée,
+        // ce qui est OK car nos URLs badge ne contiennent pas "7tv_"
+        // → SevenTVURLProtocol.canInitWithRequest retourne NO → pas de boucle
+        NSURLSessionConfiguration *cfg =
+            [NSURLSessionConfiguration ephemeralSessionConfiguration];
+        cfg.timeoutIntervalForRequest = 10.0;
+        s = [NSURLSession sessionWithConfiguration:cfg];
     });
-    return s_badgeImageCache;
+    return s;
+}
+
+
+// ────────────────────────────────────────────────────────────
+// MARK: - Registre des URLs de badges
+// badge "name/version" → URL image (ex: "broadcaster/1" → "https://...")
+// Chargé une seule fois depuis l'API publique Twitch Badges
+// ────────────────────────────────────────────────────────────
+
+// Map globale : "badgeName/version" → imageURLString
+static NSMutableDictionary<NSString *, NSString *> *s_badgeURLMap = nil;
+// Map globale : imageURLString → UIImage (cache mémoire)
+static NSMutableDictionary<NSString *, UIImage *>  *s_badgeImgMap = nil;
+static dispatch_once_t s_badgeMapsOnce;
+
+static void S7TVEnsureBadgeMaps(void) {
+    dispatch_once(&s_badgeMapsOnce, ^{
+        s_badgeURLMap = [NSMutableDictionary dictionary];
+        s_badgeImgMap = [NSMutableDictionary dictionary];
+    });
+}
+
+// Charge le JSON de badges depuis l'API publique Twitch et peuple s_badgeURLMap
+// Appelé une seule fois (guard interne). Thread-safe (dispatch_async sur serial queue).
+static dispatch_queue_t S7TVBadgeQueue(void) {
+    static dispatch_queue_t q;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        q = dispatch_queue_create("app.s7tv.badge", DISPATCH_QUEUE_SERIAL);
+    });
+    return q;
+}
+
+static BOOL s_globalBadgesLoaded = NO;
+
+static void S7TVLoadGlobalBadges(void) {
+    S7TVEnsureBadgeMaps();
+    dispatch_async(S7TVBadgeQueue(), ^{
+        if (s_globalBadgesLoaded) return;
+        s_globalBadgesLoaded = YES; // marquer avant la requête (guard)
+
+        // API publique sans auth — retourne les badges globaux avec URLs d'image
+        NSURL *url = [NSURL URLWithString:
+            @"https://badges.twitch.tv/v1/badges/global/display?language=en"];
+
+        [[S7TVBadgeSession() dataTaskWithURL:url
+                          completionHandler:^(NSData *data, NSURLResponse *r, NSError *e) {
+            if (!data || e) {
+                [[SevenTVManager sharedManager] log:@"⚠️ Badges global fetch error: %@",
+                 e.localizedDescription];
+                // Réinitialiser le guard pour permettre un retry
+                dispatch_async(S7TVBadgeQueue(), ^{ s_globalBadgesLoaded = NO; });
+                return;
+            }
+            NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data
+                                                                 options:0 error:nil];
+            // Structure: { "badge_sets": { "broadcaster": { "versions": { "1": { "image_url_1x": "..." } } } } }
+            NSDictionary *badgeSets = json[@"badge_sets"];
+            if (![badgeSets isKindOfClass:[NSDictionary class]]) return;
+
+            dispatch_async(S7TVBadgeQueue(), ^{
+                S7TVEnsureBadgeMaps();
+                [badgeSets enumerateKeysAndObjectsUsingBlock:
+                    ^(NSString *badgeName, NSDictionary *setData, BOOL *stop) {
+                    NSDictionary *versions = setData[@"versions"];
+                    if (![versions isKindOfClass:[NSDictionary class]]) return;
+                    [versions enumerateKeysAndObjectsUsingBlock:
+                        ^(NSString *version, NSDictionary *vData, BOOL *stop2) {
+                        // Préférer 2x pour Retina, fallback 1x
+                        NSString *imgURL = vData[@"image_url_2x"] ?: vData[@"image_url_1x"];
+                        if (imgURL.length) {
+                            NSString *key = [NSString stringWithFormat:@"%@/%@",
+                                             badgeName, version];
+                            s_badgeURLMap[key] = imgURL;
+                        }
+                    }];
+                }];
+                [[SevenTVManager sharedManager] log:@"✅ %lu URLs de badges globaux chargées",
+                 (unsigned long)s_badgeURLMap.count];
+                // Notifier pour que les cellules déjà affichées se rechargent
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [[NSNotificationCenter defaultCenter]
+                        postNotificationName:@"S7TVBadgesLoaded" object:nil];
+                });
+            });
+        }] resume];
+    });
+}
+
+// Charge les badges d'un channel spécifique (abonné, bits, etc.)
+static void S7TVLoadChannelBadges(NSString *channelID) {
+    if (!channelID.length) return;
+    S7TVEnsureBadgeMaps();
+
+    NSString *urlStr = [NSString stringWithFormat:
+        @"https://badges.twitch.tv/v1/badges/channels/%@/display?language=en", channelID];
+    NSURL *url = [NSURL URLWithString:urlStr];
+
+    [[S7TVBadgeSession() dataTaskWithURL:url
+                      completionHandler:^(NSData *data, NSURLResponse *r, NSError *e) {
+        if (!data || e) return;
+        NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data
+                                                             options:0 error:nil];
+        NSDictionary *badgeSets = json[@"badge_sets"];
+        if (![badgeSets isKindOfClass:[NSDictionary class]]) return;
+
+        dispatch_async(S7TVBadgeQueue(), ^{
+            S7TVEnsureBadgeMaps();
+            [badgeSets enumerateKeysAndObjectsUsingBlock:
+                ^(NSString *badgeName, NSDictionary *setData, BOOL *stop) {
+                NSDictionary *versions = setData[@"versions"];
+                if (![versions isKindOfClass:[NSDictionary class]]) return;
+                [versions enumerateKeysAndObjectsUsingBlock:
+                    ^(NSString *version, NSDictionary *vData, BOOL *stop2) {
+                    NSString *imgURL = vData[@"image_url_2x"] ?: vData[@"image_url_1x"];
+                    if (imgURL.length) {
+                        NSString *key = [NSString stringWithFormat:@"%@/%@",
+                                         badgeName, version];
+                        // Channel badges écrasent les globaux si même clé
+                        s_badgeURLMap[key] = imgURL;
+                    }
+                }];
+            }];
+            [[SevenTVManager sharedManager] log:@"✅ Badges channel %@ chargés", channelID];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [[NSNotificationCenter defaultCenter]
+                    postNotificationName:@"S7TVBadgesLoaded" object:nil];
+            });
+        });
+    }] resume];
+}
+
+// Retourne l'image en cache ou nil. Jamais de réseau ici.
+static UIImage *S7TVCachedBadgeImage(NSString *badgeKey) {
+    S7TVEnsureBadgeMaps();
+    __block NSString *imgURL = nil;
+    dispatch_sync(S7TVBadgeQueue(), ^{
+        imgURL = s_badgeURLMap[badgeKey];
+    });
+    if (!imgURL) return nil;
+    __block UIImage *img = nil;
+    dispatch_sync(S7TVBadgeQueue(), ^{
+        img = s_badgeImgMap[imgURL];
+    });
+    return img;
+}
+
+// Télécharge l'image d'un badge et appelle completion sur main thread
+static void S7TVFetchBadgeImage(NSString *badgeKey, void(^completion)(UIImage *)) {
+    S7TVEnsureBadgeMaps();
+    __block NSString *imgURL = nil;
+    dispatch_sync(S7TVBadgeQueue(), ^{
+        imgURL = s_badgeURLMap[badgeKey];
+    });
+
+    if (!imgURL) {
+        // URL inconnue → charger les badges globaux si pas encore fait, puis retry
+        if (!s_globalBadgesLoaded) {
+            S7TVLoadGlobalBadges();
+        }
+        if (completion) completion(nil);
+        return;
+    }
+
+    // Check cache
+    __block UIImage *cached = nil;
+    dispatch_sync(S7TVBadgeQueue(), ^{
+        cached = s_badgeImgMap[imgURL];
+    });
+    if (cached) {
+        if (completion) completion(cached);
+        return;
+    }
+
+    NSURL *url = [NSURL URLWithString:imgURL];
+    if (!url) { if (completion) completion(nil); return; }
+
+    [[S7TVBadgeSession() dataTaskWithURL:url
+                      completionHandler:^(NSData *data, NSURLResponse *r, NSError *e) {
+        UIImage *img = nil;
+        if (data && !e) {
+            img = [UIImage imageWithData:data scale:[UIScreen mainScreen].scale];
+            if (img) {
+                dispatch_async(S7TVBadgeQueue(), ^{
+                    s_badgeImgMap[imgURL] = img;
+                });
+            }
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (completion) completion(img);
+        });
+    }] resume];
 }
 
 
@@ -42,8 +244,8 @@ static NSMutableDictionary<NSString *, UIImage *> *S7TVBadgeImageCache(void) {
 // ────────────────────────────────────────────────────────────
 
 @interface S7TVSizedAttachment : NSTextAttachment
-@property (nonatomic, assign) CGSize targetSize;
-@property (nonatomic, assign) CGFloat baselineOffset; // décalage vertical (négatif = descend)
+@property (nonatomic, assign) CGSize  targetSize;
+@property (nonatomic, assign) CGFloat baselineOffset;
 @end
 
 @implementation S7TVSizedAttachment
@@ -59,79 +261,31 @@ static NSMutableDictionary<NSString *, UIImage *> *S7TVBadgeImageCache(void) {
 
 
 // ────────────────────────────────────────────────────────────
-// MARK: - Helpers
-// ────────────────────────────────────────────────────────────
-
-// Construit une URL d'image de badge Twitch global (channel = nil) ou channel-specific
-// Format: https://static-cdn.jtvnw.net/badges/v1/{set_id}/{version}/1
-static NSString *S7TVBadgeImageURL(NSString *badgeName, NSString *badgeVersion) {
-    // Twitch héberge les badges globaux + channel sur le même endpoint
-    // On utilise les badges v1 (PNG) car WebP n'est pas toujours dispo
-    return [NSString stringWithFormat:
-        @"https://static-cdn.jtvnw.net/badges/v1/%@/%@/1",
-        badgeName, badgeVersion ?: @"1"];
-}
-
-// Crée un attachment badge avec l'image donnée (ou placeholder si nil)
-static S7TVSizedAttachment *S7TVMakeBadgeAttachment(UIImage * _Nullable img) {
-    CGSize sz = CGSizeMake(kBadgeTargetSize, kBadgeTargetSize);
-    S7TVSizedAttachment *att = [[S7TVSizedAttachment alloc] init];
-    att.targetSize     = sz;
-    att.baselineOffset = -4.0; // aligner verticalement avec le texte 14pt
-
-    if (img) {
-        att.image = img;
-    } else {
-        // Placeholder transparent (invisible = propre)
-        UIGraphicsBeginImageContextWithOptions(sz, NO, 0);
-        att.image = UIGraphicsGetImageFromCurrentImageContext();
-        UIGraphicsEndImageContext();
-    }
-    return att;
-}
-
-// Télécharge l'image d'un badge de façon asynchrone et recharge la cellule
-// via une notification (on ne connaît pas l'indexPath depuis ici)
-static void S7TVFetchBadgeImage(NSString *urlStr, void(^completion)(UIImage *)) {
-    if (!urlStr.length) { if (completion) completion(nil); return; }
-
-    // Check cache mémoire
-    UIImage *cached = S7TVBadgeImageCache()[urlStr];
-    if (cached) { if (completion) completion(cached); return; }
-
-    NSURL *url = [NSURL URLWithString:urlStr];
-    if (!url) { if (completion) completion(nil); return; }
-
-    // Téléchargement via NSURLSession partagé (badges = petits PNG, pas besoin
-    // du cache CDN isolé)
-    NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration ephemeralSessionConfiguration];
-    cfg.protocolClasses = @[]; // éviter la boucle SevenTVURLProtocol
-    NSURLSession *session = [NSURLSession sessionWithConfiguration:cfg];
-
-    [[session dataTaskWithURL:url completionHandler:^(NSData *data, NSURLResponse *r, NSError *e) {
-        UIImage *img = nil;
-        if (data && !e) {
-            img = [UIImage imageWithData:data scale:[UIScreen mainScreen].scale];
-            if (img) S7TVBadgeImageCache()[urlStr] = img;
-        }
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if (completion) completion(img);
-        });
-    }] resume];
-}
-
-
-// ────────────────────────────────────────────────────────────
 // MARK: - SevenTVChatCell
 // ────────────────────────────────────────────────────────────
 
 @interface SevenTVChatCell ()
-@property (nonatomic, strong) UITextView *textView;
-// Garde une référence au message en cours pour les reloads async (badges)
+@property (nonatomic, strong) UITextView        *textView;
 @property (nonatomic, weak)   SevenTVChatMessage *currentMessage;
 @end
 
 @implementation SevenTVChatCell
+
++ (void)initialize {
+    if (self == [SevenTVChatCell class]) {
+        // Lancer le chargement des badges globaux dès le premier +initialize
+        S7TVLoadGlobalBadges();
+        // S'abonner au JOIN de channel pour charger les badges channel-specific
+        [[NSNotificationCenter defaultCenter]
+            addObserverForName:@"S7TVChannelJoined"
+                        object:nil
+                         queue:[NSOperationQueue mainQueue]
+                    usingBlock:^(NSNotification *n) {
+            NSString *channelID = n.userInfo[@"channelID"];
+            if (channelID) S7TVLoadChannelBadges(channelID);
+        }];
+    }
+}
 
 - (instancetype)initWithStyle:(UITableViewCellStyle)style
               reuseIdentifier:(NSString *)reuseIdentifier {
@@ -158,8 +312,26 @@ static void S7TVFetchBadgeImage(NSString *urlStr, void(^completion)(UIImage *)) 
         ]];
 
         self.textView = tv;
+
+        // Observer les badges chargés pour se reconfigurer si besoin
+        [[NSNotificationCenter defaultCenter]
+            addObserver:self
+               selector:@selector(_badgesLoaded:)
+                   name:@"S7TVBadgesLoaded"
+                 object:nil];
     }
     return self;
+}
+
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+
+- (void)_badgesLoaded:(NSNotification *)n {
+    SevenTVChatMessage *msg = self.currentMessage;
+    if (msg && msg.badges.count > 0) {
+        [self configureWithMessage:msg];
+    }
 }
 
 - (void)configureWithMessage:(SevenTVChatMessage *)message {
@@ -176,7 +348,6 @@ static void S7TVFetchBadgeImage(NSString *urlStr, void(^completion)(UIImage *)) 
         return;
     }
 
-    // Attributs partagés
     NSDictionary *textAttrs = @{
         NSFontAttributeName: [UIFont systemFontOfSize:14],
         NSForegroundColorAttributeName: [UIColor whiteColor],
@@ -190,41 +361,62 @@ static void S7TVFetchBadgeImage(NSString *urlStr, void(^completion)(UIImage *)) 
 
     NSMutableAttributedString *attrStr = [[NSMutableAttributedString alloc] init];
 
-    // ── 1. Badges ────────────────────────────────────────────────────────────
+    // ── 1. Badges ─────────────────────────────────────────────────────────────
+    BOOL needsBadgeFetch = NO;
     for (NSDictionary *badge in message.badges) {
         NSString *badgeName    = badge[@"name"];
         NSString *badgeVersion = badge[@"version"] ?: @"1";
         if (!badgeName.length) continue;
 
-        NSString *urlStr = S7TVBadgeImageURL(badgeName, badgeVersion);
-        UIImage *img = S7TVBadgeImageCache()[urlStr];
+        NSString *key = [NSString stringWithFormat:@"%@/%@", badgeName, badgeVersion];
+        UIImage *img  = S7TVCachedBadgeImage(key);
 
-        S7TVSizedAttachment *att = S7TVMakeBadgeAttachment(img);
+        S7TVSizedAttachment *att = [[S7TVSizedAttachment alloc] init];
+        att.targetSize     = CGSizeMake(kBadgeTargetSize, kBadgeTargetSize);
+        att.baselineOffset = -4.0;
+
+        if (img) {
+            att.image = img;
+        } else {
+            // Placeholder transparent — sera remplacé au prochain reload
+            UIGraphicsBeginImageContextWithOptions(
+                CGSizeMake(kBadgeTargetSize, kBadgeTargetSize), NO, 0);
+            att.image = UIGraphicsGetImageFromCurrentImageContext();
+            UIGraphicsEndImageContext();
+            needsBadgeFetch = YES;
+        }
+
         [attrStr appendAttributedString:
             [NSAttributedString attributedStringWithAttachment:att]];
-        // Petit espace après chaque badge
         [attrStr appendAttributedString:
             [[NSAttributedString alloc] initWithString:@" " attributes:textAttrs]];
+    }
 
-        // Si l'image n'était pas en cache → télécharger et reconfigurer
-        if (!img) {
-            __weak SevenTVChatCell *weakSelf = self;
-            SevenTVChatMessage *capturedMsg  = message;
-            S7TVFetchBadgeImage(urlStr, ^(UIImage *fetched) {
-                // Vérifier que la cellule affiche encore le même message
-                if (weakSelf.currentMessage == capturedMsg && fetched) {
+    // Si des badges manquaient → les télécharger et reconfigurer
+    if (needsBadgeFetch) {
+        __weak SevenTVChatCell *weakSelf = self;
+        SevenTVChatMessage *capturedMsg  = message;
+        NSArray *badges = message.badges;
+
+        for (NSDictionary *badge in badges) {
+            NSString *badgeName    = badge[@"name"];
+            NSString *badgeVersion = badge[@"version"] ?: @"1";
+            NSString *key = [NSString stringWithFormat:@"%@/%@", badgeName, badgeVersion];
+            S7TVFetchBadgeImage(key, ^(UIImage *fetched) {
+                // Reconfigurer seulement si la cellule affiche encore ce message
+                if (weakSelf && weakSelf.currentMessage == capturedMsg) {
                     [weakSelf configureWithMessage:capturedMsg];
                 }
             });
         }
     }
 
-    // ── 2. Pseudo en couleur ────────────────────────────────────────────────
+    // ── 2. Pseudo en couleur ──────────────────────────────────────────────────
     NSString *nameStr = [NSString stringWithFormat:@"%@: ", message.username];
     [attrStr appendAttributedString:
         [[NSAttributedString alloc] initWithString:nameStr attributes:nameAttrs]];
 
-    // ── 3. Segments texte + emotes ───────────────────────────────────────────
+    // ── 3. Segments texte + emotes ────────────────────────────────────────────
     for (NSDictionary *seg in message.segments) {
         NSString *type = seg[@"type"];
 
@@ -236,7 +428,6 @@ static void S7TVFetchBadgeImage(NSString *urlStr, void(^completion)(UIImage *)) 
             }
 
         } else if ([type isEqualToString:@"emote"]) {
-            // ── Taille adaptive ──────────────────────────────────────────────
             CGFloat w = [seg[@"width"]  floatValue];
             CGFloat h = [seg[@"height"] floatValue];
             CGSize targetSize;
@@ -246,7 +437,6 @@ static void S7TVFetchBadgeImage(NSString *urlStr, void(^completion)(UIImage *)) 
                 targetSize = CGSizeMake(kEmoteTargetHeight, kEmoteTargetHeight);
             }
 
-            // Espace avant l'emote si nécessaire
             if (attrStr.length > 0) {
                 unichar last = [attrStr.string characterAtIndex:attrStr.length - 1];
                 if (last != ' ') {
@@ -255,22 +445,16 @@ static void S7TVFetchBadgeImage(NSString *urlStr, void(^completion)(UIImage *)) 
                 }
             }
 
-            // ── Lookup image depuis le cache CDN réel ────────────────────────
-            // IMPORTANT: la clé de cache est l'URL CDN réelle (cdn.7tv.app),
-            // pas l'URL Twitch fake (static.twitchcdn.net). C'était la cause
-            // des carrés noirs : deux URLs différentes → cache miss systématique.
+            // Lookup cache via URL CDN réelle (fix v2)
             NSString *emoteID = seg[@"emoteID"];
             NSString *cdnURLStr = [NSString stringWithFormat:
                 @"https://cdn.7tv.app/emote/%@/4x.webp", emoteID];
-            NSURLRequest *cacheReq = [NSURLRequest requestWithURL:
-                [NSURL URLWithString:cdnURLStr]];
             NSCachedURLResponse *cached =
-                [[SevenTVURLProtocol sharedEmoteCache] cachedResponseForRequest:cacheReq];
+                [[SevenTVURLProtocol sharedEmoteCache] cachedResponseForRequest:
+                    [NSURLRequest requestWithURL:[NSURL URLWithString:cdnURLStr]]];
 
             S7TVSizedAttachment *attachment = [[S7TVSizedAttachment alloc] init];
             attachment.targetSize     = targetSize;
-            // Décalage vertical : centre l'emote sur la ligne de texte 14pt
-            // lineFrag.height ≈ 20pt → offset = -(emoteH - font.capHeight) / 2
             attachment.baselineOffset = -5.0;
 
             if (cached.data) {
@@ -279,8 +463,6 @@ static void S7TVFetchBadgeImage(NSString *urlStr, void(^completion)(UIImage *)) 
                 if (img) attachment.image = img;
             }
 
-            // Placeholder si toujours pas d'image (ne devrait pas arriver si
-            // le prefetch a fonctionné, mais sécurité)
             if (!attachment.image) {
                 UIGraphicsBeginImageContextWithOptions(targetSize, NO, 0);
                 [[UIColor colorWithWhite:0.25 alpha:0.6] setFill];
@@ -293,8 +475,6 @@ static void S7TVFetchBadgeImage(NSString *urlStr, void(^completion)(UIImage *)) 
 
             [attrStr appendAttributedString:
                 [NSAttributedString attributedStringWithAttachment:attachment]];
-
-            // Espace après l'emote
             [attrStr appendAttributedString:
                 [[NSAttributedString alloc] initWithString:@" " attributes:textAttrs]];
         }
