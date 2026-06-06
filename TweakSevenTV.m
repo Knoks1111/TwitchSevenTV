@@ -632,14 +632,25 @@ static void s7tv_swizzle_text_attachment(void) {
 static void s7tv_fix_attachment_bounds(NSTextAttachment *att) {
     if (!att || ![att isKindOfClass:[NSTextAttachment class]]) return;
     CGRect b = att.bounds;
+    // Log systematique pour diagnostic (20 premiers appels + 1/50 ensuite)
+    static NSInteger s_callCount = 0;
+    s_callCount++;
+    if (s_callCount <= 20 || (s_callCount % 50) == 0) {
+        [[SevenTVManager sharedManager]
+            log:@"\U0001f52c fix_bounds #%ld class=%@ bounds=(%.1f,%.1f,%.1f,%.1f) img=%@",
+            (long)s_callCount,
+            NSStringFromClass([att class]),
+            b.origin.x, b.origin.y, b.size.width, b.size.height,
+            att.image ? [NSString stringWithFormat:@"%.0fx%.0f", att.image.size.width, att.image.size.height] : @"nil"];
+    }
     // Si bounds sont déjà forcés par nous → ne pas boucler
     if (fabs(b.size.width - S7TV_EMOTE_TARGET_SIZE) < 0.5 &&
         fabs(b.size.height - S7TV_EMOTE_TARGET_SIZE) < 0.5) return;
-    // Forcer si 0×0 ou 18×18 (les deux valeurs Twitch connues)
-    if ((b.size.width < 1.0 && b.size.height < 1.0) ||
-        (fabs(b.size.width  - S7TV_TWITCH_HARDCODED) < 1.0 &&
-         fabs(b.size.height - S7TV_TWITCH_HARDCODED) < 1.0)) {
-        att.bounds = CGRectMake(0, -5, S7TV_EMOTE_TARGET_SIZE, S7TV_EMOTE_TARGET_SIZE);
+    // Forcer sur TOUT attachment pas encore à 28x28 (condition elargie)
+    // Twitch peut poser des bounds à 0x0, 18x18 ou toute autre valeur
+    att.bounds = CGRectMake(0, -5, S7TV_EMOTE_TARGET_SIZE, S7TV_EMOTE_TARGET_SIZE);
+    if (s_callCount <= 20 || (s_callCount % 50) == 0) {
+        [[SevenTVManager sharedManager] log:@"  -> force 28x28"];
     }
 }
 
