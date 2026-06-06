@@ -993,21 +993,105 @@ static void s7tv_swizzle_message_string_view(void) {
                 log:@"✅ MessageStringView intrinsicContentSize hooké"];
         }
 
-        // ── Hook setNeedsLayout / layoutSubviews pour voir si la vue se layout ─
-        // Ces méthodes UIView sont héritées → on les hook sur la classe concrète
-        SEL selSNL = @selector(setNeedsLayout);
-        Method mSNL = class_getInstanceMethod(cls, selSNL);
-        if (mSNL) {
-            IMP origSNL = method_getImplementation(mSNL);
-            IMP newSNL = imp_implementationWithBlock(^(id self_) {
+        // ── Hook layoutSubviews ──────────────────────────────────────────────
+        // layoutSubviews est dans la liste des 10 méthodes de MessageStringView.
+        // C'est probablement appelé à chaque nouveau message de chat.
+        // On l'exploite pour :
+        //   A) Confirmer qu'il est bien appelé pendant le chat
+        //   B) Inspecter CALayer.sublayers → chercher un CATextLayer ou similaire
+        //   C) Tenter un KVO sur les clés candidates de l'attributed string
+        SEL selLS = @selector(layoutSubviews);
+        Method mLS = class_getInstanceMethod(cls, selLS);
+        if (mLS) {
+            IMP origLS = method_getImplementation(mLS);
+            IMP newLS = imp_implementationWithBlock(^(UIView *self_) {
+                // Appeler l'original d'abord
+                ((void (*)(id, SEL))origLS)(self_, selLS);
+
                 static NSInteger cnt = 0; cnt++;
-                if (cnt <= 3) {
+
+                // Log fréquence (premiers + every 50)
+                if (cnt <= 5 || (cnt % 50) == 0) {
                     [[SevenTVManager sharedManager]
-                        log:@"🔁 MessageStringView setNeedsLayout #%ld", (long)cnt];
+                        log:@"🔁 layoutSubviews #%ld frame=(%.0f×%.0f) sub=%lu",
+                        (long)cnt,
+                        self_.bounds.size.width, self_.bounds.size.height,
+                        (unsigned long)self_.subviews.count];
                 }
-                ((void (*)(id, SEL))origSNL)(self_, selSNL);
+
+                // ── SCAN UNE FOIS (au premier appel après le démarrage du chat) ─
+                if (cnt != 1 && cnt != 3) return;
+
+                // A) Sublayers de la CALayer principale
+                NSArray *sublayers = self_.layer.sublayers;
+                if (sublayers.count > 0) {
+                    [[SevenTVManager sharedManager]
+                        log:@"📦 layer.sublayers (%lu):", (unsigned long)sublayers.count];
+                    for (CALayer *sl in sublayers) {
+                        [[SevenTVManager sharedManager]
+                            log:@"   → %@ frame=(%.0f,%.0f,%.0f,%.0f) delegate=%@",
+                            NSStringFromClass([sl class]),
+                            sl.frame.origin.x, sl.frame.origin.y,
+                            sl.frame.size.width, sl.frame.size.height,
+                            NSStringFromClass([[sl delegate] class])];
+                    }
+                } else {
+                    [[SevenTVManager sharedManager] log:@"📦 layer.sublayers: VIDE"];
+                }
+
+                // B) Delegate de la layer principale
+                id layerDelegate = self_.layer.delegate;
+                [[SevenTVManager sharedManager]
+                    log:@"📦 layer.delegate: %@", NSStringFromClass([layerDelegate class])];
+
+                // C) KVO scan — clés candidates pour l'attributed string / message
+                NSArray *candidateKeys = @[
+                    @"attributedText", @"attributedString", @"message",
+                    @"viewModel", @"textString", @"chatMessage",
+                    @"text", @"content", @"string", @"model"
+                ];
+                for (NSString *key in candidateKeys) {
+                    @try {
+                        id val = [self_ valueForKey:key];
+                        if (val) {
+                            [[SevenTVManager sharedManager]
+                                log:@"🔑 KVO hit: key='%@' class=%@ val=%@",
+                                key,
+                                NSStringFromClass([val class]),
+                                [val description].length > 80
+                                    ? [[val description] substringToIndex:80]
+                                    : [val description]];
+                        }
+                    } @catch (NSException *e) {
+                        // Clé inexistante → ignorer silencieusement
+                    }
+                }
+
+                // D) Dump de toutes les propriétés accessibles via ivar
+                // (rechercher l'ivar qui stocke l'attributed string)
+                if (cnt == 1) {
+                    unsigned int ivarCount = 0;
+                    Ivar *ivars = class_copyIvarList([self_ class], &ivarCount);
+                    if (ivarCount > 0) {
+                        NSMutableString *ivarLog = [NSMutableString string];
+                        for (unsigned int i = 0; i < ivarCount && i < 20; i++) {
+                            [ivarLog appendFormat:@"%s(%s) ",
+                                ivar_getName(ivars[i]),
+                                ivar_getTypeEncoding(ivars[i])];
+                        }
+                        [[SevenTVManager sharedManager]
+                            log:@"📋 ivars[0-%u]: %@",
+                            MIN(ivarCount, 20) - 1, ivarLog];
+                    } else {
+                        [[SevenTVManager sharedManager] log:@"📋 ivars: AUCUN (Swift?)"];
+                    }
+                    if (ivars) free(ivars);
+                }
             });
-            method_setImplementation(mSNL, newSNL);
+            method_setImplementation(mLS, newLS);
+            [[SevenTVManager sharedManager] log:@"✅ MessageStringView layoutSubviews hooké"];
+        } else {
+            [[SevenTVManager sharedManager] log:@"⚠️ MessageStringView layoutSubviews ABSENT"];
         }
 
         // ── Hook drawRect: ───────────────────────────────────────────────────
