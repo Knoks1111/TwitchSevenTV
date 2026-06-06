@@ -599,70 +599,70 @@ static void s7tv_handleRoomState(NSString *ircMessage) {
 
 @implementation UIImageView (S7TVEmoteSize)
 
-- (void)s7tv_didMoveToSuperview {
-    [self s7tv_didMoveToSuperview];
+- (void)s7tv_setImage:(UIImage *)image {
+    [self s7tv_setImage:image];
 
+    if (!image) return;
+
+    // Filtre rapide : seulement si frame est exactement 18×18
     CGRect f = self.frame;
     if (!(fabs(f.size.width  - S7TV_TWITCH_HARDCODED) < 0.5 &&
           fabs(f.size.height - S7TV_TWITCH_HARDCODED) < 0.5)) return;
-    if (self.image == nil) return;
 
+    // Remonter la hiérarchie (max 8 niveaux) — logguer les 3 premiers ancêtres
+    // pour diagnostic ET chercher MessageStringView ou ChatMessageTableViewCell
+    UIView *ancestor = self.superview;
+    BOOL inChatMessage = NO;
+    NSString *parentChain = @"";
+    for (int i = 0; i < 8 && ancestor; i++) {
+        NSString *cn = NSStringFromClass([ancestor class]);
+        if (i < 3) parentChain = [parentChain stringByAppendingFormat:@"%@→", cn];
+        if ([cn isEqualToString:@"Twitch.MessageStringView"] ||
+            [cn isEqualToString:@"Twitch.ChatMessageTableViewCell"] ||
+            [cn containsString:@"ChatMessage"] ||
+            [cn containsString:@"ChatReply"]) {
+            inChatMessage = YES;
+            break;
+        }
+        ancestor = ancestor.superview;
+    }
+
+    // Log diagnostic (5 premiers)
     static NSInteger s_diagCount = 0;
     s_diagCount++;
-    if (s_diagCount > 5) return;
-
-    NSMutableString *hier = [NSMutableString stringWithFormat:
-        @"\U0001f50d UIImageView 18x18 #%ld imgSize=(%.0fx%.0f) hier:",
-        (long)s_diagCount, self.image.size.width, self.image.size.height];
-    UIView *v = self.superview;
-    for (int i = 0; i < 10 && v; i++) {
-        [hier appendFormat:@"\n  [%d] %@ (%.0f,%.0f,%.0f,%.0f)",
-         i, NSStringFromClass([v class]),
-         v.frame.origin.x, v.frame.origin.y,
-         v.frame.size.width, v.frame.size.height];
-        v = v.superview;
+    if (s_diagCount <= 5) {
+        [[SevenTVManager sharedManager]
+            log:@"\U0001f50d setImage 18x18 #%ld imgSize=(%.0fx%.0f) chain=%@ inChat=%@",
+            (long)s_diagCount, image.size.width, image.size.height,
+            parentChain, inChatMessage ? @"OUI" : @"NON"];
     }
-    [[SevenTVManager sharedManager] log:@"%@", hier];
+
+    if (!inChatMessage) return;
+
+    // Forcer frame 28×28 centré
+    CGFloat cx = f.origin.x + f.size.width  / 2.0;
+    CGFloat cy = f.origin.y + f.size.height / 2.0;
+    self.frame = CGRectMake(cx - S7TV_EMOTE_TARGET_SIZE / 2.0,
+                            cy - S7TV_EMOTE_TARGET_SIZE / 2.0,
+                            S7TV_EMOTE_TARGET_SIZE,
+                            S7TV_EMOTE_TARGET_SIZE);
+
+    static NSInteger s_patchCount = 0;
+    s_patchCount++;
+    if (s_patchCount <= 10 || (s_patchCount % 100) == 0) {
+        [[SevenTVManager sharedManager]
+            log:@"\U0001f5bc setImage patch #%ld → 28×28", (long)s_patchCount];
+    }
 }
 
 @end
 
 static void s7tv_swizzle_imageview_frame(void) {
-    // Ne PAS utiliser s7tv_swizzle ici : didMoveToSuperview est défini sur UIView,
-    // class_getInstanceMethod remonte la hiérarchie et le swizzle affecte toutes
-    // les sous-classes (UIButton etc.) → crash "unrecognized selector".
-    // Solution : ajouter la méthode DIRECTEMENT sur UIImageView avec class_addMethod,
-    // puis pointer l'original via class_getInstanceMethod sur UIView.
-
-    SEL origSel = @selector(didMoveToSuperview);
-    SEL newSel  = @selector(s7tv_didMoveToSuperview);
-
-    // Récupérer l'IMP de notre méthode swizzlée depuis la category
-    Method newMethod = class_getInstanceMethod([UIImageView class], newSel);
-    if (!newMethod) {
-        [[SevenTVManager sharedManager] log:@"⚠️ s7tv_didMoveToSuperview introuvable sur UIImageView"];
-        return;
-    }
-
-    // Ajouter didMoveToSuperview directement sur UIImageView (override local)
-    // en pointant notre IMP — si déjà définie localement, remplacer
-    IMP newIMP = method_getImplementation(newMethod);
-    BOOL added = class_addMethod([UIImageView class], origSel, newIMP,
-                                  method_getTypeEncoding(newMethod));
-    if (!added) {
-        // Méthode déjà présente localement sur UIImageView → remplacer
-        Method existingMethod = class_getInstanceMethod([UIImageView class], origSel);
-        method_setImplementation(existingMethod, newIMP);
-    }
-
-    // Remplacer notre sélecteur swizzlé par l'original UIView (pour l'appel récursif)
-    Method origOnUIView = class_getInstanceMethod([UIView class], origSel);
-    if (origOnUIView) {
-        Method newOnImageView = class_getInstanceMethod([UIImageView class], newSel);
-        method_setImplementation(newOnImageView, method_getImplementation(origOnUIView));
-    }
-
-    [[SevenTVManager sharedManager] log:@"✅ swizzle OK [UIImageView] didMoveToSuperview"];
+    // setImage: est défini directement sur UIImageView → pas de problème de hiérarchie
+    s7tv_swizzle([UIImageView class],
+                 [UIImageView class],
+                 @selector(setImage:),
+                 @selector(s7tv_setImage:));
 }
 
 static void s7tv_swizzle_layout_manager(void) {
