@@ -594,7 +594,6 @@ static void s7tv_handleRoomState(NSString *ircMessage) {
 // Optimisation : on remonte la hiérarchie max 4 niveaux (perf).
 
 @interface UIImageView (S7TVEmoteSize)
-- (void)s7tv_didMoveToSuperview;
 @end
 
 @implementation UIImageView (S7TVEmoteSize)
