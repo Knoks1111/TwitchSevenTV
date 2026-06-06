@@ -519,6 +519,4 @@ static void S7TVFetchBadgeImage(NSString *badgeKey, void(^completion)(UIImage *)
     self.textView.attributedText = attrStr;
 }
 
-} // fin _unsafeConfigureWithMessage
-
 @end
