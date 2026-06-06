@@ -2404,8 +2404,7 @@ referenceSizeForHeaderInSection:(NSInteger)section {
     dispatch_once(&s_logFileOnce, ^{
         s_logFileQueue = dispatch_queue_create("app.s7tv.logfile", DISPATCH_QUEUE_SERIAL);
     });
-    NSString *lineToWrite = [line stringByAppendingString:@"
-"];
+    NSString *lineToWrite = [line stringByAppendingString:@"\n"];
     dispatch_async(s_logFileQueue, ^{
         NSString *docs = [NSSearchPathForDirectoriesInDomains(
             NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
