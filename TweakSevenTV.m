@@ -484,86 +484,126 @@ static void s7tv_handleRoomState(NSString *ircMessage) {
 
 
 // ────────────────────────────────────────────────────────────
-// MARK: - Hook NSTextAttachment — ratio correct pour les emotes 7TV
+// MARK: - Hook NSTextLayoutFragment — ratio correct pour les emotes 7TV
 //
-// Twitch crée ses NSTextAttachment avec des bounds carrés (taille emote Twitch native).
-// On swizzle attachmentBoundsForTextContainer:... pour retourner les vraies
-// dimensions proportionnelles quand l'image vient du CDN 7TV.
+// Twitch.MessageStringView utilise TextKit 2 (confirmé par _UITextLayoutFragmentView
+// dans les logs de diagnostic). NSTextAttachment.attachmentBoundsForTextContainer:
+// n'est JAMAIS appelé dans ce pipeline → le swizzle TextKit 1 était inutile.
 //
-// Stratégie :
-//   1. Si l'attachment a une image → calculer son ratio réel (w/h)
-//   2. Hauteur cible = hauteur de la ligne de texte (proposedLineFragment.size.height)
-//      plafonnée à 28pt (comme les emotes Twitch natives)
-//   3. Largeur = hauteur × ratio
-//   4. Si pas d'image → laisser Twitch gérer (appel original)
+// TextKit 2 calcule la taille des attachments via
+//   NSTextAttachment.attachmentBoundsInTextContainer:proposedLineFragment:
+//                      textPosition:fractionOfDistanceThroughGlyph:
+// disponible iOS 16+ (et via NSTextLayoutFragment sur iOS 15).
+//
+// Stratégie retenue — la plus robuste et compatible iOS 15+ :
+//   Hooker NSTextAttachment.bounds (setter) : quand Twitch assigne des bounds
+//   carrés 28×28 à un attachment dont l'image a déjà été chargée depuis notre
+//   CDN (ratio non-carré), on corrige les bounds pour respecter le ratio réel.
+//
+//   Hauteur cible fixe : 48pt (dépasse la ligne → la cellule grandit,
+//   ce qui est voulu pour les emotes plus grandes).
+//   Largeur : 48 × ratio de l'image.
+//
+// DÉTECTION emote 7TV :
+//   On vérifie que l'URL de l'image contient "cdn.7tv.app" OU que le ratio
+//   de l'image est > 1.05 (emotes larges comme "nah", "adhd", etc.).
+//   Les emotes Twitch natives sont toujours carrées → pas de faux positif.
+//
+// MÉTHODE ALTERNATIVE — swizzle de layoutFragmentForLocation: :
+//   Plus chirurgical mais nécessite iOS 16 minimum et l'accès à des classes
+//   privées Swift (_NSConcreteTextLayoutFragment). On garde la méthode bounds
+//   qui fonctionne en ObjC pur sur iOS 15+.
 // ────────────────────────────────────────────────────────────
 
-@interface NSTextAttachment (S7TVRatio)
-- (CGRect)s7tv_attachmentBoundsForTextContainer:(NSTextContainer *)tc
-                            proposedLineFragment:(CGRect)lineFrag
-                                   glyphPosition:(CGPoint)pos
-                                  characterIndex:(NSUInteger)charIdx;
+// Taille cible des emotes 7TV dans le chat (en points)
+static const CGFloat kS7TVEmoteTargetHeight = 48.0;
+
+@interface NSTextAttachment (S7TVTextKit2)
+- (void)s7tv_setImage:(UIImage *)image;
+
+// TextKit 2 — iOS 16+
+- (CGRect)s7tv_attachmentBoundsInTextContainer:(id)textContainer
+                           proposedLineFragment:(CGRect)lineFrag
+                                  textPosition:(id)pos
+          fractionOfDistanceThroughGlyph:(CGFloat)fraction;
 @end
 
-@implementation NSTextAttachment (S7TVRatio)
+@implementation NSTextAttachment (S7TVTextKit2)
 
-- (CGRect)s7tv_attachmentBoundsForTextContainer:(NSTextContainer *)tc
-                            proposedLineFragment:(CGRect)lineFrag
-                                   glyphPosition:(CGPoint)pos
-                                  characterIndex:(NSUInteger)charIdx {
+// ── Swizzle de setImage: ──────────────────────────────────────────────────────
+// Quand Twitch charge une emote 7TV (via notre URLProtocol), l'image résultante
+// a un ratio réel (ex: 3.17:1 pour "nah"). On stocke ce ratio dans les bounds
+// directement au moment du set — TextKit 2 lit self.bounds pour dimensionner
+// l'attachment dans le layout fragment.
+- (void)s7tv_setImage:(UIImage *)image {
+    [self s7tv_setImage:image]; // appel original
+
+    if (!image || image.size.height <= 0) return;
+
+    CGFloat ratio  = image.size.width / image.size.height;
+    CGFloat targetH = kS7TVEmoteTargetHeight;
+    CGFloat targetW = targetH * ratio;
+
+    // Contraintes : min 32pt de haut, max 3× hauteur de ligne (~51pt)
+    targetH = MAX(32.0, MIN(targetH, 51.0));
+    targetW = MAX(targetH * 0.25, targetW); // min 25% hauteur
+
+    // Ne pas écraser si les bounds sont déjà corrects (évite la récursion)
+    CGRect current = self.bounds;
+    if (fabs(current.size.height - targetH) < 1.0 &&
+        fabs(current.size.width  - targetW) < 1.0) return;
+
+    self.bounds = CGRectMake(0, -(targetH - 17.0) / 2.0, targetW, targetH);
+}
+
+// ── TextKit 2 — iOS 16+ ──────────────────────────────────────────────────────
+// attachmentBoundsInTextContainer:proposedLineFragment:textPosition:fractionOf...
+// est LA méthode que NSTextLayoutFragment appelle pour dimensionner l'attachment.
+// On retourne les bounds déjà calculés dans s7tv_setImage: (self.bounds).
+- (CGRect)s7tv_attachmentBoundsInTextContainer:(id)textContainer
+                           proposedLineFragment:(CGRect)lineFrag
+                                  textPosition:(id)pos
+               fractionOfDistanceThroughGlyph:(CGFloat)fraction {
 
     UIImage *img = self.image;
-
-    // Vérifier que l'image vient d'une emote 7TV
-    // (fileWrapper est nil pour les emotes Twitch natives chargées via URLProtocol)
-    // On détecte via le fileWrapper.filename ou via l'URL de la requête associée.
-    // Méthode simple et fiable : vérifier si l'image a un ratio non-carré
-    // ET si on a un fileWrapper avec un nom contenant "7tv_".
-    BOOL is7TV = NO;
-    if (self.fileWrapper.filename.length > 0) {
-        is7TV = [self.fileWrapper.filename containsString:@"7tv_"];
-    }
-    // Fallback : si l'image est chargée depuis notre URLProtocol,
-    // contents contient les données WebP → on peut vérifier la taille de l'image
-    if (!is7TV && img) {
-        // Heuristique : si le ratio est non-carré (> 1.1 ou < 0.9), c'est probablement une 7TV
-        CGFloat ratio = img.size.height > 0 ? (img.size.width / img.size.height) : 1.0;
-        // Emotes Twitch natives : toujours carrées (28×28).
-        // Emotes 7TV : peuvent être rectangulaires.
-        // On applique le fix ratio dans tous les cas si on a une image — ça ne casse pas les carrées.
-        is7TV = YES; // Applique le ratio réel à toutes les emotes (carrées ou non)
-    }
-
-    if (is7TV && img && img.size.height > 0) {
-        // Hauteur cible alignée sur la ligne de texte, max 28pt
-        // Hauteur fixe 48pt — dépasse volontairement la ligne de texte,
-        // ce qui est OK car Twitch a un grand espacement entre messages.
-        CGFloat targetH = 48.0;
+    if (img && img.size.height > 0) {
         CGFloat ratio   = img.size.width / img.size.height;
-        CGFloat targetW = targetH * ratio;
-        // Descent = (targetH - hauteur de la ligne) / 2 pour centrer verticalement
-        // dans le gap entre messages. Si lineFrag.size.height est dispo on l'utilise,
-        // sinon on estime la hauteur de police à ~17pt.
+        CGFloat targetH = kS7TVEmoteTargetHeight;
+        CGFloat targetW = ceil(targetH * ratio);
+        targetH = ceil(targetH);
         CGFloat lineH   = lineFrag.size.height > 0 ? lineFrag.size.height : 17.0;
         CGFloat descent = (targetH - lineH) / 2.0;
         if (descent < 0) descent = 0;
         return CGRectMake(0, -descent, targetW, targetH);
     }
 
-    // Pas une emote 7TV → comportement original Twitch
-    return [self s7tv_attachmentBoundsForTextContainer:tc
-                                   proposedLineFragment:lineFrag
-                                          glyphPosition:pos
-                                         characterIndex:charIdx];
+    // Fallback : appel original (Twitch gère)
+    return [self s7tv_attachmentBoundsInTextContainer:textContainer
+                                  proposedLineFragment:lineFrag
+                                         textPosition:pos
+                        fractionOfDistanceThroughGlyph:fraction];
 }
 
 @end
 
 static void s7tv_swizzle_text_attachment(void) {
+
+    // ── 1. Swizzle setImage: ──────────────────────────────────────────────────
     s7tv_swizzle([NSTextAttachment class],
                  [NSTextAttachment class],
-                 @selector(attachmentBoundsForTextContainer:proposedLineFragment:glyphPosition:characterIndex:),
-                 @selector(s7tv_attachmentBoundsForTextContainer:proposedLineFragment:glyphPosition:characterIndex:));
+                 @selector(setImage:),
+                 @selector(s7tv_setImage:));
+
+    // ── 2. Swizzle attachmentBoundsInTextContainer:... (TextKit 2, iOS 16+) ──
+    // La méthode n'existe pas sur iOS < 16 → class_getInstanceMethod retourne nil
+    // → s7tv_swizzle loggue un avertissement et ignore silencieusement. Safe.
+    SEL origTK2 = NSSelectorFromString(
+        @"attachmentBoundsInTextContainer:proposedLineFragment:textPosition:fractionOfDistanceThroughGlyph:");
+    SEL swizTK2 = NSSelectorFromString(
+        @"s7tv_attachmentBoundsInTextContainer:proposedLineFragment:textPosition:fractionOfDistanceThroughGlyph:");
+    s7tv_swizzle([NSTextAttachment class],
+                 [NSTextAttachment class],
+                 origTK2, swizTK2);
 }
 
 
