@@ -91,7 +91,7 @@ static void perform_rebinding_with_section(struct rebindings_entry *rebindings,
     void **indirect_symbol_bindings = (void **)((uintptr_t)slide + section->addr);
     vm_prot_t oldProtection = VM_PROT_READ;
     if (data_const) {
-        oldProtection = get_protection((__bridge void *)(__bridge id)(indirect_symbol_bindings));
+        oldProtection = get_protection(indirect_symbol_bindings);
         mprotect(indirect_symbol_bindings, section->size, PROT_READ | PROT_WRITE);
     }
     for (uint i = 0; i < section->size / sizeof(void *); i++) {
