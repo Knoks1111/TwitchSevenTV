@@ -260,6 +260,26 @@ static const CGFloat kS7TVMenuHeight = 520.0;
 @end
 
 
+// Hauteur du picker — dynamique selon l'orientation
+// Portrait : 280pt (place suffisante, clavier caché)
+// Paysage  : 120pt (hauteur écran réduite, on économise l'espace)
+static CGFloat S7TVPickerHeight(void) {
+    CGSize screen = UIScreen.mainScreen.bounds.size;
+    BOOL landscape = screen.width > screen.height;
+    return landscape ? 120.0 : 280.0;
+}
+
+// Sous-classe UIView qui impose sa hauteur a UIKit via intrinsicContentSize.
+// Sans ca, quand la vue est utilisee comme inputView, UIKit ignore la frame
+// et calcule sa propre hauteur (souvent le double de ce qu'on veut).
+@interface S7TVPickerView : UIView
+@end
+@implementation S7TVPickerView
+- (CGSize)intrinsicContentSize {
+    return CGSizeMake(UIViewNoIntrinsicMetric, S7TVPickerHeight());
+}
+@end
+
 // ============================================================
 @implementation SevenTVManager
 
@@ -1255,25 +1275,9 @@ static const CGFloat kS7TVMenuHeight = 520.0;
 // ID de cellule pour la collection
 static NSString *const kEmoteCellID = @"S7TVEmoteCell";
 
-// Hauteur du picker — dynamique selon l'orientation
-// Portrait : 280pt (place suffisante, clavier caché)
-// Paysage  : 120pt (hauteur écran réduite, on économise l'espace)
-static CGFloat S7TVPickerHeight(void) {
-    CGSize screen = UIScreen.mainScreen.bounds.size;
-    BOOL landscape = screen.width > screen.height;
-    return landscape ? 120.0 : 280.0;
-}
 
-// Sous-classe UIView qui impose sa hauteur a UIKit via intrinsicContentSize.
-// Sans ca, quand la vue est utilisee comme inputView, UIKit ignore la frame
-// et calcule sa propre hauteur (souvent le double de ce qu'on veut).
-@interface S7TVPickerView : UIView
-@end
-@implementation S7TVPickerView
-- (CGSize)intrinsicContentSize {
-    return CGSizeMake(UIViewNoIntrinsicMetric, S7TVPickerHeight());
-}
-@end
+
+
 
 // Taille de chaque cellule par défaut (carré)
 static const CGFloat kCellSize = 40.0;
