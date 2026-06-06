@@ -82,9 +82,15 @@ static const NSUInteger kMaxMessages = 200;
 // ────────────────────────────────────────────────────────────
 
 - (void)addMessage:(SevenTVChatMessage *)message {
-    dispatch_async(dispatch_get_main_queue(), ^{
+    // Appel direct si déjà sur le main thread (évite double-dispatch
+    // qui peut désynchroniser numberOfRows vs cellForRow)
+    if ([NSThread isMainThread]) {
         [self _addMessageOnMain:message];
-    });
+    } else {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self _addMessageOnMain:message];
+        });
+    }
 }
 
 - (void)clearMessagesForUser:(NSString *)username {
@@ -117,7 +123,9 @@ static const NSUInteger kMaxMessages = 200;
 
 - (void)handleNewMessage:(NSNotification *)notif {
     SevenTVChatMessage *msg = notif.userInfo[@"message"];
-    if (msg) [self _addMessageOnMain:msg];
+    // Passer par addMessage: pour le guard de thread (notifications postées
+    // depuis TweakSevenTV sont déjà sur main, mais on reste défensif)
+    if (msg) [self addMessage:msg];
 }
 
 - (void)handleClearUser:(NSNotification *)notif {
@@ -142,15 +150,23 @@ static const NSUInteger kMaxMessages = 200;
 
     [self.messages addObject:message];
 
-    NSIndexPath *ip = [NSIndexPath indexPathForRow:(NSInteger)self.messages.count - 1
-                                         inSection:0];
+    NSInteger newRow = (NSInteger)self.messages.count - 1;
+    NSIndexPath *ip  = [NSIndexPath indexPathForRow:newRow inSection:0];
 
-    [self.tableView beginUpdates];
-    [self.tableView insertRowsAtIndexPaths:@[ip]
-                          withRowAnimation:UITableViewRowAnimationNone];
-    [self.tableView endUpdates];
+    // Utiliser insertRows uniquement si la tableView est cohérente avec notre
+    // tableau (visibleRows == newRow signifie qu'elle connaît déjà newRow-1 lignes).
+    // En cas de désynchronisation (trim, première insertion, etc.) → reloadData.
+    NSInteger visibleRows = [self.tableView numberOfRowsInSection:0];
+    if (visibleRows == newRow) {
+        [self.tableView beginUpdates];
+        [self.tableView insertRowsAtIndexPaths:@[ip]
+                              withRowAnimation:UITableViewRowAnimationNone];
+        [self.tableView endUpdates];
+    } else {
+        [self.tableView reloadData];
+    }
 
-    if (self.autoScroll) {
+    if (self.autoScroll && self.messages.count > 0) {
         [self.tableView scrollToRowAtIndexPath:ip
                               atScrollPosition:UITableViewScrollPositionBottom
                                       animated:NO];
@@ -169,6 +185,10 @@ static const NSUInteger kMaxMessages = 200;
          cellForRowAtIndexPath:(NSIndexPath *)ip {
     SevenTVChatCell *cell = [tv dequeueReusableCellWithIdentifier:kSevenTVChatCellReuseID
                                                      forIndexPath:ip];
+    // Guard out-of-bounds : peut arriver si reloadData est en cours
+    if (ip.row < 0 || (NSUInteger)ip.row >= self.messages.count) {
+        return cell;
+    }
     SevenTVChatMessage *msg = self.messages[ip.row];
     [cell configureWithMessage:msg];
     return cell;
