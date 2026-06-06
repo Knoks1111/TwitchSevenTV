@@ -536,12 +536,17 @@ static void s7tv_handleRoomState(NSString *ircMessage) {
 
     if (is7TV && img && img.size.height > 0) {
         // Hauteur cible alignée sur la ligne de texte, max 28pt
-        CGFloat targetH = MIN(lineFrag.size.height > 0 ? lineFrag.size.height - 4.0 : 24.0, 28.0);
-        if (targetH < 10) targetH = 24.0;
+        // Hauteur fixe 48pt — dépasse volontairement la ligne de texte,
+        // ce qui est OK car Twitch a un grand espacement entre messages.
+        CGFloat targetH = 48.0;
         CGFloat ratio   = img.size.width / img.size.height;
         CGFloat targetW = targetH * ratio;
-        // Décalage vertical pour aligner sur la baseline de texte
-        CGFloat descent = 4.0;
+        // Descent = (targetH - hauteur de la ligne) / 2 pour centrer verticalement
+        // dans le gap entre messages. Si lineFrag.size.height est dispo on l'utilise,
+        // sinon on estime la hauteur de police à ~17pt.
+        CGFloat lineH   = lineFrag.size.height > 0 ? lineFrag.size.height : 17.0;
+        CGFloat descent = (targetH - lineH) / 2.0;
+        if (descent < 0) descent = 0;
         return CGRectMake(0, -descent, targetW, targetH);
     }
 
