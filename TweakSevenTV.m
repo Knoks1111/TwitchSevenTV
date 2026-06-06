@@ -814,74 +814,101 @@ static UIViewController *s7tv_vcForView(UIView *v) {
     }
     [mgr log:@"  ── fin hiérarchie ──"];
 
-    // ── Snapshot différé: état du UITextView 200ms après le tap ──────────────
-    // Permet de voir ce que Twitch a écrit dans le champ APRÈS son traitement
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)),
+    // ── Scan deep centré sur le point tapé ───────────────────────────────────
+    // But : identifier exactement quelle classe Twitch affiche les emotes dans
+    // le chat et avec quelles dimensions, pour pouvoir hooker la bonne méthode.
+    //
+    // On cherche dans un rayon de 60pt autour du tap :
+    //   • UIImageView  → candidat emote (frame, image size, classe parent)
+    //   • UILabel      → texte du message (pour corréler avec l'emote)
+    //   • NSTextAttachment dans tout UITextView trouvé (classe exacte + bounds)
+    //   • Classes Twitch custom contenant "Chat" ou "Emote" ou "Message"
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
-        // Chercher le UITextView dans ChatInputView
-        UIView *chatInputView = nil;
-        NSMutableArray<UIView *> *sq = [NSMutableArray arrayWithObject:self];
-        while (sq.count > 0) {
-            UIView *sv = sq.firstObject; [sq removeObjectAtIndex:0];
-            if ([NSStringFromClass([sv class]) isEqualToString:@"Twitch.ChatInputView"]) {
-                chatInputView = sv; break;
+
+        [mgr log:@"  🔍 SCAN CHAT @ (%.0f,%.0f) ──────────────", pt.x, pt.y];
+
+        // Parcourir TOUTE la hiérarchie de la fenêtre
+        NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:self];
+        NSInteger scanCount = 0;
+
+        while (queue.count > 0 && scanCount < 2000) {
+            UIView *sv = queue.firstObject; [queue removeObjectAtIndex:0];
+            scanCount++;
+            [queue addObjectsFromArray:sv.subviews];
+
+            NSString *cn = NSStringFromClass([sv class]);
+            CGRect frameInWindow = [sv convertRect:sv.bounds toView:nil];
+            CGFloat dist = hypot(CGRectGetMidX(frameInWindow) - pt.x,
+                                 CGRectGetMidY(frameInWindow) - pt.y);
+
+            // Ne garder que les vues proches du tap (rayon 80pt)
+            if (dist > 80.0) continue;
+
+            // ── UIImageView : candidat emote ──────────────────────────────────
+            if ([sv isKindOfClass:[UIImageView class]]) {
+                UIImageView *iv = (UIImageView *)sv;
+                UIImage *img = iv.image;
+                [mgr log:@"  🖼 UIImageView(%@) frame=(%.0f,%.0f,%.0f,%.0f) imgSize=(%.0f×%.0f) contentMode=%ld parent=%@",
+                 cn,
+                 frameInWindow.origin.x, frameInWindow.origin.y,
+                 frameInWindow.size.width, frameInWindow.size.height,
+                 img ? img.size.width : 0, img ? img.size.height : 0,
+                 (long)iv.contentMode,
+                 NSStringFromClass([sv.superview class])];
             }
-            for (UIView *sub in sv.subviews) [sq addObject:sub];
-        }
-        if (!chatInputView) {
-            [mgr log:@"  📸 POST-TAP(200ms): ChatInputView introuvable"];
-            return;
-        }
 
-        NSMutableArray<UIView *> *bfs = [NSMutableArray arrayWithObject:chatInputView];
-        while (bfs.count > 0) {
-            UIView *bv = bfs.firstObject; [bfs removeObjectAtIndex:0];
-            [bfs addObjectsFromArray:bv.subviews];
-
-            if ([bv isKindOfClass:[UITextView class]]) {
-                UITextView *tv = (UITextView *)bv;
-                [mgr log:@"  📸 POST-TAP UITextView(%@) text='%@' isFirstResponder=%d",
-                 NSStringFromClass([bv class]),
-                 tv.text ?: @"",
-                 (int)tv.isFirstResponder];
-
-                // Inspecter l'attributedText pour voir les attachments (emotes)
+            // ── UITextView : chercher NSTextAttachment ────────────────────────
+            if ([sv isKindOfClass:[UITextView class]]) {
+                UITextView *tv = (UITextView *)sv;
                 NSAttributedString *attr = tv.attributedText;
+                NSUInteger attCount = 0;
                 if (attr.length > 0) {
                     [attr enumerateAttribute:NSAttachmentAttributeName
                                      inRange:NSMakeRange(0, attr.length)
                                      options:0
                                   usingBlock:^(id att, NSRange r, BOOL *stop) {
-                        if (att) {
-                            [mgr log:@"    📎 NSTextAttachment @ range {%lu,%lu}: %@",
-                             (unsigned long)r.location, (unsigned long)r.length,
-                             NSStringFromClass([att class])];
-                        }
+                        if (!att) return;
+                        attCount++;
+                        NSTextAttachment *ta = (NSTextAttachment *)att;
+                        UIImage *img = ta.image;
+                        // bounds retournés par la méthode standard
+                        CGRect b = [ta attachmentBoundsForTextContainer:nil
+                                                    proposedLineFragment:CGRectMake(0,0,320,20)
+                                                           glyphPosition:CGPointZero
+                                                          characterIndex:r.location];
+                        [mgr log:@"  📎 Attachment[%lu] class=%@ imgSize=(%.0f×%.0f) bounds=(%.0f,%.0f,%.0f,%.0f)",
+                         (unsigned long)attCount,
+                         NSStringFromClass([att class]),
+                         img ? img.size.width : 0, img ? img.size.height : 0,
+                         b.origin.x, b.origin.y, b.size.width, b.size.height];
                     }];
-                    // Log du texte brut (sans attachments)
-                    NSMutableString *plainText = [NSMutableString string];
-                    [attr enumerateAttributesInRange:NSMakeRange(0, attr.length)
-                                            options:0
-                                         usingBlock:^(NSDictionary *attrs, NSRange r, BOOL *stop) {
-                        if (!attrs[NSAttachmentAttributeName]) {
-                            [plainText appendString:[attr.string substringWithRange:r]];
-                        }
-                    }];
-                    [mgr log:@"    📝 texte brut (sans attachments): '%@'", plainText];
                 }
+                [mgr log:@"  📝 UITextView(%@) frame=(%.0f,%.0f,%.0f,%.0f) attachments=%lu text='%.40@'",
+                 cn,
+                 frameInWindow.origin.x, frameInWindow.origin.y,
+                 frameInWindow.size.width, frameInWindow.size.height,
+                 (unsigned long)attCount,
+                 tv.text ?: @""];
+            }
+
+            // ── Classes Twitch custom liées au chat / emotes ──────────────────
+            BOOL isTwitchChat = [cn containsString:@"Chat"]
+                             || [cn containsString:@"Emote"]
+                             || [cn containsString:@"Message"]
+                             || [cn containsString:@"Cell"]
+                             || [cn containsString:@"Fragment"]
+                             || [cn containsString:@"Token"];
+            if (isTwitchChat) {
+                [mgr log:@"  🎯 TWITCH(%@) frame=(%.0f,%.0f,%.0f,%.0f) sub=%lu",
+                 cn,
+                 frameInWindow.origin.x, frameInWindow.origin.y,
+                 frameInWindow.size.width, frameInWindow.size.height,
+                 (unsigned long)sv.subviews.count];
             }
         }
-
-        // firstResponder après le tap
-        UIResponder *postFR = nil;
-        NSMutableArray<UIView *> *frq2 = [NSMutableArray arrayWithObject:self];
-        while (frq2.count > 0) {
-            UIView *fv = frq2.firstObject; [frq2 removeObjectAtIndex:0];
-            if (fv.isFirstResponder) { postFR = fv; break; }
-            for (UIView *sub in fv.subviews) [frq2 addObject:sub];
-        }
-        [mgr log:@"  📸 POST-TAP firstResponder: %@",
-         postFR ? NSStringFromClass([postFR class]) : @"(aucun)"];
+        [mgr log:@"  🔍 FIN SCAN (%ld vues inspectées)", (long)scanCount];
     });
 }
 
