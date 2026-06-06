@@ -703,7 +703,7 @@ typedef NS_ENUM(NSInteger, S7TVHomeRow) {
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tv { return 3; }
 
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s {
-    switch (s) { case 0: return 3; case 1: return 1; case 2: return 1; default: return 0; }
+    switch (s) { case 0: return 4; case 1: return 1; case 2: return 1; default: return 0; }
 }
 
 - (CGFloat)tableView:(UITableView *)tv heightForHeaderInSection:(NSInteger)s {
@@ -749,6 +749,11 @@ typedef NS_ENUM(NSInteger, S7TVHomeRow) {
                         [UIColor colorWithWhite:0.75 alpha:1.0],
                         mgr.showFloatingButton,
                         self, @selector(toggleFloatingButton:));
+            case 3: return S7TVSwitchCell(@"Chat custom 7TV (overlay)",
+                        @"bubble.left.and.bubble.right.fill",
+                        [UIColor colorWithRed:0.557 green:0.271 blue:0.878 alpha:1.0],
+                        mgr.useCustomChat,
+                        self, @selector(toggleCustomChat:));
         }
     }
 
@@ -853,5 +858,6 @@ typedef NS_ENUM(NSInteger, S7TVHomeRow) {
 - (void)toggleDebug:(UISwitch *)sw        { [SevenTVManager sharedManager].debugLogging    = sw.isOn; }
 - (void)toggleTapLog:(UISwitch *)sw       { [SevenTVManager sharedManager].tapLogging       = sw.isOn; }
 - (void)toggleFloatingButton:(UISwitch *)sw { [SevenTVManager sharedManager].showFloatingButton = sw.isOn; }
+- (void)toggleCustomChat:(UISwitch *)sw   { [SevenTVManager sharedManager].useCustomChat    = sw.isOn; }
 
 @end

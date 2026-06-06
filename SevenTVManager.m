@@ -527,6 +527,7 @@ static const CGFloat kS7TVMenuHeight = 520.0;
     if ([prefs objectForKey:@"s7tv_floating_btn"]      != nil) _showFloatingButton     = [prefs boolForKey:@"s7tv_floating_btn"];
     else _showFloatingButton = YES; // activé par défaut
     if ([prefs objectForKey:@"s7tv_tap_log"]           != nil) _tapLogging             = [prefs boolForKey:@"s7tv_tap_log"];
+    if ([prefs objectForKey:@"s7tv_custom_chat"]        != nil) _useCustomChat           = [prefs boolForKey:@"s7tv_custom_chat"];
     // Charger les favoris (array d'IDs 7TV)
     NSArray *savedFavs = [prefs arrayForKey:@"s7tv_favorites"];
     if (savedFavs) {
@@ -542,6 +543,7 @@ static const CGFloat kS7TVMenuHeight = 520.0;
     [prefs setBool:self.debugLogging         forKey:@"s7tv_debug"];
     [prefs setBool:self.showFloatingButton   forKey:@"s7tv_floating_btn"];
     [prefs setBool:self.tapLogging           forKey:@"s7tv_tap_log"];
+    [prefs setBool:self.useCustomChat        forKey:@"s7tv_custom_chat"];
     [prefs synchronize];
 }
 
@@ -576,6 +578,18 @@ static const CGFloat kS7TVMenuHeight = 520.0;
     extern BOOL s_tapLogEnabled;
     s_tapLogEnabled = v;
     [self log:@"👆 Tap logger %@", v ? @"activé" : @"désactivé"];
+}
+
+- (void)setUseCustomChat:(BOOL)v {
+    _useCustomChat = v;
+    [self savePreferences];
+    [self log:@"💬 Chat custom 7TV %@", v ? @"activé" : @"désactivé"];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [[NSNotificationCenter defaultCenter]
+            postNotificationName:@"S7TVCustomChatDidChange"
+                          object:nil
+                        userInfo:@{@"enabled": @(v)}];
+    });
 }
 
 
