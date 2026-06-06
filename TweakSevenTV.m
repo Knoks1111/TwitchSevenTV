@@ -1375,11 +1375,6 @@ static void s7tv_swizzle_account_menu(void) {
 }
 
 
-// ────────────────────────────────────────────────────────────
-// MARK: - Point d'entrée __attribute__((constructor))
-// ────────────────────────────────────────────────────────────
-
-__attribute__((constructor))
 // ── Couche D : Hook CTFramesetterCreateWithAttributedString via fishhook ─────
 //
 // Twitch.MessageStringView passe un NSAttributedString à CoreText via cette
@@ -1446,6 +1441,11 @@ static void s7tv_hook_coretext_framesetter(void) {
 }
 
 
+// ────────────────────────────────────────────────────────────
+// MARK: - Point d'entrée __attribute__((constructor))
+// ────────────────────────────────────────────────────────────
+
+__attribute__((constructor))
 static void TwitchSevenTVInit(void) {
     SevenTVManager *mgr = [SevenTVManager sharedManager];
     [mgr log:@"🔌 Chargement TwitchSevenTV v2.0 (substrate-free)..."];
