@@ -309,7 +309,23 @@ static const NSInteger kAutoScrollThreshold = 20;
 }
 
 - (void)closeTapped {
-    [self dismissViewControllerAnimated:YES completion:nil];
+    // Si on est dans la menuWindow (modal depuis bouton flottant 7TV),
+    // il faut dismisser TOUTE la stack modale (nav + logs) et poster S7TVMenuDidDismiss
+    // pour que SevenTVManager libère la menuWindow.
+    // Sans ça, menuWindow reste en vie, capturant tous les touchers → freeze UI.
+    UIViewController *root = self.navigationController ?: self;
+    UIViewController *presenting = root.presentingViewController;
+
+    if (presenting) {
+        // On est dans un modal → dismiss toute la stack + notifier le manager
+        [presenting dismissViewControllerAnimated:YES completion:^{
+            [[NSNotificationCenter defaultCenter]
+                postNotificationName:@"S7TVMenuDidDismiss" object:nil];
+        }];
+    } else {
+        // On est pushé dans une nav sans modal (ex: depuis les settings Twitch natifs)
+        [self dismissViewControllerAnimated:YES completion:nil];
+    }
 }
 
 

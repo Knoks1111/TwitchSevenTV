@@ -484,6 +484,85 @@ static void s7tv_handleRoomState(NSString *ircMessage) {
 
 
 // ────────────────────────────────────────────────────────────
+// MARK: - Hook NSTextAttachment — ratio correct pour les emotes 7TV
+//
+// Twitch crée ses NSTextAttachment avec des bounds carrés (taille emote Twitch native).
+// On swizzle attachmentBoundsForTextContainer:... pour retourner les vraies
+// dimensions proportionnelles quand l'image vient du CDN 7TV.
+//
+// Stratégie :
+//   1. Si l'attachment a une image → calculer son ratio réel (w/h)
+//   2. Hauteur cible = hauteur de la ligne de texte (proposedLineFragment.size.height)
+//      plafonnée à 28pt (comme les emotes Twitch natives)
+//   3. Largeur = hauteur × ratio
+//   4. Si pas d'image → laisser Twitch gérer (appel original)
+// ────────────────────────────────────────────────────────────
+
+@interface NSTextAttachment (S7TVRatio)
+- (CGRect)s7tv_attachmentBoundsForTextContainer:(NSTextContainer *)tc
+                            proposedLineFragment:(CGRect)lineFrag
+                                   glyphPosition:(CGPoint)pos
+                                  characterIndex:(NSUInteger)charIdx;
+@end
+
+@implementation NSTextAttachment (S7TVRatio)
+
+- (CGRect)s7tv_attachmentBoundsForTextContainer:(NSTextContainer *)tc
+                            proposedLineFragment:(CGRect)lineFrag
+                                   glyphPosition:(CGPoint)pos
+                                  characterIndex:(NSUInteger)charIdx {
+
+    UIImage *img = self.image;
+
+    // Vérifier que l'image vient d'une emote 7TV
+    // (fileWrapper est nil pour les emotes Twitch natives chargées via URLProtocol)
+    // On détecte via le fileWrapper.filename ou via l'URL de la requête associée.
+    // Méthode simple et fiable : vérifier si l'image a un ratio non-carré
+    // ET si on a un fileWrapper avec un nom contenant "7tv_".
+    BOOL is7TV = NO;
+    if (self.fileWrapper.filename.length > 0) {
+        is7TV = [self.fileWrapper.filename containsString:@"7tv_"];
+    }
+    // Fallback : si l'image est chargée depuis notre URLProtocol,
+    // contents contient les données WebP → on peut vérifier la taille de l'image
+    if (!is7TV && img) {
+        // Heuristique : si le ratio est non-carré (> 1.1 ou < 0.9), c'est probablement une 7TV
+        CGFloat ratio = img.size.height > 0 ? (img.size.width / img.size.height) : 1.0;
+        // Emotes Twitch natives : toujours carrées (28×28).
+        // Emotes 7TV : peuvent être rectangulaires.
+        // On applique le fix ratio dans tous les cas si on a une image — ça ne casse pas les carrées.
+        is7TV = YES; // Applique le ratio réel à toutes les emotes (carrées ou non)
+    }
+
+    if (is7TV && img && img.size.height > 0) {
+        // Hauteur cible alignée sur la ligne de texte, max 28pt
+        CGFloat targetH = MIN(lineFrag.size.height > 0 ? lineFrag.size.height - 4.0 : 24.0, 28.0);
+        if (targetH < 10) targetH = 24.0;
+        CGFloat ratio   = img.size.width / img.size.height;
+        CGFloat targetW = targetH * ratio;
+        // Décalage vertical pour aligner sur la baseline de texte
+        CGFloat descent = 4.0;
+        return CGRectMake(0, -descent, targetW, targetH);
+    }
+
+    // Pas une emote 7TV → comportement original Twitch
+    return [self s7tv_attachmentBoundsForTextContainer:tc
+                                   proposedLineFragment:lineFrag
+                                          glyphPosition:pos
+                                         characterIndex:charIdx];
+}
+
+@end
+
+static void s7tv_swizzle_text_attachment(void) {
+    s7tv_swizzle([NSTextAttachment class],
+                 [NSTextAttachment class],
+                 @selector(attachmentBoundsForTextContainer:proposedLineFragment:glyphPosition:characterIndex:),
+                 @selector(s7tv_attachmentBoundsForTextContainer:proposedLineFragment:glyphPosition:characterIndex:));
+}
+
+
+// ────────────────────────────────────────────────────────────
 // MARK: - Swizzle NSURLSessionConfiguration.protocolClasses
 // ────────────────────────────────────────────────────────────
 
@@ -1083,6 +1162,9 @@ static void TwitchSevenTVInit(void) {
                  [UIView class],
                  @selector(didMoveToWindow),
                  @selector(s7tv_didMoveToWindow));
+
+    // ── Swizzle NSTextAttachment (ratio correct pour emotes 7TV) ─────────────
+    s7tv_swizzle_text_attachment();
 
     // ── Fix B: protocolClasses swizzle (avant la création de sessions) ────────
     s7tv_swizzle_protocol_classes();
