@@ -20,7 +20,8 @@ TwitchSevenTV_FILES = \
     SevenTVManager.m \
     SevenTVURLProtocol.m \
     SevenTVSettingsController.m \
-    SevenTVLogsController.m
+    SevenTVLogsController.m \
+    fishhook.c
 
 # ── Options de compilation ──
 TwitchSevenTV_CFLAGS = \

@@ -19,6 +19,8 @@
 #import "SevenTVURLProtocol.h"
 #import "SevenTVLogo.h"
 #import "SevenTVSettingsController.h"
+#import "fishhook.h"
+#import <CoreText/CoreText.h>
 
 
 // ────────────────────────────────────────────────────────────
@@ -632,25 +634,14 @@ static void s7tv_swizzle_text_attachment(void) {
 static void s7tv_fix_attachment_bounds(NSTextAttachment *att) {
     if (!att || ![att isKindOfClass:[NSTextAttachment class]]) return;
     CGRect b = att.bounds;
-    // Log systematique pour diagnostic (20 premiers appels + 1/50 ensuite)
-    static NSInteger s_callCount = 0;
-    s_callCount++;
-    if (s_callCount <= 20 || (s_callCount % 50) == 0) {
-        [[SevenTVManager sharedManager]
-            log:@"\U0001f52c fix_bounds #%ld class=%@ bounds=(%.1f,%.1f,%.1f,%.1f) img=%@",
-            (long)s_callCount,
-            NSStringFromClass([att class]),
-            b.origin.x, b.origin.y, b.size.width, b.size.height,
-            att.image ? [NSString stringWithFormat:@"%.0fx%.0f", att.image.size.width, att.image.size.height] : @"nil"];
-    }
     // Si bounds sont déjà forcés par nous → ne pas boucler
     if (fabs(b.size.width - S7TV_EMOTE_TARGET_SIZE) < 0.5 &&
         fabs(b.size.height - S7TV_EMOTE_TARGET_SIZE) < 0.5) return;
-    // Forcer sur TOUT attachment pas encore à 28x28 (condition elargie)
-    // Twitch peut poser des bounds à 0x0, 18x18 ou toute autre valeur
-    att.bounds = CGRectMake(0, -5, S7TV_EMOTE_TARGET_SIZE, S7TV_EMOTE_TARGET_SIZE);
-    if (s_callCount <= 20 || (s_callCount % 50) == 0) {
-        [[SevenTVManager sharedManager] log:@"  -> force 28x28"];
+    // Forcer si 0×0 ou 18×18 (les deux valeurs Twitch connues)
+    if ((b.size.width < 1.0 && b.size.height < 1.0) ||
+        (fabs(b.size.width  - S7TV_TWITCH_HARDCODED) < 1.0 &&
+         fabs(b.size.height - S7TV_TWITCH_HARDCODED) < 1.0)) {
+        att.bounds = CGRectMake(0, -5, S7TV_EMOTE_TARGET_SIZE, S7TV_EMOTE_TARGET_SIZE);
     }
 }
 
@@ -1389,6 +1380,72 @@ static void s7tv_swizzle_account_menu(void) {
 // ────────────────────────────────────────────────────────────
 
 __attribute__((constructor))
+// ── Couche D : Hook CTFramesetterCreateWithAttributedString via fishhook ─────
+//
+// Twitch.MessageStringView passe un NSAttributedString à CoreText via cette
+// fonction C. C'est ICI que CoreText lit NSTextAttachment.bounds pour calculer
+// le layout. Notre Couche C (addAttribute:) est appelée APRÈS → trop tard.
+//
+// fishhook remplace l'entrée dans la PLT/GOT de Twitch (Mach-O lazy binding)
+// → notre wrapper est appelé à la place de CTFramesetterCreateWithAttributedString.
+// On patche les bounds de tous les NSTextAttachment dans le string AVANT de
+// passer à CoreText.
+//
+// ⚠️ fishhook ne fonctionne que sur les symboles importés dynamiquement
+//    (lazy/non-lazy pointers). CTFramesetterCreateWithAttributedString est
+//    dans CoreText.framework → importé dynamiquement par Twitch → hookable.
+
+static CTFramesetterRef (*orig_CTFramesetterCreate)(CFAttributedStringRef, CFRange, CFDictionaryRef) = NULL;
+
+static CTFramesetterRef s7tv_CTFramesetterCreate(CFAttributedStringRef string,
+                                                   CFRange stringRange,
+                                                   CFDictionaryRef frameAttributes) {
+    // Patcher les bounds de tous les NSTextAttachment dans le string
+    NSAttributedString *attrStr = (__bridge NSAttributedString *)string;
+    NSUInteger len = attrStr.length;
+    if (len > 0) {
+        static NSInteger s_ftCount = 0;
+        NSRange searchRange = NSMakeRange(0, len);
+        while (searchRange.location < len) {
+            NSRange effectiveRange;
+            id val = [attrStr attribute:NSAttachmentAttributeName
+                                atIndex:searchRange.location
+                         effectiveRange:&effectiveRange];
+            if (val && [val isKindOfClass:[NSTextAttachment class]]) {
+                NSTextAttachment *att = (NSTextAttachment *)val;
+                CGRect b = att.bounds;
+                if (!(fabs(b.size.width  - S7TV_EMOTE_TARGET_SIZE) < 0.5 &&
+                      fabs(b.size.height - S7TV_EMOTE_TARGET_SIZE) < 0.5)) {
+                    s_ftCount++;
+                    if (s_ftCount <= 20 || (s_ftCount % 100) == 0) {
+                        [[SevenTVManager sharedManager]
+                            log:@"\U0001f3af CTFramesetter patch #%ld bounds=(%.1f,%.1f,%.1f,%.1f)",
+                            (long)s_ftCount, b.origin.x, b.origin.y, b.size.width, b.size.height];
+                    }
+                    att.bounds = CGRectMake(0, -5, S7TV_EMOTE_TARGET_SIZE, S7TV_EMOTE_TARGET_SIZE);
+                }
+            }
+            NSUInteger nextLoc = effectiveRange.location + effectiveRange.length;
+            if (nextLoc <= searchRange.location) break; // sécurité boucle infinie
+            searchRange = NSMakeRange(nextLoc, len - nextLoc);
+        }
+    }
+    return orig_CTFramesetterCreate(string, stringRange, frameAttributes);
+}
+
+static void s7tv_hook_coretext_framesetter(void) {
+    struct rebinding bindings[] = {
+        { "CTFramesetterCreateWithAttributedString",
+          s7tv_CTFramesetterCreate,
+          (void **)&orig_CTFramesetterCreate }
+    };
+    int result = rebind_symbols(bindings, 1);
+    [[SevenTVManager sharedManager]
+        log:@"%@ fishhook CTFramesetterCreateWithAttributedString (result=%d)",
+        result == 0 ? @"\u2705" : @"\u274c", result];
+}
+
+
 static void TwitchSevenTVInit(void) {
     SevenTVManager *mgr = [SevenTVManager sharedManager];
     [mgr log:@"🔌 Chargement TwitchSevenTV v2.0 (substrate-free)..."];
@@ -1411,11 +1468,15 @@ static void TwitchSevenTVInit(void) {
     // ── Swizzle NSLayoutManager setAttachmentSize: (TextKit 1) ────────────────
     s7tv_swizzle_layout_manager();
 
-    // ── Swizzle NSMutableAttributedString (Couche C — CoreText bounds) ────────
-    // C'est LE vrai fix pour Twitch.MessageStringView qui utilise CoreText direct.
-    // On force NSTextAttachment.bounds = CGRectMake(0,-5,28,28) dès que Twitch
-    // pose un attachment sur le NSAttributedString → CTRunDelegate lit bounds.
+    // ── Couche C : NSMutableAttributedString (belt-and-suspenders) ─────────────
     s7tv_swizzle_attributed_string();
+
+    // ── Couche D : fishhook CTFramesetterCreateWithAttributedString ───────────
+    // C'est le vrai point d'entrée CoreText. Twitch appelle cette fonction C
+    // avec le NSAttributedString AVANT que addAttribute: soit rappelé sur nos
+    // bounds. On intercepte ici pour patcher les bounds 18×18→28×28 juste
+    // AVANT que CoreText ne calcule le layout.
+    s7tv_hook_coretext_framesetter();
 
     // ── Fix B: protocolClasses swizzle (avant la création de sessions) ────────
     s7tv_swizzle_protocol_classes();
