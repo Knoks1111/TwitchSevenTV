@@ -182,14 +182,14 @@ static const CGFloat kS7TVMenuHeight = 520.0;
     }];
 }
 
-// Frame du menu : centré horizontalement, collé en bas, taille fixe.
+// Frame du menu : plein écran avec marges de sécurité (safe area).
 - (CGRect)frameOfPresentedViewInContainerView {
     CGRect container = self.containerView.bounds;
-    CGFloat x = (container.size.width  - kS7TVMenuWidth)  / 2.0;
-    CGFloat y = (container.size.height - kS7TVMenuHeight) / 2.0;
-    // Centré verticalement mais pas plus haut que 40pt du bord
-    y = MAX(40.0, y);
-    return CGRectMake(x, y, kS7TVMenuWidth, kS7TVMenuHeight);
+    // Inset de 16pt de chaque côté pour un aspect "carte" sur iPad,
+    // et plein écran sur iPhone (containerView = plein écran de menuWindow).
+    CGFloat hInset = (container.size.width > 500) ? 16.0 : 0.0;
+    CGFloat vInset = (container.size.height > 700) ? 16.0 : 0.0;
+    return CGRectInset(container, hInset, vInset);
 }
 
 - (void)containerViewWillLayoutSubviews {
@@ -1086,12 +1086,18 @@ static const CGFloat kS7TVMenuHeight = 520.0;
     if (!self.isEnabled || raw.length == 0) return raw;
 
     // On ne traite que les messages PRIVMSG
-    if (![raw containsString:@"PRIVMSG"]) return raw;
+    NSRange privmsgRange = [raw rangeOfString:@"PRIVMSG"];
+    if (privmsgRange.location == NSNotFound) return raw;
 
-    // Extraire le texte du message après " :"
-    NSRange colonSpace = [raw rangeOfString:@" :"];
+    // Extraire le texte du message : chercher " :" APRÈS "PRIVMSG #channel"
+    // Un message IRC ressemble à :
+    //   @tags :user!user@twitch.tv PRIVMSG #channel :texte du message
+    // Il y a un premier " :" entre les tags et le préfixe user — on l'ignore.
+    // On cherche " :" à partir de la position PRIVMSG pour trouver le bon " :".
+    NSString *afterPrivmsg = [raw substringFromIndex:privmsgRange.location];
+    NSRange colonSpace = [afterPrivmsg rangeOfString:@" :"];
     if (colonSpace.location == NSNotFound) return raw;
-    NSString *messageText = [raw substringFromIndex:colonSpace.location + 2];
+    NSString *messageText = [afterPrivmsg substringFromIndex:colonSpace.location + 2];
 
     // Retirer \r\n en fin
     messageText = [messageText stringByTrimmingCharactersInSet:
@@ -2282,14 +2288,18 @@ referenceSizeForHeaderInSection:(NSInteger)section {
         // Méthode simple : polling via le completion du dismiss depuis le bouton Close.
         // Le bouton Close appelle dismissViewControllerAnimated:completion: →
         // on swizzle pas, on utilise un bloc de notification.
-        [[NSNotificationCenter defaultCenter] addObserverForName:@"S7TVMenuDidDismiss"
-                                                          object:nil
-                                                           queue:[NSOperationQueue mainQueue]
-                                                      usingBlock:^(NSNotification *n) {
+        __block id observer = nil;
+        observer = [[NSNotificationCenter defaultCenter]
+            addObserverForName:@"S7TVMenuDidDismiss"
+                        object:nil
+                         queue:[NSOperationQueue mainQueue]
+                    usingBlock:^(NSNotification *n) {
             weakSelf.menuWindow.hidden = YES;
             weakSelf.menuWindow = nil;
-            [[NSNotificationCenter defaultCenter] removeObserver:n.object
-                                                            name:@"S7TVMenuDidDismiss" object:nil];
+            if (observer) {
+                [[NSNotificationCenter defaultCenter] removeObserver:observer];
+                observer = nil;
+            }
         }];
     });
 }
@@ -2326,9 +2336,6 @@ referenceSizeForHeaderInSection:(NSInteger)section {
 // ============================================================
 
 - (void)log:(NSString *)format, ... {
-    // Logs complètement désactivés → rien du tout (ni buffer, ni NSLog, ni notification)
-    if (!self.debugLogging) return;
-
     va_list args;
     va_start(args, format);
     NSString *msg = [[NSString alloc] initWithFormat:format arguments:args];
@@ -2339,6 +2346,7 @@ referenceSizeForHeaderInSection:(NSInteger)section {
     NSString *line = [NSString stringWithFormat:@"[%@] %@",
                       [fmt stringFromDate:[NSDate date]], msg];
 
+    // Toujours écrire dans le buffer in-app (visible dans l'écran Logs 7TV)
     [self.logLock lock];
     [self.logBuffer addObject:line];
     if (self.logBuffer.count > S7TV_LOG_BUFFER_MAX) {
@@ -2347,7 +2355,10 @@ referenceSizeForHeaderInSection:(NSInteger)section {
     }
     [self.logLock unlock];
 
-    NSLog(@"[TwitchSevenTV] %@", msg);
+    // NSLog console uniquement si debugLogging activé
+    if (self.debugLogging) {
+        NSLog(@"[TwitchSevenTV] %@", msg);
+    }
 
     dispatch_async(dispatch_get_main_queue(), ^{
         [[NSNotificationCenter defaultCenter]
