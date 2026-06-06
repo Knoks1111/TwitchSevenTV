@@ -21,6 +21,8 @@
 #import "SevenTVSettingsController.h"
 #import "fishhook.h"
 #import <CoreText/CoreText.h>
+#import <mach-o/dyld.h>
+#import <mach/mach.h>
 
 
 // ────────────────────────────────────────────────────────────
@@ -992,6 +994,15 @@ static void s7tv_swizzle_message_string_view(void) {
                    dispatch_get_main_queue(), attempt);
 }
 
+// ── Forward declarations (définitions plus bas dans le fichier) ───────────────
+static CGFloat (*orig_CTRunGetTypographicBounds)(CTRunRef, CFRange, CGFloat *, CGFloat *, CGFloat *);
+static CGFloat (*orig_CTLineGetTypographicBounds)(CTLineRef, CGFloat *, CGFloat *, CGFloat *);
+static CTFramesetterRef (*orig_CTFramesetterCreate)(CFAttributedStringRef, CFRange, CFDictionaryRef);
+
+static CGFloat s7tv_CTRunGetTypographicBounds(CTRunRef, CFRange, CGFloat *, CGFloat *, CGFloat *);
+static CGFloat s7tv_CTLineGetTypographicBounds(CTLineRef, CGFloat *, CGFloat *, CGFloat *);
+static CTFramesetterRef s7tv_CTFramesetterCreate(CFAttributedStringRef, CFRange, CFDictionaryRef);
+
 // ── Rebind fishhook sur tous les frameworks embarqués ─────────────────────────
 // Twitch charge CoreText depuis ses propres frameworks → leur PLT est séparée.
 // On rebind CTRunDelegateCreate sur chaque image chargée.
@@ -1700,10 +1711,6 @@ static void s7tv_swizzle_account_menu(void) {
 //   On hook aussi CTLineGetTypographicBounds pour la hauteur de ligne globale.
 //
 // NOTE : on garde CTFramesetterCreate pour les paths NSTextAttachment résiduels.
-
-static CGFloat (*orig_CTRunGetTypographicBounds)(CTRunRef, CFRange, CGFloat *, CGFloat *, CGFloat *) = NULL;
-static CGFloat (*orig_CTLineGetTypographicBounds)(CTLineRef, CGFloat *, CGFloat *, CGFloat *) = NULL;
-static CTFramesetterRef (*orig_CTFramesetterCreate)(CFAttributedStringRef, CFRange, CFDictionaryRef) = NULL;
 
 static CGFloat s7tv_CTRunGetTypographicBounds(CTRunRef run,
                                                CFRange range,
