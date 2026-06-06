@@ -486,21 +486,35 @@ static void s7tv_handleRoomState(NSString *ircMessage) {
 // ────────────────────────────────────────────────────────────
 // MARK: - Hook NSTextAttachment — taille correcte pour les emotes 7TV
 //
-// CE QU'ON SAIT GRÂCE AUX LOGS :
-//   • TextKit 1 utilisé (📐 TK1 bounds appelé)
-//   • setImage: appelé avec size=(0×0) — image pas encore chargée
-//   • Twitch hardcode 18×18 pour tous les attachments
-//   • lineFrag.height = 17pt (hauteur de ligne du chat)
-//   • Badges/icônes messages épinglés : contents=nil → à ne pas toucher
-//   • Emotes (Twitch + 7TV) : contents non-nil (données WebP)
+// DIAGNOSTIC DE L'ÉCHEC PRÉCÉDENT :
+//   Le check `self.contents != nil` était TOUJOURS false au moment du layout.
+//   Twitch charge les images via [attachment setImage:img] directement,
+//   PAS via la propriété `contents`. Donc hasContents = false → fallthrough →
+//   l'original retournait 18×18 sans qu'on puisse l'intercepter.
 //
-// STRATÉGIE :
-//   contents non-nil → emote → on agrandit à 28×28
-//   contents nil     → badge/icône → on laisse Twitch gérer (18×18)
+// NOUVELLE STRATÉGIE (3 couches) :
 //
-// On ne peut pas corriger le ratio car l'image est 0×0 au moment
-// du layout. 28×28 est déjà une amélioration visible vs 18×18.
+//   Couche 1 — attachmentBoundsForTextContainer: (NSTextAttachment base + sous-classes)
+//     Appeler l'original D'ABORD. Si le résultat est exactement ≈18×18
+//     (la valeur hardcodée par Twitch, confirmée par logs), on remplace par 28×28.
+//     On ne touche pas aux attachments qui retournent autre chose (badges, etc.).
+//
+//   Couche 2 — NSLayoutManager setAttachmentSize:forGlyphRange:
+//     Intercepte le STOCKAGE de la taille dans le layout manager (TextKit 1).
+//     Même combat : si la taille stockée est ≈18×18 → on force 28×28.
+//     Belt-and-suspenders : même si la couche 1 est court-circuitée par une
+//     sous-classe Twitch, la couche 2 corrige le résultat final.
+//
+//   Couche 3 — Énumération runtime des sous-classes de NSTextAttachment
+//     Si Twitch a une sous-classe privée qui override attachmentBoundsForTextContainer:
+//     pour hardcoder 18×18, on la découvre et on la swizzle aussi.
+//     Retry à 3s pour les classes Swift chargées paresseusement.
 // ────────────────────────────────────────────────────────────
+
+// ── Couche 1 : NSTextAttachment base ────────────────────────────────────────
+
+#define S7TV_EMOTE_TARGET_SIZE 28.0
+#define S7TV_TWITCH_HARDCODED  18.0   // valeur hardcodée confirmée par les logs
 
 @interface NSTextAttachment (S7TVSize)
 - (CGRect)s7tv_attachmentBoundsForTextContainer:(NSTextContainer *)tc
@@ -516,32 +530,107 @@ static void s7tv_handleRoomState(NSString *ircMessage) {
                                    glyphPosition:(CGPoint)pos
                                   characterIndex:(NSUInteger)charIdx {
 
-    // contents non-nil = emote chargée via URLProtocol (Twitch natif + 7TV)
-    // contents nil     = badge/icône chargé autrement → ne pas toucher
-    BOOL hasContents = (self.contents != nil && self.contents.length > 0);
+    // Appel de l'ORIGINAL (swappé) en premier — on observe ce que Twitch veut retourner.
+    CGRect orig = [self s7tv_attachmentBoundsForTextContainer:tc
+                                          proposedLineFragment:lineFrag
+                                                 glyphPosition:pos
+                                                characterIndex:charIdx];
 
-    if (hasContents) {
-        CGFloat targetSize = 28.0;
-        CGFloat lineH = lineFrag.size.height > 0 ? lineFrag.size.height : 17.0;
-        CGFloat descent = (targetSize - lineH) / 2.0;
-        if (descent < 0) descent = 0;
-        return CGRectMake(0, -descent, targetSize, targetSize);
+    // Si l'original retourne exactement ~18×18 → c'est la valeur Twitch hardcodée.
+    // On remplace par 28×28.  Les badges avec d'autres tailles passent inchangés.
+    if (fabs(orig.size.width  - S7TV_TWITCH_HARDCODED) < 1.0 &&
+        fabs(orig.size.height - S7TV_TWITCH_HARDCODED) < 1.0) {
+        [[SevenTVManager sharedManager]
+            log:@"📐 [L1] attachmentBounds: 18×18 intercepté → 28×28 (class=%@)",
+            NSStringFromClass([self class])];
+        return CGRectMake(0, 0, S7TV_EMOTE_TARGET_SIZE, S7TV_EMOTE_TARGET_SIZE);
     }
 
-    // Badge/icône → comportement Twitch original
-    return [self s7tv_attachmentBoundsForTextContainer:tc
-                                   proposedLineFragment:lineFrag
-                                          glyphPosition:pos
-                                         characterIndex:charIdx];
+    return orig;
 }
 
 @end
 
+
+// ── Couche 2 : NSLayoutManager setAttachmentSize:forGlyphRange: ─────────────
+
+@interface NSLayoutManager (S7TVAttachmentSize)
+- (void)s7tv_setAttachmentSize:(CGSize)size forGlyphRange:(NSRange)glyphRange;
+@end
+
+@implementation NSLayoutManager (S7TVAttachmentSize)
+
+- (void)s7tv_setAttachmentSize:(CGSize)size forGlyphRange:(NSRange)glyphRange {
+    if (fabs(size.width  - S7TV_TWITCH_HARDCODED) < 1.0 &&
+        fabs(size.height - S7TV_TWITCH_HARDCODED) < 1.0) {
+        [[SevenTVManager sharedManager]
+            log:@"📐 [L2] setAttachmentSize: 18×18 intercepté → 28×28"];
+        size = CGSizeMake(S7TV_EMOTE_TARGET_SIZE, S7TV_EMOTE_TARGET_SIZE);
+    }
+    [self s7tv_setAttachmentSize:size forGlyphRange:glyphRange];
+}
+
+@end
+
+static void s7tv_swizzle_layout_manager(void) {
+    // Probe pour obtenir la classe concrète (NSLayoutManager peut être sous-classé)
+    UITextView *probe = [[UITextView alloc] initWithFrame:CGRectZero];
+    Class lmClass = object_getClass(probe.layoutManager);
+    [[SevenTVManager sharedManager]
+        log:@"🔍 NSLayoutManager classe concrète: %@", NSStringFromClass(lmClass)];
+    s7tv_swizzle(lmClass,
+                 [NSLayoutManager class],
+                 @selector(setAttachmentSize:forGlyphRange:),
+                 @selector(s7tv_setAttachmentSize:forGlyphRange:));
+}
+
+
+// ── Couche 3 : Swizzle des sous-classes NSTextAttachment au runtime ──────────
+
+static void s7tv_swizzle_text_attachment_class(Class cls) {
+    SEL origSel = @selector(attachmentBoundsForTextContainer:proposedLineFragment:glyphPosition:characterIndex:);
+    SEL swizSel = @selector(s7tv_attachmentBoundsForTextContainer:proposedLineFragment:glyphPosition:characterIndex:);
+
+    // Vérifier que cette classe a sa propre implémentation (pas héritée de NSTextAttachment base)
+    Method m     = class_getInstanceMethod(cls, origSel);
+    Method baseM = class_getInstanceMethod([NSTextAttachment class], origSel);
+    if (!m || m == baseM) return; // pas d'override propre → rien à swizzler
+
+    [[SevenTVManager sharedManager]
+        log:@"🔍 [L3] Sous-classe NSTextAttachment trouvée: %@", NSStringFromClass(cls)];
+    s7tv_swizzle(cls, [NSTextAttachment class], origSel, swizSel);
+}
+
+static void s7tv_swizzle_text_attachment_subclasses(void) {
+    unsigned int count = 0;
+    Class *classes = objc_copyClassList(&count);
+    if (!classes) return;
+
+    for (unsigned int i = 0; i < count; i++) {
+        Class cls = classes[i];
+        if (cls == [NSTextAttachment class]) continue;
+        // Remonter la chaîne de superclasses
+        Class super = class_getSuperclass(cls);
+        while (super) {
+            if (super == [NSTextAttachment class]) {
+                s7tv_swizzle_text_attachment_class(cls);
+                break;
+            }
+            super = class_getSuperclass(super);
+        }
+    }
+    free(classes);
+}
+
 static void s7tv_swizzle_text_attachment(void) {
+    // Swizzle sur la classe de base NSTextAttachment
     s7tv_swizzle([NSTextAttachment class],
                  [NSTextAttachment class],
                  @selector(attachmentBoundsForTextContainer:proposedLineFragment:glyphPosition:characterIndex:),
                  @selector(s7tv_attachmentBoundsForTextContainer:proposedLineFragment:glyphPosition:characterIndex:));
+
+    // Swizzle sur toutes les sous-classes déjà enregistrées (classes Swift souvent lazily loaded)
+    s7tv_swizzle_text_attachment_subclasses();
 }
 
 
@@ -1173,8 +1262,11 @@ static void TwitchSevenTVInit(void) {
                  @selector(didMoveToWindow),
                  @selector(s7tv_didMoveToWindow));
 
-    // ── Swizzle NSTextAttachment (ratio correct pour emotes 7TV) ─────────────
+    // ── Swizzle NSTextAttachment (couche 1) + sous-classes (couche 3) ─────────
     s7tv_swizzle_text_attachment();
+
+    // ── Swizzle NSLayoutManager setAttachmentSize: (couche 2) ─────────────────
+    s7tv_swizzle_layout_manager();
 
     // ── Fix B: protocolClasses swizzle (avant la création de sessions) ────────
     s7tv_swizzle_protocol_classes();
@@ -1199,6 +1291,12 @@ static void TwitchSevenTVInit(void) {
             dispatch_get_main_queue(), ^{
                 [[SevenTVManager sharedManager] addSettingsButton];
                 [[SevenTVManager sharedManager] log:@"✅ Bouton 7TV ajouté"];
+
+                // Retry couche 3 : classes Swift de Twitch souvent enregistrées
+                // après le constructor — on re-scanne à 2s pour les attraper.
+                s7tv_swizzle_text_attachment_subclasses();
+                [[SevenTVManager sharedManager]
+                    log:@"🔄 Retry scan sous-classes NSTextAttachment effectué"];
             }
         );
     });
