@@ -943,32 +943,37 @@ static void s7tv_swizzle_message_string_view(void) {
         Class cls = NSClassFromString(@"Twitch.MessageStringView");
         if (!cls) {
             [[SevenTVManager sharedManager]
-                log:@"⚠️ Twitch.MessageStringView introuvable (sera retentée)"];
+                log:@"⚠️ Twitch.MessageStringView introuvable"];
             return;
         }
 
-        // Lister toutes les méthodes pour diagnostic
+        // ── DUMP COMPLET de toutes les méthodes ──────────────────────────────
         unsigned int methodCount = 0;
         Method *methods = class_copyMethodList(cls, &methodCount);
-        NSMutableArray *methodNames = [NSMutableArray array];
+        NSMutableArray *allNames = [NSMutableArray array];
         for (unsigned int i = 0; i < methodCount; i++) {
-            NSString *name = NSStringFromSelector(method_getName(methods[i]));
-            if ([name containsString:@"ttributed"] ||
-                [name containsString:@"ttachment"] ||
-                [name containsString:@"tring"] ||
-                [name containsString:@"ize"] ||
-                [name containsString:@"rame"]) {
-                [methodNames addObject:name];
-            }
+            [allNames addObject:NSStringFromSelector(method_getName(methods[i]))];
         }
         free(methods);
+        [allNames sortUsingSelector:@selector(compare:)];
 
         [[SevenTVManager sharedManager]
-            log:@"🔍 MessageStringView méthodes pertinentes (%lu): %@",
-            (unsigned long)methodNames.count,
-            methodNames.count > 0 ? [methodNames componentsJoinedByString:@" | "] : @"(aucune)"];
+            log:@"🔬 MessageStringView — %u méthodes TOTAL:", methodCount];
+        // Logger par blocs de 5 pour ne pas tronquer
+        for (NSUInteger i = 0; i < allNames.count; i += 5) {
+            NSRange r = NSMakeRange(i, MIN(5, allNames.count - i));
+            [[SevenTVManager sharedManager]
+                log:@"   [%lu-%lu] %@", (unsigned long)i,
+                (unsigned long)(i + r.length - 1),
+                [[allNames subarrayWithRange:r] componentsJoinedByString:@" | "]];
+        }
 
-        // Hook sizeThatFits: via IMP directe
+        // ── DUMP de la superclasse et de ses méthodes ────────────────────────
+        Class superCls = class_getSuperclass(cls);
+        [[SevenTVManager sharedManager]
+            log:@"🔬 MessageStringView superclass: %@", NSStringFromClass(superCls)];
+
+        // ── Hook sizeThatFits: ────────────────────────────────────────────────
         SEL selSTF = @selector(sizeThatFits:);
         Method mSTF = class_getInstanceMethod(cls, selSTF);
         if (mSTF && !s_msgViewOrigSizeThatFits) {
@@ -978,7 +983,7 @@ static void s7tv_swizzle_message_string_view(void) {
                 log:@"✅ MessageStringView sizeThatFits: hooké"];
         }
 
-        // Hook intrinsicContentSize via IMP directe
+        // ── Hook intrinsicContentSize ─────────────────────────────────────────
         SEL selICS = @selector(intrinsicContentSize);
         Method mICS = class_getInstanceMethod(cls, selICS);
         if (mICS && !s_msgViewOrigIntrinsicContentSize) {
@@ -986,6 +991,59 @@ static void s7tv_swizzle_message_string_view(void) {
             method_setImplementation(mICS, (IMP)s7tv_imp_intrinsicContentSize);
             [[SevenTVManager sharedManager]
                 log:@"✅ MessageStringView intrinsicContentSize hooké"];
+        }
+
+        // ── Hook setNeedsLayout / layoutSubviews pour voir si la vue se layout ─
+        // Ces méthodes UIView sont héritées → on les hook sur la classe concrète
+        SEL selSNL = @selector(setNeedsLayout);
+        Method mSNL = class_getInstanceMethod(cls, selSNL);
+        if (mSNL) {
+            IMP origSNL = method_getImplementation(mSNL);
+            IMP newSNL = imp_implementationWithBlock(^(id self_) {
+                static NSInteger cnt = 0; cnt++;
+                if (cnt <= 3) {
+                    [[SevenTVManager sharedManager]
+                        log:@"🔁 MessageStringView setNeedsLayout #%ld", (long)cnt];
+                }
+                ((void (*)(id, SEL))origSNL)(self_, selSNL);
+            });
+            method_setImplementation(mSNL, newSNL);
+        }
+
+        // ── Hook drawRect: ───────────────────────────────────────────────────
+        SEL selDR = @selector(drawRect:);
+        Method mDR = class_getInstanceMethod(cls, selDR);
+        if (mDR) {
+            IMP origDR = method_getImplementation(mDR);
+            IMP newDR = imp_implementationWithBlock(^(id self_, CGRect rect) {
+                static NSInteger cnt = 0; cnt++;
+                if (cnt <= 3) {
+                    [[SevenTVManager sharedManager]
+                        log:@"🎨 MessageStringView drawRect #%ld (%.0f×%.0f)",
+                        (long)cnt, rect.size.width, rect.size.height];
+                }
+                ((void (*)(id, SEL, CGRect))origDR)(self_, selDR, rect);
+            });
+            method_setImplementation(mDR, newDR);
+            [[SevenTVManager sharedManager] log:@"✅ MessageStringView drawRect: hooké"];
+        } else {
+            [[SevenTVManager sharedManager] log:@"⚠️ MessageStringView drawRect: ABSENT (SwiftUI/Metal?)"];
+        }
+
+        // ── Hook display (CALayer delegate) ──────────────────────────────────
+        SEL selDisplay = @selector(display);
+        Method mDisplay = class_getInstanceMethod(cls, selDisplay);
+        if (mDisplay) {
+            IMP origD = method_getImplementation(mDisplay);
+            IMP newD = imp_implementationWithBlock(^(id self_) {
+                static NSInteger cnt = 0; cnt++;
+                if (cnt <= 3) {
+                    [[SevenTVManager sharedManager]
+                        log:@"📺 MessageStringView display #%ld", (long)cnt];
+                }
+                ((void (*)(id, SEL))origD)(self_, selDisplay);
+            });
+            method_setImplementation(mDisplay, newD);
         }
     };
 
