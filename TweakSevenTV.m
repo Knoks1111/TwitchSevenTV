@@ -1375,124 +1375,118 @@ static void s7tv_swizzle_account_menu(void) {
 }
 
 
-// ── Couche D : Hook CTRunDelegateCreate + CTFramesetterCreateWithAttributedString ──
+// ── Couche D : Hook CTRunGetTypographicBounds via fishhook ────────────────────
 //
-// DIAGNOSTIC : fishhook CTFramesetterCreate est installé (result=0) mais
-// aucun "🎯 CTFramesetter patch" n'apparaît → Twitch ne passe PAS par
-// NSTextAttachment dans ce path. Il utilise CTRunDelegate directement :
-// une structure C avec callbacks getAscent/getDescent/getWidth hardcodées
-// à 18.0. Ces callbacks ignorent complètement NSTextAttachment.bounds.
+// DIAGNOSTIC FINAL :
+//   - fishhook CTRunDelegateCreate → jamais appelé depuis Twitch (appelé
+//     en interne par CoreText → hors portée fishhook).
+//   - fishhook CTFramesetterCreate → appelé mais pas d'attachments ObjC
+//     (Twitch utilise CoreText pur, pas NSTextAttachment).
 //
-// FIX DOUBLE :
-//   1. Hook CTRunDelegateCreate → wrapper les callbacks pour forcer 28pt
-//      quand la valeur retournée est dans [14, 20] (zone 18pt ± marge).
-//   2. Garder le hook CTFramesetterCreate pour patcher les NSTextAttachment
-//      résiduels (autres paths TextKit).
+// VRAIE SOLUTION :
+//   CTRunGetTypographicBounds est appelée DEPUIS TWITCH au moment du
+//   layout pour lire les dimensions de chaque CTRun (ascent/descent/leading).
+//   C'est dans la PLT de Twitch → hookable par fishhook.
 //
-// Architecture du wrapper CTRunDelegate :
-//   - On alloue un S7TVRunDelegateCtx qui embed le refcon original + callbacks
-//   - getAscent/getDescent/getWidth wrappées : si val ∈ [14,20] → retourne
-//     S7TV_EMOTE_TARGET_SIZE (ascent) ou 0 (descent) ou 28 (width)
-//   - dealloc wrappé pour libérer le contexte
+//   Notre wrapper :
+//     1. Appelle l'original → récupère ascent, descent, leading
+//     2. Si ascent+descent ∈ [13, 21] (zone 18pt hardcodé ± marge) ET
+//        que le run contient un kCTRunDelegateAttributeName (= c'est une
+//        emote inline) → on force ascent=28, descent=0, leading=0
+//     3. Retourne la largeur originale (CoreText gère width via CTRunDelegate)
 //
-// ⚠️ CTRunDelegateCreate est dans CoreText.framework → hookable par fishhook.
-// ⚠️ Les callbacks sont des pointeurs de fonction C → on ne peut pas les
-//    swizzler. On doit remplacer tout le CTRunDelegate par un neuf.
+//   On hook aussi CTLineGetTypographicBounds pour la hauteur de ligne globale.
+//
+// NOTE : on garde CTFramesetterCreate pour les paths NSTextAttachment résiduels.
 
-// Contexte wrappé pour chaque CTRunDelegate intercepté
-typedef struct {
-    void                         *origRefCon;
-    CTRunDelegateGetAscentCallback  origGetAscent;
-    CTRunDelegateGetDescentCallback origGetDescent;
-    CTRunDelegateGetWidthCallback   origGetWidth;
-    CTRunDelegateDeallocateCallback origDealloc;
-} S7TVRunDelegateCtx;
+static CGFloat (*orig_CTRunGetTypographicBounds)(CTRunRef, CFRange, CGFloat *, CGFloat *, CGFloat *) = NULL;
+static CGFloat (*orig_CTLineGetTypographicBounds)(CTLineRef, CGFloat *, CGFloat *, CGFloat *) = NULL;
+static CTFramesetterRef (*orig_CTFramesetterCreate)(CFAttributedStringRef, CFRange, CFDictionaryRef) = NULL;
 
-static CGFloat s7tv_rd_getAscent(void *refCon) {
-    S7TVRunDelegateCtx *ctx = (S7TVRunDelegateCtx *)refCon;
-    CGFloat val = ctx->origGetAscent ? ctx->origGetAscent(ctx->origRefCon) : S7TV_EMOTE_TARGET_SIZE;
-    // Twitch hardcode 18pt ± marge → forcer à notre taille cible
-    if (val >= 14.0 && val <= 20.0) {
-        return S7TV_EMOTE_TARGET_SIZE;
-    }
-    return val;
-}
+static CGFloat s7tv_CTRunGetTypographicBounds(CTRunRef run,
+                                               CFRange range,
+                                               CGFloat *ascent,
+                                               CGFloat *descent,
+                                               CGFloat *leading) {
+    CGFloat origAscent = 0, origDescent = 0, origLeading = 0;
+    CGFloat width = orig_CTRunGetTypographicBounds(run, range,
+                                                    &origAscent,
+                                                    &origDescent,
+                                                    &origLeading);
 
-static CGFloat s7tv_rd_getDescent(void *refCon) {
-    S7TVRunDelegateCtx *ctx = (S7TVRunDelegateCtx *)refCon;
-    CGFloat val = ctx->origGetDescent ? ctx->origGetDescent(ctx->origRefCon) : 0.0;
-    // Si on a forcé l'ascent, le descent doit rester 0 (baseline alignment)
-    CGFloat ascent = ctx->origGetAscent ? ctx->origGetAscent(ctx->origRefCon) : 0.0;
-    if (ascent >= 14.0 && ascent <= 20.0) {
-        return 0.0;
-    }
-    return val;
-}
-
-static CGFloat s7tv_rd_getWidth(void *refCon) {
-    S7TVRunDelegateCtx *ctx = (S7TVRunDelegateCtx *)refCon;
-    CGFloat val = ctx->origGetWidth ? ctx->origGetWidth(ctx->origRefCon) : S7TV_EMOTE_TARGET_SIZE;
-    if (val >= 14.0 && val <= 20.0) {
-        return S7TV_EMOTE_TARGET_SIZE;
-    }
-    return val;
-}
-
-static void s7tv_rd_dealloc(void *refCon) {
-    S7TVRunDelegateCtx *ctx = (S7TVRunDelegateCtx *)refCon;
-    if (ctx->origDealloc) ctx->origDealloc(ctx->origRefCon);
-    free(ctx);
-}
-
-// Pointeur vers l'original CTRunDelegateCreate
-static CTRunDelegateRef (*orig_CTRunDelegateCreate)(const CTRunDelegateCallbacks *, void *) = NULL;
-
-static CTRunDelegateRef s7tv_CTRunDelegateCreate(const CTRunDelegateCallbacks *callbacks,
-                                                  void *refCon) {
-    if (!callbacks) return orig_CTRunDelegateCreate(callbacks, refCon);
-
-    // Vérifier si les callbacks ressemblent à des emotes Twitch (ascent ∈ [14,20])
-    // en sondant directement (refCon peut être NULL → sécurisé)
-    // On wrappe systématiquement : overhead minimal, correctness maximale.
-    S7TVRunDelegateCtx *ctx = (S7TVRunDelegateCtx *)malloc(sizeof(S7TVRunDelegateCtx));
-    if (!ctx) return orig_CTRunDelegateCreate(callbacks, refCon);
-
-    ctx->origRefCon    = refCon;
-    ctx->origGetAscent = callbacks->getAscent;
-    ctx->origGetDescent= callbacks->getDescent;
-    ctx->origGetWidth  = callbacks->getWidth;
-    ctx->origDealloc   = callbacks->dealloc;
-
-    CTRunDelegateCallbacks wrapped = {
-        .version    = kCTRunDelegateCurrentVersion,
-        .dealloc    = s7tv_rd_dealloc,
-        .getAscent  = s7tv_rd_getAscent,
-        .getDescent = s7tv_rd_getDescent,
-        .getWidth   = s7tv_rd_getWidth,
-    };
-
-    // Sonder la valeur originale pour logger seulement quand c'est une emote
-    CGFloat origAscent = callbacks->getAscent ? callbacks->getAscent(refCon) : -1;
-    if (origAscent >= 14.0 && origAscent <= 20.0) {
-        static NSInteger s_rdCount = 0;
-        s_rdCount++;
-        if (s_rdCount <= 10 || (s_rdCount % 200) == 0) {
-            [[SevenTVManager sharedManager]
-                log:@"\U0001f3af CTRunDelegate patch #%ld ascent=%.1f→%.1f",
-                (long)s_rdCount, origAscent, (CGFloat)S7TV_EMOTE_TARGET_SIZE];
+    // Détecter un run d'emote : ascent+descent correspond à ~18pt hardcodé
+    // ET le run a un attribut CTRunDelegate (= c'est un attachment inline)
+    BOOL isEmoteRun = NO;
+    CGFloat total = origAscent + origDescent;
+    if (total >= 13.0 && total <= 21.0) {
+        // Vérifier la présence de kCTRunDelegateAttributeName dans le run
+        CFDictionaryRef attrs = CTRunGetAttributes(run);
+        if (attrs) {
+            CFTypeRef delegate = CFDictionaryGetValue(attrs, kCTRunDelegateAttributeName);
+            if (delegate != NULL) {
+                isEmoteRun = YES;
+            }
         }
     }
 
-    return orig_CTRunDelegateCreate(&wrapped, ctx);
+    if (isEmoteRun) {
+        static NSInteger s_count = 0;
+        s_count++;
+        if (s_count <= 15 || (s_count % 300) == 0) {
+            [[SevenTVManager sharedManager]
+                log:@"\U0001f3af CTRun patch #%ld ascent=%.1f+%.1f → %.1f+0",
+                (long)s_count, origAscent, origDescent, (CGFloat)S7TV_EMOTE_TARGET_SIZE];
+        }
+        if (ascent)  *ascent  = S7TV_EMOTE_TARGET_SIZE;
+        if (descent) *descent = 0.0;
+        if (leading) *leading = 0.0;
+        // Retourner aussi la largeur à la bonne taille
+        return S7TV_EMOTE_TARGET_SIZE;
+    }
+
+    if (ascent)  *ascent  = origAscent;
+    if (descent) *descent = origDescent;
+    if (leading) *leading = origLeading;
+    return width;
 }
 
-// Hook CTFramesetterCreateWithAttributedString (gardé pour path NSTextAttachment)
-static CTFramesetterRef (*orig_CTFramesetterCreate)(CFAttributedStringRef, CFRange, CFDictionaryRef) = NULL;
+static CGFloat s7tv_CTLineGetTypographicBounds(CTLineRef line,
+                                                CGFloat *ascent,
+                                                CGFloat *descent,
+                                                CGFloat *leading) {
+    CGFloat origAscent = 0, origDescent = 0, origLeading = 0;
+    CGFloat width = orig_CTLineGetTypographicBounds(line, &origAscent, &origDescent, &origLeading);
+
+    // Si la ligne contient au moins un run d'emote (ascent ~18),
+    // on s'assure que la hauteur de ligne globale est au moins 28pt
+    if (origAscent >= 13.0 && origAscent <= 21.0) {
+        // Vérifier si la ligne contient un run avec CTRunDelegate
+        CFArrayRef runs = CTLineGetGlyphRuns(line);
+        if (runs) {
+            CFIndex runCount = CFArrayGetCount(runs);
+            for (CFIndex i = 0; i < runCount; i++) {
+                CTRunRef run = (CTRunRef)CFArrayGetValueAtIndex(runs, i);
+                CFDictionaryRef attrs = CTRunGetAttributes(run);
+                if (attrs && CFDictionaryGetValue(attrs, kCTRunDelegateAttributeName)) {
+                    if (ascent)  *ascent  = S7TV_EMOTE_TARGET_SIZE;
+                    if (descent) *descent = 0.0;
+                    if (leading) *leading = 0.0;
+                    return width;
+                }
+            }
+        }
+    }
+
+    if (ascent)  *ascent  = origAscent;
+    if (descent) *descent = origDescent;
+    if (leading) *leading = origLeading;
+    return width;
+}
 
 static CTFramesetterRef s7tv_CTFramesetterCreate(CFAttributedStringRef string,
                                                    CFRange stringRange,
                                                    CFDictionaryRef frameAttributes) {
-    // Patcher les NSTextAttachment résiduels (path TextKit / non-CTRunDelegate)
+    // Patcher les NSTextAttachment résiduels (path TextKit / non-CoreText pur)
     NSAttributedString *attrStr = (__bridge NSAttributedString *)string;
     NSUInteger len = attrStr.length;
     if (len > 0) {
@@ -1509,9 +1503,9 @@ static CTFramesetterRef s7tv_CTFramesetterCreate(CFAttributedStringRef string,
                 if (!(fabs(b.size.width  - S7TV_EMOTE_TARGET_SIZE) < 0.5 &&
                       fabs(b.size.height - S7TV_EMOTE_TARGET_SIZE) < 0.5)) {
                     s_ftCount++;
-                    if (s_ftCount <= 20 || (s_ftCount % 100) == 0) {
+                    if (s_ftCount <= 10) {
                         [[SevenTVManager sharedManager]
-                            log:@"\U0001f4ce CTFramesetter attach patch #%ld (%.1f×%.1f)",
+                            log:@"\U0001f4ce CTFramesetter attach patch #%ld (%.1f\u00d7%.1f)",
                             (long)s_ftCount, b.size.width, b.size.height];
                     }
                     att.bounds = CGRectMake(0, -5, S7TV_EMOTE_TARGET_SIZE, S7TV_EMOTE_TARGET_SIZE);
@@ -1527,16 +1521,19 @@ static CTFramesetterRef s7tv_CTFramesetterCreate(CFAttributedStringRef string,
 
 static void s7tv_hook_coretext_framesetter(void) {
     struct rebinding bindings[] = {
-        { "CTRunDelegateCreate",
-          s7tv_CTRunDelegateCreate,
-          (void **)&orig_CTRunDelegateCreate },
+        { "CTRunGetTypographicBounds",
+          s7tv_CTRunGetTypographicBounds,
+          (void **)&orig_CTRunGetTypographicBounds },
+        { "CTLineGetTypographicBounds",
+          s7tv_CTLineGetTypographicBounds,
+          (void **)&orig_CTLineGetTypographicBounds },
         { "CTFramesetterCreateWithAttributedString",
           s7tv_CTFramesetterCreate,
-          (void **)&orig_CTFramesetterCreate }
+          (void **)&orig_CTFramesetterCreate },
     };
-    int result = rebind_symbols(bindings, 2);
+    int result = rebind_symbols(bindings, 3);
     [[SevenTVManager sharedManager]
-        log:@"%@ fishhook CTRunDelegateCreate + CTFramesetterCreate (result=%d)",
+        log:@"%@ fishhook CTRunGetTypographicBounds + CTLineGetTypographicBounds + CTFramesetterCreate (result=%d)",
         result == 0 ? @"\u2705" : @"\u274c", result];
 }
 
