@@ -484,61 +484,55 @@ static void s7tv_handleRoomState(NSString *ircMessage) {
 
 
 // ────────────────────────────────────────────────────────────
-// MARK: - Diagnostic NSTextAttachment
+// MARK: - Hook NSTextAttachment — taille correcte pour les emotes 7TV
 //
-// On logue TOUT ce qui passe par setImage: et attachmentBounds
-// pour comprendre exactement comment Twitch.MessageStringView
-// charge et dimensionne les emotes dans le chat normal.
+// CE QU'ON SAIT GRÂCE AUX LOGS :
+//   • TextKit 1 utilisé (📐 TK1 bounds appelé)
+//   • setImage: appelé avec size=(0×0) — image pas encore chargée
+//   • Twitch hardcode 18×18 pour tous les attachments
+//   • lineFrag.height = 17pt (hauteur de ligne du chat)
+//   • Badges/icônes messages épinglés : contents=nil → à ne pas toucher
+//   • Emotes (Twitch + 7TV) : contents non-nil (données WebP)
 //
-// À analyser dans les logs :
-//   📎 setImage: → est-ce appelé pour les emotes 7TV du chat ?
-//   📐 attachmentBounds(TK1/TK2) → quelle méthode Twitch utilise ?
-//   caller1/2/3 → quelle classe Twitch appelle setImage: ?
+// STRATÉGIE :
+//   contents non-nil → emote → on agrandit à 28×28
+//   contents nil     → badge/icône → on laisse Twitch gérer (18×18)
+//
+// On ne peut pas corriger le ratio car l'image est 0×0 au moment
+// du layout. 28×28 est déjà une amélioration visible vs 18×18.
 // ────────────────────────────────────────────────────────────
 
-@interface NSTextAttachment (S7TVDiag)
-- (void)s7tv_diag_setImage:(UIImage *)image;
-- (CGRect)s7tv_diag_attachmentBoundsForTextContainer:(NSTextContainer *)tc
-                                 proposedLineFragment:(CGRect)lineFrag
-                                        glyphPosition:(CGPoint)pos
-                                       characterIndex:(NSUInteger)charIdx;
+@interface NSTextAttachment (S7TVSize)
+- (CGRect)s7tv_attachmentBoundsForTextContainer:(NSTextContainer *)tc
+                            proposedLineFragment:(CGRect)lineFrag
+                                   glyphPosition:(CGPoint)pos
+                                  characterIndex:(NSUInteger)charIdx;
 @end
 
-@implementation NSTextAttachment (S7TVDiag)
+@implementation NSTextAttachment (S7TVSize)
 
-- (void)s7tv_diag_setImage:(UIImage *)image {
-    [self s7tv_diag_setImage:image];
-    if (!image) return;
-    SevenTVManager *mgr = [SevenTVManager sharedManager];
-    NSArray *syms = [NSThread callStackSymbols];
-    NSString *c1 = syms.count > 1 ? syms[1] : @"?";
-    NSString *c2 = syms.count > 2 ? syms[2] : @"?";
-    NSString *c3 = syms.count > 3 ? syms[3] : @"?";
-    [mgr log:@"📎 setImage: size=(%.0f×%.0f) bounds=(%.0f,%.0f,%.0f,%.0f) fileWrapper=%@",
-     image.size.width, image.size.height,
-     self.bounds.origin.x, self.bounds.origin.y,
-     self.bounds.size.width, self.bounds.size.height,
-     self.fileWrapper.filename ?: @"nil"];
-    [mgr log:@"   c1: %@", c1];
-    [mgr log:@"   c2: %@", c2];
-    [mgr log:@"   c3: %@", c3];
-}
+- (CGRect)s7tv_attachmentBoundsForTextContainer:(NSTextContainer *)tc
+                            proposedLineFragment:(CGRect)lineFrag
+                                   glyphPosition:(CGPoint)pos
+                                  characterIndex:(NSUInteger)charIdx {
 
-- (CGRect)s7tv_diag_attachmentBoundsForTextContainer:(NSTextContainer *)tc
-                                 proposedLineFragment:(CGRect)lineFrag
-                                        glyphPosition:(CGPoint)pos
-                                       characterIndex:(NSUInteger)charIdx {
-    CGRect result = [self s7tv_diag_attachmentBoundsForTextContainer:tc
-                                                 proposedLineFragment:lineFrag
-                                                        glyphPosition:pos
-                                                       characterIndex:charIdx];
-    UIImage *img = self.image;
-    [[SevenTVManager sharedManager]
-        log:@"📐 TK1 bounds imgSize=(%.0f×%.0f) lineFrag=(%.0f×%.0f) → (%.0f,%.0f,%.0f,%.0f)",
-     img ? img.size.width : 0, img ? img.size.height : 0,
-     lineFrag.size.width, lineFrag.size.height,
-     result.origin.x, result.origin.y, result.size.width, result.size.height];
-    return result;
+    // contents non-nil = emote chargée via URLProtocol (Twitch natif + 7TV)
+    // contents nil     = badge/icône chargé autrement → ne pas toucher
+    BOOL hasContents = (self.contents != nil && self.contents.length > 0);
+
+    if (hasContents) {
+        CGFloat targetSize = 28.0;
+        CGFloat lineH = lineFrag.size.height > 0 ? lineFrag.size.height : 17.0;
+        CGFloat descent = (targetSize - lineH) / 2.0;
+        if (descent < 0) descent = 0;
+        return CGRectMake(0, -descent, targetSize, targetSize);
+    }
+
+    // Badge/icône → comportement Twitch original
+    return [self s7tv_attachmentBoundsForTextContainer:tc
+                                   proposedLineFragment:lineFrag
+                                          glyphPosition:pos
+                                         characterIndex:charIdx];
 }
 
 @end
@@ -546,43 +540,8 @@ static void s7tv_handleRoomState(NSString *ircMessage) {
 static void s7tv_swizzle_text_attachment(void) {
     s7tv_swizzle([NSTextAttachment class],
                  [NSTextAttachment class],
-                 @selector(setImage:),
-                 @selector(s7tv_diag_setImage:));
-
-    s7tv_swizzle([NSTextAttachment class],
-                 [NSTextAttachment class],
                  @selector(attachmentBoundsForTextContainer:proposedLineFragment:glyphPosition:characterIndex:),
-                 @selector(s7tv_diag_attachmentBoundsForTextContainer:proposedLineFragment:glyphPosition:characterIndex:));
-
-    // TextKit 2 (iOS 16+)
-    SEL tk2 = NSSelectorFromString(
-        @"attachmentBoundsInTextContainer:proposedLineFragment:textPosition:fractionOfDistanceThroughGlyph:");
-    if (class_getInstanceMethod([NSTextAttachment class], tk2)) {
-        IMP diagIMP = imp_implementationWithBlock(^CGRect(NSTextAttachment *s,
-                                                          id tc, CGRect lf,
-                                                          id pos, CGFloat frac) {
-            SEL back = NSSelectorFromString(
-                @"s7tv_tk2_back_attachmentBoundsInTextContainer:proposedLineFragment:textPosition:fractionOfDistanceThroughGlyph:");
-            CGRect (*fn)(id,SEL,id,CGRect,id,CGFloat) = (void *)[s methodForSelector:back];
-            CGRect r = fn(s, back, tc, lf, pos, frac);
-            UIImage *img = s.image;
-            [[SevenTVManager sharedManager]
-                log:@"📐 TK2 bounds imgSize=(%.0f×%.0f) lineFrag=(%.0f×%.0f) → (%.0f,%.0f,%.0f,%.0f)",
-             img ? img.size.width : 0, img ? img.size.height : 0,
-             lf.size.width, lf.size.height,
-             r.origin.x, r.origin.y, r.size.width, r.size.height];
-            return r;
-        });
-        SEL back = NSSelectorFromString(
-            @"s7tv_tk2_back_attachmentBoundsInTextContainer:proposedLineFragment:textPosition:fractionOfDistanceThroughGlyph:");
-        const char *types = method_getTypeEncoding(
-            class_getInstanceMethod([NSTextAttachment class], tk2));
-        class_addMethod([NSTextAttachment class], back, diagIMP, types);
-        method_exchangeImplementations(
-            class_getInstanceMethod([NSTextAttachment class], tk2),
-            class_getInstanceMethod([NSTextAttachment class], back));
-        [[SevenTVManager sharedManager] log:@"✅ Diagnostic TK2 attachmentBounds installé"];
-    }
+                 @selector(s7tv_attachmentBoundsForTextContainer:proposedLineFragment:glyphPosition:characterIndex:));
 }
 
 
@@ -892,68 +851,24 @@ static UIViewController *s7tv_vcForView(UIView *v) {
                         attCount++;
                         NSTextAttachment *ta = (NSTextAttachment *)att;
                         UIImage *img = ta.image;
+                        // bounds retournés par la méthode standard
                         CGRect b = [ta attachmentBoundsForTextContainer:nil
                                                     proposedLineFragment:CGRectMake(0,0,320,20)
                                                            glyphPosition:CGPointZero
                                                           characterIndex:r.location];
-                        [mgr log:@"  📎 Attachment[%lu] imgSize=(%.0f×%.0f) bounds=(%.0f,%.0f,%.0f,%.0f) self.bounds=(%.0f,%.0f,%.0f,%.0f) fw=%@",
+                        [mgr log:@"  📎 Attachment[%lu] class=%@ imgSize=(%.0f×%.0f) bounds=(%.0f,%.0f,%.0f,%.0f)",
                          (unsigned long)attCount,
+                         NSStringFromClass([att class]),
                          img ? img.size.width : 0, img ? img.size.height : 0,
-                         b.origin.x, b.origin.y, b.size.width, b.size.height,
-                         ta.bounds.origin.x, ta.bounds.origin.y,
-                         ta.bounds.size.width, ta.bounds.size.height,
-                         ta.fileWrapper.filename ?: @"nil"];
+                         b.origin.x, b.origin.y, b.size.width, b.size.height];
                     }];
                 }
-                [mgr log:@"  📝 UITextView frame=(%.0f,%.0f,%.0f,%.0f) att=%lu text='%.40@'",
+                [mgr log:@"  📝 UITextView(%@) frame=(%.0f,%.0f,%.0f,%.0f) attachments=%lu text='%.40@'",
+                 cn,
                  frameInWindow.origin.x, frameInWindow.origin.y,
                  frameInWindow.size.width, frameInWindow.size.height,
-                 (unsigned long)attCount, tv.text ?: @""];
-            }
-
-            // ── MessageStringView : inspecter attributedString + layers ───────
-            if ([cn containsString:@"MessageString"]) {
-                [mgr log:@"  🔬 MSV found — probing props..."];
-                for (NSString *prop in @[@"attributedText", @"attributedString", @"textStorage", @"text"]) {
-                    @try {
-                        id val = [sv valueForKey:prop];
-                        if (!val) continue;
-                        NSAttributedString *a2 = nil;
-                        if ([val isKindOfClass:[NSAttributedString class]]) a2 = val;
-                        else if ([val isKindOfClass:[NSTextStorage class]])  a2 = val;
-                        if (a2 && a2.length > 0) {
-                            __block NSUInteger ac2 = 0;
-                            [a2 enumerateAttribute:NSAttachmentAttributeName
-                                           inRange:NSMakeRange(0, a2.length)
-                                           options:0
-                                        usingBlock:^(id att2, NSRange r2, BOOL *s2) {
-                                if (!att2) return;
-                                ac2++;
-                                NSTextAttachment *ta2 = (NSTextAttachment *)att2;
-                                UIImage *img2 = ta2.image;
-                                [mgr log:@"  📎 MSV.%@[%lu] imgSize=(%.0f×%.0f) selfBounds=(%.0f,%.0f,%.0f,%.0f) fw=%@",
-                                 prop, (unsigned long)ac2,
-                                 img2 ? img2.size.width : 0, img2 ? img2.size.height : 0,
-                                 ta2.bounds.origin.x, ta2.bounds.origin.y,
-                                 ta2.bounds.size.width, ta2.bounds.size.height,
-                                 ta2.fileWrapper.filename ?: @"nil"];
-                            }];
-                            [mgr log:@"  📝 MSV.%@ len=%lu att=%lu txt='%.60@'",
-                             prop, (unsigned long)a2.length, (unsigned long)ac2, a2.string ?: @""];
-                        } else if ([val isKindOfClass:[NSString class]]) {
-                            [mgr log:@"  📝 MSV.%@ = '%.60@'", prop, val];
-                        }
-                    } @catch (...) {}
-                }
-                NSArray *sublayers = sv.layer.sublayers;
-                for (CALayer *lay in sublayers) {
-                    if (lay.contents) {
-                        [mgr log:@"  🖼 CALayer frame=(%.0f,%.0f,%.0f,%.0f) class=%@",
-                         lay.frame.origin.x, lay.frame.origin.y,
-                         lay.frame.size.width, lay.frame.size.height,
-                         NSStringFromClass([lay class])];
-                    }
-                }
+                 (unsigned long)attCount,
+                 tv.text ?: @""];
             }
 
             // ── Classes Twitch custom liées au chat / emotes ──────────────────
