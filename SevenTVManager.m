@@ -1667,9 +1667,8 @@ static const char kS7TVTaskKey = 0;
                   style:UIAlertActionStyleDefault
                 handler:^(UIAlertAction *action) {
         NSString *query = alert.textFields.firstObject.text ?: @"";
-        // Mettre à jour le placeholder/texte du champ affiché pour feedback visuel
+        // Mettre à jour le texte du champ affiché pour feedback visuel
         textField.text = query;
-        // Mettre à jour l'attributedPlaceholder si query vide
         if (query.length == 0) {
             UIColor *subColor = [UIColor colorWithWhite:0.55 alpha:1.0];
             textField.attributedPlaceholder = [[NSAttributedString alloc]
@@ -1677,14 +1676,18 @@ static const char kS7TVTaskKey = 0;
                     attributes:@{NSForegroundColorAttributeName: subColor}];
         }
         [self _applySearchQuery:query];
+        // Restaurer le picker : l'alerte a pris le focus → le clavier natif
+        // est apparu. On force le TextEntryView à redevenir firstResponder
+        // avec son inputView = picker, ce qui efface le clavier et réaffiche le picker.
+        [self _restorePickerFocus];
     }];
 
     UIAlertAction *cancelAction = [UIAlertAction
         actionWithTitle:@"Annuler"
                   style:UIAlertActionStyleCancel
                 handler:^(UIAlertAction *action) {
-        // Vider la recherche si on annule et qu'il n'y avait pas de query
-        // (laisser la query courante intacte si l'utilisateur a juste annulé)
+        // Même chose à l'annulation : restaurer le picker
+        [self _restorePickerFocus];
     }];
 
     [alert addAction:searchAction];
@@ -1702,6 +1705,29 @@ static const char kS7TVTaskKey = 0;
     [self _updatePickerArraysForSearch:query];
     [self.emoteCollectionView reloadData];
     [self.emoteCollectionView setContentOffset:CGPointZero animated:NO];
+}
+
+// Restaure le picker après fermeture de l'UIAlertController.
+// La fermeture de l'alerte déclenche parfois un resign/become du firstResponder
+// sur le TextEntryView, ce qui efface son inputView et affiche le clavier natif.
+// On attend la fin de l'animation de fermeture (~0.35s) puis on réassigne
+// inputView = picker et on force reloadInputViews.
+- (void)_restorePickerFocus {
+    UITextView *tv = self.emotePickerTextEntryView;
+    UIView *pickerView = self.emotePickerView;
+    if (!tv || !pickerView) return;
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        // Réassigner l'inputView au cas où il aurait été effacé
+        tv.inputView = pickerView;
+        tv.inputAccessoryView = nil;
+        pickerView.hidden = NO;
+        if (!tv.isFirstResponder) {
+            [tv becomeFirstResponder];
+        }
+        [tv reloadInputViews];
+    });
 }
 
 // Appelé par UIControlEventEditingChanged (cas où le champ est modifié
