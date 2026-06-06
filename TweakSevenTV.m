@@ -898,17 +898,45 @@ static void s7tv_fix_attachment_bounds(NSTextAttachment *att) {
 // est en amont via la Couche C (addAttribute:).
 // Ce hook sert surtout à confirmer que la vue dessine bien.
 
-static IMP s_msgViewOrigDrawRect = NULL;
+static IMP s_msgViewOrigSizeThatFits = NULL;
+static IMP s_msgViewOrigIntrinsicContentSize = NULL;
 
-static void s7tv_imp_msgview_drawrect(id self, SEL _cmd, CGRect rect) {
-    // Appeler l'original
-    if (s_msgViewOrigDrawRect) {
-        ((void (*)(id, SEL, CGRect))s_msgViewOrigDrawRect)(self, _cmd, rect);
+// Hook sizeThatFits: — retourné par MessageStringView pour dimensionner la ligne
+// Si la hauteur est ~18-20pt (une ligne avec emote) → on force à 28pt
+static CGSize s7tv_imp_sizeThatFits(id self, SEL _cmd, CGSize size) {
+    CGSize result = {0, 0};
+    if (s_msgViewOrigSizeThatFits) {
+        result = ((CGSize (*)(id, SEL, CGSize))s_msgViewOrigSizeThatFits)(self, _cmd, size);
     }
+    static NSInteger s_sfCount = 0;
+    s_sfCount++;
+    // Log diagnostic (premiers appels)
+    if (s_sfCount <= 5) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[SevenTVManager sharedManager]
+                log:@"\U0001f4d0 sizeThatFits #%ld in=(%.0f,%.0f) out=(%.0f,%.0f)",
+                (long)s_sfCount, size.width, size.height, result.width, result.height];
+        });
+    }
+    // Si hauteur dans la plage "1 ligne avec emote 18pt"
+    if (result.height >= 16.0 && result.height <= 24.0) {
+        result.height = S7TV_EMOTE_TARGET_SIZE + 4.0; // 32pt = 28 + padding
+    }
+    return result;
+}
+
+static CGSize s7tv_imp_intrinsicContentSize(id self, SEL _cmd) {
+    CGSize result = {0, 0};
+    if (s_msgViewOrigIntrinsicContentSize) {
+        result = ((CGSize (*)(id, SEL))s_msgViewOrigIntrinsicContentSize)(self, _cmd);
+    }
+    if (result.height >= 16.0 && result.height <= 24.0) {
+        result.height = S7TV_EMOTE_TARGET_SIZE + 4.0;
+    }
+    return result;
 }
 
 static void s7tv_swizzle_message_string_view(void) {
-    // Retry avec délai car la classe Swift est chargée paresseusement
     void (^attempt)(void) = ^{
         Class cls = NSClassFromString(@"Twitch.MessageStringView");
         if (!cls) {
@@ -917,8 +945,7 @@ static void s7tv_swizzle_message_string_view(void) {
             return;
         }
 
-        // Hook -setAttributedString: ou équivalent Swift si disponible
-        // Chercher toutes les méthodes de la classe liées aux attributed strings
+        // Lister toutes les méthodes pour diagnostic
         unsigned int methodCount = 0;
         Method *methods = class_copyMethodList(cls, &methodCount);
         NSMutableArray *methodNames = [NSMutableArray array];
@@ -938,12 +965,72 @@ static void s7tv_swizzle_message_string_view(void) {
             log:@"🔍 MessageStringView méthodes pertinentes (%lu): %@",
             (unsigned long)methodNames.count,
             methodNames.count > 0 ? [methodNames componentsJoinedByString:@" | "] : @"(aucune)"];
+
+        // Hook sizeThatFits: via IMP directe
+        SEL selSTF = @selector(sizeThatFits:);
+        Method mSTF = class_getInstanceMethod(cls, selSTF);
+        if (mSTF && !s_msgViewOrigSizeThatFits) {
+            s_msgViewOrigSizeThatFits = method_getImplementation(mSTF);
+            method_setImplementation(mSTF, (IMP)s7tv_imp_sizeThatFits);
+            [[SevenTVManager sharedManager]
+                log:@"✅ MessageStringView sizeThatFits: hooké"];
+        }
+
+        // Hook intrinsicContentSize via IMP directe
+        SEL selICS = @selector(intrinsicContentSize);
+        Method mICS = class_getInstanceMethod(cls, selICS);
+        if (mICS && !s_msgViewOrigIntrinsicContentSize) {
+            s_msgViewOrigIntrinsicContentSize = method_getImplementation(mICS);
+            method_setImplementation(mICS, (IMP)s7tv_imp_intrinsicContentSize);
+            [[SevenTVManager sharedManager]
+                log:@"✅ MessageStringView intrinsicContentSize hooké"];
+        }
     };
 
     attempt();
-    // Retry à 3s pour les classes Swift chargées après le constructor
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), attempt);
+}
+
+// ── Rebind fishhook sur tous les frameworks embarqués ─────────────────────────
+// Twitch charge CoreText depuis ses propres frameworks → leur PLT est séparée.
+// On rebind CTRunDelegateCreate sur chaque image chargée.
+static void s7tv_hook_coretext_all_images(void) {
+    struct rebinding bindings[] = {
+        { "CTRunDelegateCreate",
+          s7tv_CTRunDelegateCreate,
+          (void **)&orig_CTRunDelegateCreate },
+        { "CTRunGetTypographicBounds",
+          s7tv_CTRunGetTypographicBounds,
+          (void **)&orig_CTRunGetTypographicBounds },
+        { "CTLineGetTypographicBounds",
+          s7tv_CTLineGetTypographicBounds,
+          (void **)&orig_CTLineGetTypographicBounds },
+    };
+
+    uint32_t count = _dyld_image_count();
+    int patched = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        const char *name = _dyld_get_image_name(i);
+        if (!name) continue;
+        NSString *imgName = [NSString stringWithUTF8String:name];
+        // Cibler Twitch et ses frameworks embarqués
+        if ([imgName containsString:@"Twitch"] ||
+            [imgName containsString:@"twitch"] ||
+            [imgName containsString:@"CoreText"] ||
+            [imgName containsString:@"TwitchCore"] ||
+            [imgName containsString:@"ChatCore"]) {
+            const struct mach_header *hdr = _dyld_get_image_header(i);
+            intptr_t slide = _dyld_get_image_vmaddr_slide(i);
+            int r = rebind_symbols_image((void *)hdr, slide, bindings, 3);
+            if (r == 0) patched++;
+            [[SevenTVManager sharedManager]
+                log:@"🔗 fishhook image[%u] %@ (r=%d)",
+                i, [imgName lastPathComponent], r];
+        }
+    }
+    [[SevenTVManager sharedManager]
+        log:@"🔗 fishhook multi-image terminé: %d images patchées", patched];
 }
 
 
@@ -1797,8 +1884,11 @@ static void TwitchSevenTVInit(void) {
     // ── Couche C : NSMutableAttributedString (belt-and-suspenders) ─────────────
     s7tv_swizzle_attributed_string();
 
-    // ── Couche D : fishhook CoreText ──────────────────────────────────────────
+    // ── Couche D : fishhook CoreText (binaire principal) ─────────────────────
     s7tv_hook_coretext_framesetter();
+
+    // ── Couche D bis : fishhook sur tous les frameworks Twitch embarqués ──────
+    s7tv_hook_coretext_all_images();
 
     // ── Couche E : UIImageView setFrame: 18×18→28×28 dans MessageStringView ──
     // Twitch place une UIImageView réelle à 18×18 pour chaque emote inline.
@@ -1832,7 +1922,10 @@ static void TwitchSevenTVInit(void) {
                 // Retry couche 3 : classes Swift souvent enregistrées après le constructor
                 s7tv_swizzle_text_attachment_subclasses();
 
-                // Découverte des méthodes Twitch.MessageStringView (diagnostic)
+                // Retry fishhook multi-image : frameworks Twitch chargés après le constructor
+                s7tv_hook_coretext_all_images();
+
+                // Découverte des méthodes + hooks Twitch.MessageStringView
                 s7tv_swizzle_message_string_view();
             }
         );
