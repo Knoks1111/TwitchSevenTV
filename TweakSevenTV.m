@@ -863,7 +863,7 @@ static UIViewController *s7tv_vcForView(UIView *v) {
             if ([sv isKindOfClass:[UITextView class]]) {
                 UITextView *tv = (UITextView *)sv;
                 NSAttributedString *attr = tv.attributedText;
-                NSUInteger attCount = 0;
+                __block NSUInteger attCount = 0;
                 if (attr.length > 0) {
                     [attr enumerateAttribute:NSAttachmentAttributeName
                                      inRange:NSMakeRange(0, attr.length)
