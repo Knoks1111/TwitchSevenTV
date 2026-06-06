@@ -446,6 +446,18 @@ static void s7tv_handleRoomState(NSString *ircMessage) {
                     if ([textToProcess containsString:@"ROOMSTATE"]) {
                         s7tv_handleRoomState(textToProcess);
                     }
+
+                    NSString *modified = [[SevenTVManager sharedManager]
+                                          injectSevenTVEmotesIntoIRCMessage:textToProcess];
+
+                    if (modified && ![modified isEqualToString:textToProcess]) {
+                        completionHandler(
+                            [[NSURLSessionWebSocketMessage alloc] initWithString:modified],
+                            nil
+                        );
+                        return;
+                    }
+
                     if (message.type == NSURLSessionWebSocketMessageTypeData) {
                         completionHandler(
                             [[NSURLSessionWebSocketMessage alloc] initWithString:textToProcess],

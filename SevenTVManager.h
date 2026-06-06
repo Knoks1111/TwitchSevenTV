@@ -82,6 +82,10 @@ extern NSString *const S7TVLogsDidUpdateNotification;
 - (void)loadEmotesForChannelName:(NSString *)channelName;
 - (void)loadEmotesForChannelTwitchID:(NSString *)twitchUserID;
 
+// --- Injection IRC ---
+// Détecte les emotes 7TV dans un message IRC et injecte le tag emotes=
+- (NSString *)injectSevenTVEmotesIntoIRCMessage:(NSString *)rawIRCMessage;
+
 // --- Extraction depuis réponses Twitch GQL ---
 - (void)extractAndLoadEmotesFromGQLResponse:(NSData *)responseData;
 

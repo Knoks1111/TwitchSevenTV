@@ -1079,6 +1079,89 @@ static const CGFloat kS7TVMenuHeight = 520.0;
 
 
 // ============================================================
+// MARK: - Injection IRC (V0.1 — simple)
+// ============================================================
+
+- (NSString *)injectSevenTVEmotesIntoIRCMessage:(NSString *)raw {
+    if (!self.isEnabled || raw.length == 0) return raw;
+
+    // On ne traite que les messages PRIVMSG
+    if (![raw containsString:@"PRIVMSG"]) return raw;
+
+    // Extraire le texte du message après " :"
+    NSRange colonSpace = [raw rangeOfString:@" :"];
+    if (colonSpace.location == NSNotFound) return raw;
+    NSString *messageText = [raw substringFromIndex:colonSpace.location + 2];
+
+    // Retirer \r\n en fin
+    messageText = [messageText stringByTrimmingCharactersInSet:
+                   [NSCharacterSet newlineCharacterSet]];
+    if (messageText.length == 0) return raw;
+
+    // Lire les emotes (thread-safe)
+    __block NSDictionary *global, *channel;
+    dispatch_sync(self.emoteQueue, ^{
+        global  = self.globalEmotes  ?: @{};
+        channel = self.channelEmotes ?: @{};
+    });
+
+    // Scanner chaque mot et construire le tag emotes=
+    NSMutableArray<NSString *> *entries = [NSMutableArray array];
+    NSArray<NSString *> *words = [messageText componentsSeparatedByString:@" "];
+    NSUInteger pos = 0;
+
+    for (NSString *word in words) {
+        if (word.length > 0) {
+            SevenTVEmote *emote = channel[word] ?: global[word];
+            if (emote) {
+                NSUInteger start = pos;
+                NSUInteger end   = pos + word.length - 1;
+                NSString *entry  = [NSString stringWithFormat:@"%@%@:%lu-%lu",
+                                    S7TV_EMOTE_ID_PREFIX, emote.emoteID,
+                                    (unsigned long)start, (unsigned long)end];
+                [entries addObject:entry];
+                [self log:@"✅ Emote détectée: %@ → %@", word, entry];
+            }
+        }
+        pos += word.length + 1;
+    }
+
+    if (entries.count == 0) return raw;
+
+    NSString *emoteTag = [entries componentsJoinedByString:@"/"];
+    [self log:@"💉 Injection: emotes=%@", emoteTag];
+
+    // Injecter dans le tag emotes= existant ou créer un nouveau tag
+    NSRange existingTag = [raw rangeOfString:@"emotes="];
+    if (existingTag.location != NSNotFound) {
+        NSMutableString *result = [raw mutableCopy];
+        NSUInteger insertAt = existingTag.location + existingTag.length;
+        NSString *existing = [raw substringFromIndex:insertAt];
+        // Si déjà des emotes → ajouter après avec "/"
+        NSRange semi = [existing rangeOfString:@";"];
+        NSRange space = [existing rangeOfString:@" "];
+        NSUInteger endTag = existing.length;
+        if (semi.location != NSNotFound) endTag = MIN(endTag, semi.location);
+        if (space.location != NSNotFound) endTag = MIN(endTag, space.location);
+        NSString *existingEmotes = [existing substringToIndex:endTag];
+        NSString *combined = existingEmotes.length > 0
+            ? [NSString stringWithFormat:@"%@/%@", existingEmotes, emoteTag]
+            : emoteTag;
+        [result replaceCharactersInRange:NSMakeRange(insertAt, endTag)
+                              withString:combined];
+        return [result copy];
+    } else {
+        // Pas de tag emotes= → on l'ajoute au début
+        if ([raw hasPrefix:@"@"]) {
+            return [NSString stringWithFormat:@"@emotes=%@;%@",
+                    emoteTag, [raw substringFromIndex:1]];
+        }
+        return [NSString stringWithFormat:@"@emotes=%@ %@", emoteTag, raw];
+    }
+}
+
+
+// ============================================================
 // MARK: - Picker d'emotes 7TV
 //
 // Affiché au-dessus de la barre de saisie Twitch quand l'utilisateur
