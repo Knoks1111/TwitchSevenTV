@@ -1002,12 +1002,6 @@ static void s7tv_hook_message_string_layer(void) {
         ivarCount > 0 ? MIN(ivarCount,30)-1 : 0, ivarLog];
     if (ivars) free(ivars);
 
-    // ── Helper : scanner et redimensionner les orderedImageLayers ───────────────
-    // Les emotes sont des CALayer stockées dans orderedImageLayers (ivar confirmé).
-    // Chaque image-layer a bounds ~18×18. On les force à 28×28.
-    // On retourne le nombre de layers patchées.
-    // Note : on utilise valueForKey: car l'ivar Swift est @objc(orderedImageLayers).
-
     // ── Hook display ─────────────────────────────────────────────────────────
     SEL selDisplay = @selector(display);
     Method mDisplay = class_getInstanceMethod(layerCls, selDisplay);
@@ -1024,94 +1018,93 @@ static void s7tv_hook_message_string_layer(void) {
             // ── Appel original FIRST (pour que les layers soient créées) ─────
             ((void (*)(id, SEL))origDisplay)(self_, selDisplay);
 
-            // ── Scan KVO une fois pour découvrir les clés disponibles ─────────
-            if (cnt == 1) {
+            // ── KVO scan COMPLET au premier appel pendant le chat (pas au boot) ─
+            // On cherche une layer de taille raisonnable (message chat, pas plein écran)
+            BOOL isChatSize = (self_.bounds.size.width > 10 &&
+                               self_.bounds.size.width < 400 &&
+                               self_.bounds.size.height > 0 &&
+                               self_.bounds.size.height < 200);
+            static BOOL kvoScanned = NO;
+            if (!kvoScanned && isChatSize && cnt > 5) {
+                kvoScanned = YES;
+                [[SevenTVManager sharedManager]
+                    log:@"🔬 KVO SCAN sur layer %.0f×%.0f (display #%ld)",
+                    self_.bounds.size.width, self_.bounds.size.height, (long)cnt];
                 for (NSString *key in @[@"messageString", @"textLayer",
                                         @"orderedImageLayers", @"orderedImageLayerContents",
                                         @"layoutEngine", @"lastLayout",
-                                        @"attributedString", @"attributedText",
-                                        @"message", @"string", @"text",
-                                        @"contentSize", @"contentInsets"]) {
+                                        @"contentSize", @"contentInsets",
+                                        @"maximumNumberOfLines", @"shouldAnimateCheermotes",
+                                        @"networkImageRequester"]) {
                     @try {
                         id val = [self_ valueForKey:key];
                         if (val) {
                             NSString *d = [val description];
-                            if (d.length > 150) d = [d substringToIndex:150];
+                            if (d.length > 200) d = [d substringToIndex:200];
                             [[SevenTVManager sharedManager]
-                                log:@"🔑 Layer KVO '%@': %@ = %@",
+                                log:@"🔑 KVO '%@': %@ = %@",
                                 key, NSStringFromClass([val class]), d];
+                        } else {
+                            [[SevenTVManager sharedManager]
+                                log:@"🔑 KVO '%@': nil", key];
                         }
-                    } @catch (...) {}
+                    } @catch (NSException *e) {
+                        [[SevenTVManager sharedManager]
+                            log:@"🔑 KVO '%@': exception %@", key, e.name];
+                    }
                 }
-                // Scanner aussi les sublayers directes
+                // Dump sublayers complètes
                 NSArray *subs = self_.sublayers;
                 [[SevenTVManager sharedManager]
-                    log:@"📐 Layer sublayers count=%lu", (unsigned long)subs.count];
-                for (NSUInteger si = 0; si < MIN(subs.count, 10); si++) {
+                    log:@"📐 sublayers count=%lu", (unsigned long)subs.count];
+                for (NSUInteger si = 0; si < MIN(subs.count, 15); si++) {
                     CALayer *sub = subs[si];
                     [[SevenTVManager sharedManager]
-                        log:@"   sub[%lu] class=%@ bounds=(%.1f,%.1f,%.1f,%.1f) contents=%@",
+                        log:@"   sub[%lu] class=%@ bounds=(%.1f,%.1f,%.1f,%.1f) pos=(%.1f,%.1f) contents=%@ name=%@",
                         (unsigned long)si,
                         NSStringFromClass([sub class]),
                         sub.bounds.origin.x, sub.bounds.origin.y,
                         sub.bounds.size.width, sub.bounds.size.height,
-                        sub.contents ? NSStringFromClass([sub.contents class]) : @"nil"];
+                        sub.position.x, sub.position.y,
+                        sub.contents ? NSStringFromClass([sub.contents class]) : @"nil",
+                        sub.name ?: @"(noname)"];
                 }
             }
 
-            // ── Patch orderedImageLayers après chaque display ─────────────────
-            // Les emotes sont dans orderedImageLayers (NSArray de CALayer).
-            // Chaque layer a bounds ~18×18 → forcer à 28×28 centré.
-            @try {
-                id imgLayersVal = [self_ valueForKey:@"orderedImageLayers"];
-                if ([imgLayersVal isKindOfClass:[NSArray class]]) {
-                    NSArray *imgLayers = (NSArray *)imgLayersVal;
-                    static NSInteger patchTotal = 0;
-                    NSInteger patchedNow = 0;
-                    for (id layerObj in imgLayers) {
-                        if (![layerObj isKindOfClass:[CALayer class]]) continue;
-                        CALayer *imgLayer = (CALayer *)layerObj;
-                        CGRect b = imgLayer.bounds;
-                        CGRect pos = imgLayer.frame; // position dans la parent
-                        // Cibler seulement les petites layers (~18×18)
-                        if (b.size.width < 1.0 || b.size.width > 40.0) continue;
-                        if (b.size.height < 1.0 || b.size.height > 40.0) continue;
-                        // Si déjà à la bonne taille, skip
-                        if (fabs(b.size.width  - S7TV_EMOTE_TARGET_SIZE) < 0.5 &&
-                            fabs(b.size.height - S7TV_EMOTE_TARGET_SIZE) < 0.5) continue;
-                        // Forcer 28×28, recentrer sur la même position
-                        CGFloat cx = CGRectGetMidX(pos);
-                        CGFloat cy = CGRectGetMidY(pos);
-                        // Désactiver les animations implicites
-                        [CATransaction begin];
-                        [CATransaction setDisableActions:YES];
-                        imgLayer.bounds = CGRectMake(0, 0, S7TV_EMOTE_TARGET_SIZE, S7TV_EMOTE_TARGET_SIZE);
-                        imgLayer.position = CGPointMake(cx, cy);
-                        [CATransaction commit];
-                        patchedNow++;
-                        patchTotal++;
-                    }
-                    if (patchedNow > 0) {
-                        [[SevenTVManager sharedManager]
-                            log:@"🎯 display: patché %ld imageLayers → 28×28 (total=%ld)",
-                            (long)patchedNow, (long)patchTotal];
-                    }
-                }
-            } @catch (...) {}
-
-            // ── Fallback : scanner les sublayers directes ─────────────────────
-            // Au cas où orderedImageLayers ne soit pas accessible via KVO.
+            // ── Patch sublayers avec contenu (images) → 28×28 ─────────────────
+            // On patche UNIQUEMENT les layers dans la plage 10–35pt
+            // (les emotes Twitch sont à 24×24 d'après les logs addSublayer).
+            // On log les 3 premiers patchs avec context complet pour debug.
             @try {
                 static NSInteger sublayerPatchTotal = 0;
+                static NSInteger sublayerPatchLog = 0;
                 NSArray *subs = self_.sublayers;
-                NSInteger patchedSubs = 0;
+                NSInteger patchedNow = 0;
                 for (CALayer *sub in subs) {
-                    if (!sub.contents) continue; // pas d'image
+                    if (!sub.contents) continue;
                     CGRect b = sub.bounds;
-                    if (b.size.width < 1.0 || b.size.width > 40.0) continue;
-                    if (b.size.height < 1.0 || b.size.height > 40.0) continue;
+                    if (b.size.width < 10.0 || b.size.width > 35.0) continue;
+                    if (b.size.height < 10.0 || b.size.height > 35.0) continue;
                     if (fabs(b.size.width  - S7TV_EMOTE_TARGET_SIZE) < 0.5 &&
                         fabs(b.size.height - S7TV_EMOTE_TARGET_SIZE) < 0.5) continue;
+                    // Log détaillé des premiers patchs
+                    sublayerPatchLog++;
+                    if (sublayerPatchLog <= 5) {
+                        [[SevenTVManager sharedManager]
+                            log:@"🔎 patch candidate #%ld: class=%@ bounds=(%.1f,%.1f) pos=(%.1f,%.1f) name=%@ contentsClass=%@",
+                            (long)sublayerPatchLog,
+                            NSStringFromClass([sub class]),
+                            b.size.width, b.size.height,
+                            sub.position.x, sub.position.y,
+                            sub.name ?: @"(noname)",
+                            NSStringFromClass([sub.contents class])];
+                        // Vérifier si la superlayer est bien MessageStringLayer
+                        [[SevenTVManager sharedManager]
+                            log:@"   superlayer: %@ bounds=(%.0f,%.0f)",
+                            NSStringFromClass([sub.superlayer class]),
+                            sub.superlayer.bounds.size.width,
+                            sub.superlayer.bounds.size.height];
+                    }
                     CGFloat cx = CGRectGetMidX(sub.frame);
                     CGFloat cy = CGRectGetMidY(sub.frame);
                     [CATransaction begin];
@@ -1119,13 +1112,61 @@ static void s7tv_hook_message_string_layer(void) {
                     sub.bounds = CGRectMake(0, 0, S7TV_EMOTE_TARGET_SIZE, S7TV_EMOTE_TARGET_SIZE);
                     sub.position = CGPointMake(cx, cy);
                     [CATransaction commit];
-                    patchedSubs++;
+                    // Vérifier immédiatement si le patch a tenu
+                    if (sublayerPatchLog <= 5) {
+                        CGRect bAfter = sub.bounds;
+                        [[SevenTVManager sharedManager]
+                            log:@"   → après patch: bounds=(%.1f,%.1f) [%@]",
+                            bAfter.size.width, bAfter.size.height,
+                            (fabs(bAfter.size.width - S7TV_EMOTE_TARGET_SIZE) < 0.5) ? @"✅ tenu" : @"❌ réécrit"];
+                    }
+                    patchedNow++;
                     sublayerPatchTotal++;
                 }
-                if (patchedSubs > 0) {
+                if (patchedNow > 0 && (sublayerPatchTotal <= 20 || (sublayerPatchTotal % 50) == 0)) {
                     [[SevenTVManager sharedManager]
                         log:@"🎯 display sublayer patch: %ld → 28×28 (total=%ld)",
-                        (long)patchedSubs, (long)sublayerPatchTotal];
+                        (long)patchedNow, (long)sublayerPatchTotal];
+                }
+            } @catch (...) {}
+
+            // ── Patch orderedImageLayers via KVO ─────────────────────────────
+            @try {
+                id imgLayersVal = [self_ valueForKey:@"orderedImageLayers"];
+                if ([imgLayersVal isKindOfClass:[NSArray class]]) {
+                    NSArray *imgLayers = (NSArray *)imgLayersVal;
+                    static NSInteger oilPatchTotal = 0;
+                    static BOOL oilLoggedFirst = NO;
+                    NSInteger patchedNow = 0;
+                    for (id layerObj in imgLayers) {
+                        if (![layerObj isKindOfClass:[CALayer class]]) continue;
+                        CALayer *imgLayer = (CALayer *)layerObj;
+                        CGRect b = imgLayer.bounds;
+                        if (b.size.width < 1.0 || b.size.width > 40.0) continue;
+                        if (b.size.height < 1.0 || b.size.height > 40.0) continue;
+                        if (fabs(b.size.width  - S7TV_EMOTE_TARGET_SIZE) < 0.5 &&
+                            fabs(b.size.height - S7TV_EMOTE_TARGET_SIZE) < 0.5) continue;
+                        if (!oilLoggedFirst) {
+                            oilLoggedFirst = YES;
+                            [[SevenTVManager sharedManager]
+                                log:@"🎪 orderedImageLayers patch! count=%lu first=(%.1f,%.1f)",
+                                (unsigned long)imgLayers.count, b.size.width, b.size.height];
+                        }
+                        CGFloat cx = CGRectGetMidX(imgLayer.frame);
+                        CGFloat cy = CGRectGetMidY(imgLayer.frame);
+                        [CATransaction begin];
+                        [CATransaction setDisableActions:YES];
+                        imgLayer.bounds = CGRectMake(0, 0, S7TV_EMOTE_TARGET_SIZE, S7TV_EMOTE_TARGET_SIZE);
+                        imgLayer.position = CGPointMake(cx, cy);
+                        [CATransaction commit];
+                        patchedNow++;
+                        oilPatchTotal++;
+                    }
+                    if (patchedNow > 0) {
+                        [[SevenTVManager sharedManager]
+                            log:@"🎯 orderedImageLayers patch: %ld → 28×28 (total=%ld)",
+                            (long)patchedNow, (long)oilPatchTotal];
+                    }
                 }
             } @catch (...) {}
         });
@@ -1155,44 +1196,19 @@ static void s7tv_hook_message_string_layer(void) {
     }
 
     // ── Hook setFrame: sur MessageStringLayer ─────────────────────────────────
-    // setFrame: est appelé chaque fois que la layer est repositionnée/redimensionnée.
-    // On en profite pour patcher les orderedImageLayers juste après.
     SEL selSF = @selector(setFrame:);
     Method mSF = class_getInstanceMethod(layerCls, selSF);
     if (mSF) {
         IMP origSF = method_getImplementation(mSF);
         IMP newSF = imp_implementationWithBlock(^(CALayer *self_, CGRect frame) {
             ((void (*)(id, SEL, CGRect))origSF)(self_, selSF, frame);
-            // Patch orderedImageLayers après le setFrame:
-            @try {
-                id imgLayersVal = [self_ valueForKey:@"orderedImageLayers"];
-                if ([imgLayersVal isKindOfClass:[NSArray class]]) {
-                    NSArray *imgLayers = (NSArray *)imgLayersVal;
-                    for (id layerObj in imgLayers) {
-                        if (![layerObj isKindOfClass:[CALayer class]]) continue;
-                        CALayer *imgLayer = (CALayer *)layerObj;
-                        CGRect b = imgLayer.bounds;
-                        if (b.size.width < 1.0 || b.size.width > 40.0) continue;
-                        if (b.size.height < 1.0 || b.size.height > 40.0) continue;
-                        if (fabs(b.size.width  - S7TV_EMOTE_TARGET_SIZE) < 0.5 &&
-                            fabs(b.size.height - S7TV_EMOTE_TARGET_SIZE) < 0.5) continue;
-                        CGFloat cx = CGRectGetMidX(imgLayer.frame);
-                        CGFloat cy = CGRectGetMidY(imgLayer.frame);
-                        [CATransaction begin];
-                        [CATransaction setDisableActions:YES];
-                        imgLayer.bounds = CGRectMake(0, 0, S7TV_EMOTE_TARGET_SIZE, S7TV_EMOTE_TARGET_SIZE);
-                        imgLayer.position = CGPointMake(cx, cy);
-                        [CATransaction commit];
-                    }
-                }
-            } @catch (...) {}
-            // Patch sublayers directes (fallback)
+            // Patch sublayers après setFrame:
             @try {
                 for (CALayer *sub in self_.sublayers) {
                     if (!sub.contents) continue;
                     CGRect b = sub.bounds;
-                    if (b.size.width < 1.0 || b.size.width > 40.0) continue;
-                    if (b.size.height < 1.0 || b.size.height > 40.0) continue;
+                    if (b.size.width < 10.0 || b.size.width > 35.0) continue;
+                    if (b.size.height < 10.0 || b.size.height > 35.0) continue;
                     if (fabs(b.size.width  - S7TV_EMOTE_TARGET_SIZE) < 0.5 &&
                         fabs(b.size.height - S7TV_EMOTE_TARGET_SIZE) < 0.5) continue;
                     CGFloat cx = CGRectGetMidX(sub.frame);
@@ -1209,11 +1225,71 @@ static void s7tv_hook_message_string_layer(void) {
         [[SevenTVManager sharedManager] log:@"✅ MessageStringLayer.setFrame: hooké (image patch)"];
     }
 
+    // ── Hook addSublayer: sur MessageStringLayer ──────────────────────────────
+    // Intercepte chaque image-layer au moment de son ajout pour la patcher immédiatement.
+    SEL selAddSub = @selector(addSublayer:);
+    Method mAddSub = class_getInstanceMethod(layerCls, selAddSub);
+    IMP origAddSub = mAddSub
+        ? method_getImplementation(mAddSub)
+        : class_getMethodImplementation([CALayer class], selAddSub);
+    IMP newAddSub = imp_implementationWithBlock(^(CALayer *self_, CALayer *sublayer) {
+        // Appel original FIRST
+        ((void (*)(id, SEL, id))origAddSub)(self_, selAddSub, sublayer);
+        if (!sublayer) return;
+        CGRect b = sublayer.bounds;
+        // Log des 10 premiers addSublayer (avec et sans contents)
+        static NSInteger addSubCnt = 0; addSubCnt++;
+        if (addSubCnt <= 10) {
+            [[SevenTVManager sharedManager]
+                log:@"➕ addSublayer: #%ld bounds=(%.1f,%.1f,%.1f,%.1f) class=%@ hasContents=%@ name=%@",
+                (long)addSubCnt,
+                b.origin.x, b.origin.y, b.size.width, b.size.height,
+                NSStringFromClass([sublayer class]),
+                sublayer.contents ? @"YES" : @"NO",
+                sublayer.name ?: @"(noname)"];
+        }
+        // Patch si dans la plage emote (10–35pt) avec contenu
+        if (!sublayer.contents) return;
+        if (b.size.width < 10.0 || b.size.width > 35.0) return;
+        if (b.size.height < 10.0 || b.size.height > 35.0) return;
+        if (fabs(b.size.width  - S7TV_EMOTE_TARGET_SIZE) < 0.5 &&
+            fabs(b.size.height - S7TV_EMOTE_TARGET_SIZE) < 0.5) return;
+        // Log patch + vérification post-patch
+        static NSInteger addSubPatchCnt = 0; addSubPatchCnt++;
+        CGFloat cx = CGRectGetMidX(sublayer.frame);
+        CGFloat cy = CGRectGetMidY(sublayer.frame);
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        sublayer.bounds = CGRectMake(0, 0, S7TV_EMOTE_TARGET_SIZE, S7TV_EMOTE_TARGET_SIZE);
+        sublayer.position = CGPointMake(cx, cy);
+        [CATransaction commit];
+        if (addSubPatchCnt <= 5) {
+            CGRect bAfter = sublayer.bounds;
+            [[SevenTVManager sharedManager]
+                log:@"   addSublayer patch #%ld → (%.1f,%.1f) [%@]",
+                (long)addSubPatchCnt, bAfter.size.width, bAfter.size.height,
+                (fabs(bAfter.size.width - S7TV_EMOTE_TARGET_SIZE) < 0.5) ? @"✅ tenu" : @"❌ réécrit"];
+        }
+    });
+    if (mAddSub) {
+        method_setImplementation(mAddSub, newAddSub);
+    } else {
+        class_addMethod(layerCls, selAddSub, newAddSub, "v@:@");
+    }
+    [[SevenTVManager sharedManager] log:@"✅ MessageStringLayer.addSublayer: hooké"];
+
+    // ── Hook setBounds: sur MessageStringLayer ────────────────────────────────
+    // Twitch appelle peut-être setBounds: sur les sublayers APRÈS addSublayer:
+    // → on surveille si les bounds sont réécrites sur nos sublayers patchées.
+    // Pour ça on hook setBounds: sur CALayer (classe de base) mais seulement
+    // si la superlayer est MessageStringLayer.
+    // NOTE : on NE hook PAS CALayer directement (trop global, risque de perf).
+    // On utilise un test de superlayer dans display + un log post-patch.
+
     // ── Hook tous les setters candidats (setAttributedString:, setMessage:, etc.) ─
     for (NSString *name in allNames) {
         NSString *lower = [name lowercaseString];
         if (![lower hasPrefix:@"set"]) continue;
-        // Exclure setFrame: déjà hooké et setBounds: (ne contient pas nos keywords)
         if ([name isEqualToString:@"setFrame:"] || [name isEqualToString:@"setBounds:"]) continue;
         if (!([lower containsString:@"attributed"] ||
               [lower containsString:@"message"]    ||
@@ -1244,89 +1320,6 @@ static void s7tv_hook_message_string_layer(void) {
         [[SevenTVManager sharedManager]
             log:@"✅ MessageStringLayer.%@ hooké", name];
     }
-
-    // ── Hook setOrderedImageLayers: si elle existe ────────────────────────────
-    // Swift génère parfois un setter public pour les @objc ivars.
-    // On intercepte pour patcher les layers au moment de leur injection.
-    SEL selOIL = NSSelectorFromString(@"setOrderedImageLayers:");
-    Method mOIL = class_getInstanceMethod(layerCls, selOIL);
-    if (mOIL) {
-        IMP origOIL = method_getImplementation(mOIL);
-        IMP newOIL = imp_implementationWithBlock(^(id self_, NSArray *layers) {
-            // Appel original d'abord
-            ((void (*)(id, SEL, id))origOIL)(self_, selOIL, layers);
-            // Patch immédiat
-            static NSInteger oilCnt = 0; oilCnt++;
-            if (oilCnt <= 5) {
-                [[SevenTVManager sharedManager]
-                    log:@"📦 setOrderedImageLayers: #%ld count=%lu",
-                    (long)oilCnt, (unsigned long)[layers count]];
-            }
-            [CATransaction begin];
-            [CATransaction setDisableActions:YES];
-            for (id layerObj in layers) {
-                if (![layerObj isKindOfClass:[CALayer class]]) continue;
-                CALayer *imgLayer = (CALayer *)layerObj;
-                CGRect b = imgLayer.bounds;
-                if (b.size.width < 1.0 || b.size.width > 40.0) continue;
-                if (b.size.height < 1.0 || b.size.height > 40.0) continue;
-                if (fabs(b.size.width  - S7TV_EMOTE_TARGET_SIZE) < 0.5 &&
-                    fabs(b.size.height - S7TV_EMOTE_TARGET_SIZE) < 0.5) continue;
-                CGFloat cx = CGRectGetMidX(imgLayer.frame);
-                CGFloat cy = CGRectGetMidY(imgLayer.frame);
-                imgLayer.bounds = CGRectMake(0, 0, S7TV_EMOTE_TARGET_SIZE, S7TV_EMOTE_TARGET_SIZE);
-                imgLayer.position = CGPointMake(cx, cy);
-            }
-            [CATransaction commit];
-        });
-        method_setImplementation(mOIL, newOIL);
-        [[SevenTVManager sharedManager] log:@"✅ MessageStringLayer.setOrderedImageLayers: hooké"];
-    }
-
-    // ── Hook addSublayer: sur MessageStringLayer ──────────────────────────────
-    // Quand Twitch ajoute une image-layer, on la patch immédiatement.
-    // addSublayer: est hérité de CALayer → on l'ajoute directement sur la sous-classe.
-    SEL selAddSub = @selector(addSublayer:);
-    Method mAddSub = class_getInstanceMethod(layerCls, selAddSub);
-    // Si la méthode n'est pas overridée dans MessageStringLayer, on l'ajoute
-    IMP origAddSub = mAddSub
-        ? method_getImplementation(mAddSub)
-        : class_getMethodImplementation([CALayer class], selAddSub);
-    IMP newAddSub = imp_implementationWithBlock(^(CALayer *self_, CALayer *sublayer) {
-        // Appel original
-        ((void (*)(id, SEL, id))origAddSub)(self_, selAddSub, sublayer);
-        // Patch si c'est une petite layer avec contenu (image)
-        if (!sublayer) return;
-        CGRect b = sublayer.bounds;
-        if (b.size.width < 1.0 || b.size.width > 40.0) return;
-        if (b.size.height < 1.0 || b.size.height > 40.0) return;
-        if (fabs(b.size.width  - S7TV_EMOTE_TARGET_SIZE) < 0.5 &&
-            fabs(b.size.height - S7TV_EMOTE_TARGET_SIZE) < 0.5) return;
-        static NSInteger addSubCnt = 0; addSubCnt++;
-        if (addSubCnt <= 10) {
-            [[SevenTVManager sharedManager]
-                log:@"➕ addSublayer: #%ld bounds=(%.1f,%.1f,%.1f,%.1f) class=%@ hasContents=%@",
-                (long)addSubCnt,
-                b.origin.x, b.origin.y, b.size.width, b.size.height,
-                NSStringFromClass([sublayer class]),
-                sublayer.contents ? @"YES" : @"NO"];
-        }
-        // Patch bounds → 28×28
-        CGFloat cx = CGRectGetMidX(sublayer.frame);
-        CGFloat cy = CGRectGetMidY(sublayer.frame);
-        [CATransaction begin];
-        [CATransaction setDisableActions:YES];
-        sublayer.bounds = CGRectMake(0, 0, S7TV_EMOTE_TARGET_SIZE, S7TV_EMOTE_TARGET_SIZE);
-        sublayer.position = CGPointMake(cx, cy);
-        [CATransaction commit];
-    });
-    if (mAddSub) {
-        method_setImplementation(mAddSub, newAddSub);
-    } else {
-        // Ajouter la méthode directement sur la sous-classe
-        class_addMethod(layerCls, selAddSub, newAddSub, "v@:@");
-    }
-    [[SevenTVManager sharedManager] log:@"✅ MessageStringLayer.addSublayer: hooké"];
 }
 
 static void s7tv_swizzle_message_string_view(void) {
