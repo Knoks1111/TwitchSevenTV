@@ -536,13 +536,32 @@ static void s7tv_handleRoomState(NSString *ircMessage) {
                                                  glyphPosition:pos
                                                 characterIndex:charIdx];
 
+    // LOG DIAGNOSTIC : toujours loguer ce que l'original retourne
+    // (même si ce n'est pas 18×18 — pour comprendre le vrai comportement Twitch)
+    [[SevenTVManager sharedManager]
+        log:@"📐 [L1-FIRED] class=%@ orig=(%.1f×%.1f) image=%@ contents=%lu bytes",
+        NSStringFromClass([self class]),
+        orig.size.width, orig.size.height,
+        self.image ? [NSString stringWithFormat:@"%.0f×%.0f", self.image.size.width, self.image.size.height] : @"nil",
+        (unsigned long)self.contents.length];
+
     // Si l'original retourne exactement ~18×18 → c'est la valeur Twitch hardcodée.
     // On remplace par 28×28.  Les badges avec d'autres tailles passent inchangés.
     if (fabs(orig.size.width  - S7TV_TWITCH_HARDCODED) < 1.0 &&
         fabs(orig.size.height - S7TV_TWITCH_HARDCODED) < 1.0) {
         [[SevenTVManager sharedManager]
-            log:@"📐 [L1] attachmentBounds: 18×18 intercepté → 28×28 (class=%@)",
+            log:@"📐 [L1-HIT] 18×18 intercepté → 28×28 (class=%@)",
             NSStringFromClass([self class])];
+        return CGRectMake(0, 0, S7TV_EMOTE_TARGET_SIZE, S7TV_EMOTE_TARGET_SIZE);
+    }
+
+    // Si l'original retourne 0×0 (image pas encore chargée) → aussi forcer 28×28
+    // si on détecte que c'est une emote 7TV (fileWrapper == nil = créé sans fichier)
+    if (orig.size.width < 1.0 && orig.size.height < 1.0) {
+        [[SevenTVManager sharedManager]
+            log:@"📐 [L1-ZERO] 0×0 intercepté → 28×28 (class=%@) fileWrapper=%@",
+            NSStringFromClass([self class]),
+            self.fileWrapper ? @"present" : @"nil"];
         return CGRectMake(0, 0, S7TV_EMOTE_TARGET_SIZE, S7TV_EMOTE_TARGET_SIZE);
     }
 
@@ -561,10 +580,16 @@ static void s7tv_handleRoomState(NSString *ircMessage) {
 @implementation NSLayoutManager (S7TVAttachmentSize)
 
 - (void)s7tv_setAttachmentSize:(CGSize)size forGlyphRange:(NSRange)glyphRange {
+    // LOG DIAGNOSTIC : toujours loguer ce que Twitch envoie
+    [[SevenTVManager sharedManager]
+        log:@"📐 [L2-FIRED] setAttachmentSize=(%.1f×%.1f) glyphRange={%lu,%lu}",
+        size.width, size.height,
+        (unsigned long)glyphRange.location, (unsigned long)glyphRange.length];
+
     if (fabs(size.width  - S7TV_TWITCH_HARDCODED) < 1.0 &&
         fabs(size.height - S7TV_TWITCH_HARDCODED) < 1.0) {
         [[SevenTVManager sharedManager]
-            log:@"📐 [L2] setAttachmentSize: 18×18 intercepté → 28×28"];
+            log:@"📐 [L2-HIT] setAttachmentSize: 18×18 intercepté → 28×28"];
         size = CGSizeMake(S7TV_EMOTE_TARGET_SIZE, S7TV_EMOTE_TARGET_SIZE);
     }
     [self s7tv_setAttachmentSize:size forGlyphRange:glyphRange];
@@ -926,10 +951,27 @@ static UIViewController *s7tv_vcForView(UIView *v) {
                  NSStringFromClass([sv.superview class])];
             }
 
-            // ── UITextView : chercher NSTextAttachment ────────────────────────
+            // ── UITextView : chercher NSTextAttachment + détecter TextKit 2 ────
             if ([sv isKindOfClass:[UITextView class]]) {
                 UITextView *tv = (UITextView *)sv;
                 NSAttributedString *attr = tv.attributedText;
+
+                // ── DIAGNOSTIC TextKit 2 ──────────────────────────────────────
+                // NSTextLayoutManager est disponible iOS 15+ (TextKit 2).
+                // Si Twitch utilise TextKit 2, NSLayoutManager swizzle est inutile.
+                id textLayoutManager = nil;
+                if ([tv respondsToSelector:NSSelectorFromString(@"textLayoutManager")]) {
+                    textLayoutManager = [tv performSelector:NSSelectorFromString(@"textLayoutManager")];
+                }
+                NSString *tkVersion = textLayoutManager
+                    ? [NSString stringWithFormat:@"TextKit2(%@)", NSStringFromClass([textLayoutManager class])]
+                    : [NSString stringWithFormat:@"TextKit1(layoutManager=%@)", NSStringFromClass([tv.layoutManager class])];
+                [mgr log:@"  📝 UITextView(%@) engine=%@ frame=(%.0f,%.0f,%.0f,%.0f)",
+                 cn, tkVersion,
+                 frameInWindow.origin.x, frameInWindow.origin.y,
+                 frameInWindow.size.width, frameInWindow.size.height];
+
+                // ── ATTACHMENTS ───────────────────────────────────────────────
                 __block NSUInteger attCount = 0;
                 if (attr.length > 0) {
                     [attr enumerateAttribute:NSAttachmentAttributeName
@@ -940,24 +982,60 @@ static UIViewController *s7tv_vcForView(UIView *v) {
                         attCount++;
                         NSTextAttachment *ta = (NSTextAttachment *)att;
                         UIImage *img = ta.image;
-                        // bounds retournés par la méthode standard
+
+                        // bounds retournés par la méthode (APRÈS nos hooks)
                         CGRect b = [ta attachmentBoundsForTextContainer:nil
                                                     proposedLineFragment:CGRectMake(0,0,320,20)
                                                            glyphPosition:CGPointZero
                                                           characterIndex:r.location];
-                        [mgr log:@"  📎 Attachment[%lu] class=%@ imgSize=(%.0f×%.0f) bounds=(%.0f,%.0f,%.0f,%.0f)",
+
+                        // Vérifier si cette classe a son propre override
+                        SEL bSel = @selector(attachmentBoundsForTextContainer:proposedLineFragment:glyphPosition:characterIndex:);
+                        Method m     = class_getInstanceMethod([att class], bSel);
+                        Method baseM = class_getInstanceMethod([NSTextAttachment class], bSel);
+                        BOOL hasOwnOverride = (m && m != baseM);
+
+                        // Vérifier si setImage: existe sur la classe
+                        BOOL hasSetImage = [att respondsToSelector:@selector(setImage:)];
+
+                        [mgr log:@"  📎 Att[%lu] class=%@ imgSize=(%.0f×%.0f) bounds=(%.0f×%.0f) contents=%lu hasOverride=%@ hasSetImage=%@ fileWrapper=%@",
                          (unsigned long)attCount,
                          NSStringFromClass([att class]),
                          img ? img.size.width : 0, img ? img.size.height : 0,
-                         b.origin.x, b.origin.y, b.size.width, b.size.height];
+                         b.size.width, b.size.height,
+                         (unsigned long)ta.contents.length,
+                         hasOwnOverride ? @"YES" : @"NO",
+                         hasSetImage    ? @"YES" : @"NO",
+                         ta.fileWrapper ? ta.fileWrapper.filename ?: @"present" : @"nil"];
                     }];
                 }
-                [mgr log:@"  📝 UITextView(%@) frame=(%.0f,%.0f,%.0f,%.0f) attachments=%lu text='%.40@'",
-                 cn,
-                 frameInWindow.origin.x, frameInWindow.origin.y,
-                 frameInWindow.size.width, frameInWindow.size.height,
-                 (unsigned long)attCount,
-                 tv.text ?: @""];
+
+                if (attCount == 0) {
+                    [mgr log:@"  📎 Aucun attachment dans ce UITextView"];
+                }
+
+                // ── GLYPHS pour chaque attachment : position réelle dans le LM ─
+                if (textLayoutManager == nil && tv.layoutManager && attCount > 0) {
+                    // TextKit 1 : lire les tailles stockées dans le layout manager
+                    NSLayoutManager *lm = tv.layoutManager;
+                    NSTextStorage *ts = tv.textStorage;
+                    [ts enumerateAttribute:NSAttachmentAttributeName
+                                   inRange:NSMakeRange(0, ts.length)
+                                   options:0
+                                usingBlock:^(id att, NSRange r, BOOL *stop) {
+                        if (!att) return;
+                        // Convertir charIndex → glyphIndex
+                        NSRange glyphRange = [lm glyphRangeForCharacterRange:r
+                                                        actualCharacterRange:nil];
+                        CGRect glyphRect = [lm boundingRectForGlyphRange:glyphRange
+                                                         inTextContainer:tv.textContainer];
+                        [mgr log:@"  📏 LM glyph rect pour att: (%.0f,%.0f,%.0f×%.0f)",
+                         glyphRect.origin.x, glyphRect.origin.y,
+                         glyphRect.size.width, glyphRect.size.height];
+                    }];
+                } else if (textLayoutManager != nil) {
+                    [mgr log:@"  ⚠️  TextKit 2 détecté — NSLayoutManager swizzle INUTILE sur cette vue"];
+                }
             }
 
             // ── Classes Twitch custom liées au chat / emotes ──────────────────
@@ -968,7 +1046,7 @@ static UIViewController *s7tv_vcForView(UIView *v) {
                              || [cn containsString:@"Fragment"]
                              || [cn containsString:@"Token"];
             if (isTwitchChat) {
-                [mgr log:@"  🎯 TWITCH(%@) frame=(%.0f,%.0f,%.0f,%.0f) sub=%lu",
+                [mgr log:@"  🎯 TWITCH(%@) frame=(%.0f,%.0f,%.0f×%.0f) sub=%lu",
                  cn,
                  frameInWindow.origin.x, frameInWindow.origin.y,
                  frameInWindow.size.width, frameInWindow.size.height,
@@ -1297,6 +1375,45 @@ static void TwitchSevenTVInit(void) {
                 s7tv_swizzle_text_attachment_subclasses();
                 [[SevenTVManager sharedManager]
                     log:@"🔄 Retry scan sous-classes NSTextAttachment effectué"];
+
+                // ── DIAGNOSTIC STARTUP : lister TOUTES les sous-classes NSTextAttachment ──
+                // Ce log est critique : si Twitch a une sous-classe qui n'est PAS swizzlée,
+                // la couche 1 ne se déclenche jamais.
+                unsigned int count = 0;
+                Class *classes = objc_copyClassList(&count);
+                NSMutableArray *found = [NSMutableArray array];
+                for (unsigned int i = 0; i < count; i++) {
+                    Class cls = classes[i];
+                    Class sup = class_getSuperclass(cls);
+                    while (sup) {
+                        if (sup == [NSTextAttachment class]) {
+                            SEL bSel = @selector(attachmentBoundsForTextContainer:proposedLineFragment:glyphPosition:characterIndex:);
+                            Method m     = class_getInstanceMethod(cls, bSel);
+                            Method baseM = class_getInstanceMethod([NSTextAttachment class], bSel);
+                            BOOL hasOwn  = (m && m != baseM);
+                            [found addObject:[NSString stringWithFormat:@"%@(ownOverride=%@)",
+                                              NSStringFromClass(cls), hasOwn ? @"YES" : @"NO"]];
+                            break;
+                        }
+                        sup = class_getSuperclass(sup);
+                    }
+                }
+                free(classes);
+                [[SevenTVManager sharedManager]
+                    log:@"🔍 Sous-classes NSTextAttachment trouvées (%lu): %@",
+                    (unsigned long)found.count,
+                    found.count > 0 ? [found componentsJoinedByString:@", "] : @"(aucune)"];
+
+                // ── DIAGNOSTIC TextKit : créer une UITextView probe et loguer sa classe TK ──
+                UITextView *probeTK = [[UITextView alloc] initWithFrame:CGRectZero];
+                id tkLM = nil;
+                if ([probeTK respondsToSelector:NSSelectorFromString(@"textLayoutManager")]) {
+                    tkLM = [probeTK performSelector:NSSelectorFromString(@"textLayoutManager")];
+                }
+                [[SevenTVManager sharedManager]
+                    log:@"🔍 UITextView probe: textLayoutManager=%@ layoutManager=%@",
+                    tkLM ? NSStringFromClass([tkLM class]) : @"nil (TextKit1)",
+                    NSStringFromClass([probeTK.layoutManager class])];
             }
         );
     });
