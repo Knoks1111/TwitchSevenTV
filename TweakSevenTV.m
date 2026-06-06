@@ -575,23 +575,155 @@ static void s7tv_handleRoomState(NSString *ircMessage) {
 
 @end
 
-// ── Couche E : UIImageView setFrame: dans Twitch.MessageStringView ────────────
+// ── Couche E : Hook CTRunDelegateCreate via fishhook ─────────────────────────
 //
-// DIAGNOSTIC TAP #4 :
-//   🖼 UIImageView frame=(8,552,18,18) imgSize=(24×24) parent=UIStackView
-//   → La UIImageView est créée à 18×18 par Twitch dans un UIStackView
-//     lui-même enfant de Twitch.MessageStringView (sub=0).
-//   → CoreText ne dessine PAS l'image : il réserve l'espace via CTRunDelegate,
-//     puis Twitch place une vraie UIImageView à côté du texte.
-//   → imgSize=(24×24) prouve que l'image 7TV est bien chargée en 24px
-//     mais son frame UIKit est forcé à 18×18 par Twitch.
+// DIAGNOSTIC CONFIRMÉ (logs TAP scan) :
+//   Twitch.MessageStringView a sub=0 → AUCUNE UIImageView enfant.
+//   Twitch dessine les emotes PUREMENT via CoreText CTRunDelegate.
+//   Le hook setImage: ne se déclenche donc jamais pour les emotes chat.
 //
-// FIX : swizzler -[UIImageView setFrame:] et détecter le pattern :
-//   frame.size == {18,18} ET superview == UIStackView ET
-//   l'ancêtre contient une Twitch.MessageStringView
-//   → forcer frame à {28,28} centré sur le même point
+// VRAIE STRATÉGIE :
+//   CTRunDelegateCreate est appelé PAR TWITCH (dans sa PLT) → hookable fishhook.
+//   On wrappe chaque CTRunDelegateCallbacks créé par Twitch :
+//     - On stocke les callbacks originales de Twitch
+//     - On substitue nos propres callbacks qui appellent l'original PUIS
+//       retournent S7TV_EMOTE_TARGET_SIZE si la valeur originale ≈ 18
 //
-// Optimisation : on remonte la hiérarchie max 4 niveaux (perf).
+// Structure : on garde une table de callbacks wrappées (max 32 slots).
+// ──────────────────────────────────────────────────────────────────────────────
+
+// Table des callbacks originales interceptées (Twitch n'en crée que quelques-unes)
+#define S7TV_MAX_DELEGATE_WRAPPERS 32
+
+typedef struct {
+    CTRunDelegateGetAscentCallback   origAscent;
+    CTRunDelegateGetDescentCallback  origDescent;
+    CTRunDelegateGetWidthCallback    origWidth;
+    CTRunDelegateDeallocateCallback  origDealloc;
+    BOOL                             used;
+} S7TVDelegateWrapper;
+
+static S7TVDelegateWrapper s_delegateWrappers[S7TV_MAX_DELEGATE_WRAPPERS];
+static int s_wrapperCount = 0;
+static BOOL s_ctrundelegatehook_logged = NO;
+
+// ── Nos callbacks wrappées (une par slot) ────────────────────────────────────
+// On génère 4 slots manuellement (Twitch n'a que 1-2 patterns d'emotes).
+// Chaque slot a ses propres fonctions C statiques pour éviter les closures.
+
+#define MAKE_DELEGATE_WRAPPER(IDX) \
+static CGFloat s7tv_ascent_##IDX(void *ref) { \
+    CGFloat v = s_delegateWrappers[IDX].origAscent \
+        ? s_delegateWrappers[IDX].origAscent(ref) : 18.0f; \
+    if (v >= 13.0f && v <= 22.0f) { \
+        static int _cnt = 0; _cnt++; \
+        if (_cnt <= 5 || (_cnt % 200) == 0) { \
+            dispatch_async(dispatch_get_main_queue(), ^{ \
+                [[SevenTVManager sharedManager] \
+                    log:@"\U0001f3af CTRunDelegate[" #IDX "] ascent %.1f→%.1f (#%d)", \
+                    v, (CGFloat)S7TV_EMOTE_TARGET_SIZE, _cnt]; \
+            }); \
+        } \
+        return S7TV_EMOTE_TARGET_SIZE; \
+    } \
+    return v; \
+} \
+static CGFloat s7tv_descent_##IDX(void *ref) { \
+    CGFloat v = s_delegateWrappers[IDX].origDescent \
+        ? s_delegateWrappers[IDX].origDescent(ref) : 0.0f; \
+    if (v >= 0.0f && v <= 8.0f) return 0.0f; \
+    return v; \
+} \
+static CGFloat s7tv_width_##IDX(void *ref) { \
+    CGFloat v = s_delegateWrappers[IDX].origWidth \
+        ? s_delegateWrappers[IDX].origWidth(ref) : 18.0f; \
+    if (v >= 13.0f && v <= 22.0f) return S7TV_EMOTE_TARGET_SIZE; \
+    return v; \
+} \
+static void s7tv_dealloc_##IDX(void *ref) { \
+    if (s_delegateWrappers[IDX].origDealloc) \
+        s_delegateWrappers[IDX].origDealloc(ref); \
+}
+
+MAKE_DELEGATE_WRAPPER(0)
+MAKE_DELEGATE_WRAPPER(1)
+MAKE_DELEGATE_WRAPPER(2)
+MAKE_DELEGATE_WRAPPER(3)
+MAKE_DELEGATE_WRAPPER(4)
+MAKE_DELEGATE_WRAPPER(5)
+MAKE_DELEGATE_WRAPPER(6)
+MAKE_DELEGATE_WRAPPER(7)
+
+static CTRunDelegateGetAscentCallback  s_wrappedAscents[]  = { s7tv_ascent_0,  s7tv_ascent_1,  s7tv_ascent_2,  s7tv_ascent_3,  s7tv_ascent_4,  s7tv_ascent_5,  s7tv_ascent_6,  s7tv_ascent_7 };
+static CTRunDelegateGetDescentCallback s_wrappedDescents[] = { s7tv_descent_0, s7tv_descent_1, s7tv_descent_2, s7tv_descent_3, s7tv_descent_4, s7tv_descent_5, s7tv_descent_6, s7tv_descent_7 };
+static CTRunDelegateGetWidthCallback   s_wrappedWidths[]   = { s7tv_width_0,   s7tv_width_1,   s7tv_width_2,   s7tv_width_3,   s7tv_width_4,   s7tv_width_5,   s7tv_width_6,   s7tv_width_7 };
+static CTRunDelegateDeallocateCallback s_wrappedDeallocs[] = { s7tv_dealloc_0, s7tv_dealloc_1, s7tv_dealloc_2, s7tv_dealloc_3, s7tv_dealloc_4, s7tv_dealloc_5, s7tv_dealloc_6, s7tv_dealloc_7 };
+
+#define S7TV_ACTIVE_WRAPPERS 8
+
+// ── Hook CTRunDelegateCreate ──────────────────────────────────────────────────
+
+static CTRunDelegateRef (*orig_CTRunDelegateCreate)(const CTRunDelegateCallbacks *, void *) = NULL;
+
+static CTRunDelegateRef s7tv_CTRunDelegateCreate(const CTRunDelegateCallbacks *callbacks,
+                                                  void *refCon) {
+    if (!callbacks) return orig_CTRunDelegateCreate(callbacks, refCon);
+
+    // Tester si c'est un delegate "emote" : ascent ≈ 18 avec refCon nul
+    // (on ne peut pas appeler les callbacks ici sans risque, on wrappe toujours
+    //  les callbacks dont l'ascent hardcodé tombe dans [13, 22])
+    // Chercher si ce pattern est déjà connu
+    for (int i = 0; i < s_wrapperCount && i < S7TV_ACTIVE_WRAPPERS; i++) {
+        if (s_delegateWrappers[i].origAscent  == callbacks->getAscent  &&
+            s_delegateWrappers[i].origDescent == callbacks->getDescent &&
+            s_delegateWrappers[i].origWidth   == callbacks->getWidth) {
+            // Pattern déjà wrappé → utiliser ce slot
+            CTRunDelegateCallbacks wrapped = {
+                .version    = kCTRunDelegateVersion1,
+                .dealloc    = s_wrappedDeallocs[i],
+                .getAscent  = s_wrappedAscents[i],
+                .getDescent = s_wrappedDescents[i],
+                .getWidth   = s_wrappedWidths[i],
+            };
+            return orig_CTRunDelegateCreate(&wrapped, refCon);
+        }
+    }
+
+    // Nouveau pattern → allouer un slot
+    if (s_wrapperCount < S7TV_ACTIVE_WRAPPERS) {
+        int idx = s_wrapperCount++;
+        s_delegateWrappers[idx].origAscent  = callbacks->getAscent;
+        s_delegateWrappers[idx].origDescent = callbacks->getDescent;
+        s_delegateWrappers[idx].origWidth   = callbacks->getWidth;
+        s_delegateWrappers[idx].origDealloc = callbacks->dealloc;
+        s_delegateWrappers[idx].used        = YES;
+
+        if (!s_ctrundelegatehook_logged) {
+            s_ctrundelegatehook_logged = YES;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [[SevenTVManager sharedManager]
+                    log:@"\U0001f3af CTRunDelegateCreate intercepté (slot %d) — wrapping callbacks", idx];
+            });
+        }
+
+        CTRunDelegateCallbacks wrapped = {
+            .version    = kCTRunDelegateVersion1,
+            .dealloc    = s_wrappedDeallocs[idx],
+            .getAscent  = s_wrappedAscents[idx],
+            .getDescent = s_wrappedDescents[idx],
+            .getWidth   = s_wrappedWidths[idx],
+        };
+        return orig_CTRunDelegateCreate(&wrapped, refCon);
+    }
+
+    // Slots épuisés → passer tel quel
+    return orig_CTRunDelegateCreate(callbacks, refCon);
+}
+
+
+// ── Couche E bis : UIImageView setImage: (garde pour les badges futurs) ───────
+// Les emotes chat n'ont pas de UIImageView (CoreText pur), mais on garde
+// le hook pour les badges à gauche des pseudos (qui eux UTILISENT UIImageView).
 
 @interface UIImageView (S7TVEmoteSize)
 @end
@@ -603,42 +735,37 @@ static void s7tv_handleRoomState(NSString *ircMessage) {
 
     if (!image) return;
 
-    // Filtre rapide : seulement si frame est exactement 18×18
     CGRect f = self.frame;
+    // Filtre rapide : seulement 18×18
     if (!(fabs(f.size.width  - S7TV_TWITCH_HARDCODED) < 0.5 &&
           fabs(f.size.height - S7TV_TWITCH_HARDCODED) < 0.5)) return;
 
-    // Remonter la hiérarchie (max 8 niveaux) — logguer les 3 premiers ancêtres
-    // pour diagnostic ET chercher MessageStringView ou ChatMessageTableViewCell
+    // Remonter la hiérarchie pour trouver le contexte (badge vs emote)
     UIView *ancestor = self.superview;
-    BOOL inChatMessage = NO;
+    BOOL inChat = NO;
     NSString *parentChain = @"";
-    for (int i = 0; i < 8 && ancestor; i++) {
+    for (int i = 0; i < 6 && ancestor; i++) {
         NSString *cn = NSStringFromClass([ancestor class]);
         if (i < 3) parentChain = [parentChain stringByAppendingFormat:@"%@→", cn];
-        if ([cn isEqualToString:@"Twitch.MessageStringView"] ||
-            [cn isEqualToString:@"Twitch.ChatMessageTableViewCell"] ||
-            [cn containsString:@"ChatMessage"] ||
-            [cn containsString:@"ChatReply"]) {
-            inChatMessage = YES;
-            break;
+        if ([cn containsString:@"ChatMessage"] || [cn containsString:@"ChatReply"] ||
+            [cn isEqualToString:@"Twitch.MessageStringView"]) {
+            inChat = YES; break;
         }
         ancestor = ancestor.superview;
     }
 
-    // Log diagnostic (5 premiers)
     static NSInteger s_diagCount = 0;
     s_diagCount++;
     if (s_diagCount <= 5) {
         [[SevenTVManager sharedManager]
             log:@"\U0001f50d setImage 18x18 #%ld imgSize=(%.0fx%.0f) chain=%@ inChat=%@",
             (long)s_diagCount, image.size.width, image.size.height,
-            parentChain, inChatMessage ? @"OUI" : @"NON"];
+            parentChain, inChat ? @"OUI" : @"NON"];
     }
 
-    if (!inChatMessage) return;
+    if (!inChat) return;
 
-    // Forcer frame 28×28 centré
+    // Badge dans le chat → agrandir hitbox (même technique que les badges username)
     CGFloat cx = f.origin.x + f.size.width  / 2.0;
     CGFloat cy = f.origin.y + f.size.height / 2.0;
     self.frame = CGRectMake(cx - S7TV_EMOTE_TARGET_SIZE / 2.0,
@@ -650,14 +777,13 @@ static void s7tv_handleRoomState(NSString *ircMessage) {
     s_patchCount++;
     if (s_patchCount <= 10 || (s_patchCount % 100) == 0) {
         [[SevenTVManager sharedManager]
-            log:@"\U0001f5bc setImage patch #%ld → 28×28", (long)s_patchCount];
+            log:@"\U0001f5bc setImage badge patch #%ld → 28×28", (long)s_patchCount];
     }
 }
 
 @end
 
 static void s7tv_swizzle_imageview_frame(void) {
-    // setImage: est défini directement sur UIImageView → pas de problème de hiérarchie
     s7tv_swizzle([UIImageView class],
                  [UIImageView class],
                  @selector(setImage:),
@@ -1507,12 +1633,23 @@ static CGFloat s7tv_CTRunGetTypographicBounds(CTRunRef run,
     // ET le run a un attribut CTRunDelegate (= c'est un attachment inline)
     BOOL isEmoteRun = NO;
     CGFloat total = origAscent + origDescent;
-    if (total >= 13.0 && total <= 21.0) {
-        // Vérifier la présence de kCTRunDelegateAttributeName dans le run
-        CFDictionaryRef attrs = CTRunGetAttributes(run);
-        if (attrs) {
-            CFTypeRef delegate = CFDictionaryGetValue(attrs, kCTRunDelegateAttributeName);
-            if (delegate != NULL) {
+
+    // Log diagnostic : premiers runs avec CTRunDelegate (pour voir les vraies valeurs)
+    CFDictionaryRef attrs = CTRunGetAttributes(run);
+    if (attrs) {
+        CFTypeRef delegate = CFDictionaryGetValue(attrs, kCTRunDelegateAttributeName);
+        if (delegate != NULL) {
+            static NSInteger s_runDiag = 0;
+            s_runDiag++;
+            if (s_runDiag <= 10) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [[SevenTVManager sharedManager]
+                        log:@"\U0001f50e CTRun delegate #%ld ascent=%.1f descent=%.1f total=%.1f width=%.1f",
+                        (long)s_runDiag, origAscent, origDescent, total, width];
+                });
+            }
+            // Élargir la plage : couvrir 13-30pt au lieu de 13-21pt
+            if (total >= 10.0 && total <= 30.0) {
                 isEmoteRun = YES;
             }
         }
@@ -1619,10 +1756,13 @@ static void s7tv_hook_coretext_framesetter(void) {
         { "CTFramesetterCreateWithAttributedString",
           s7tv_CTFramesetterCreate,
           (void **)&orig_CTFramesetterCreate },
+        { "CTRunDelegateCreate",
+          s7tv_CTRunDelegateCreate,
+          (void **)&orig_CTRunDelegateCreate },
     };
-    int result = rebind_symbols(bindings, 3);
+    int result = rebind_symbols(bindings, 4);
     [[SevenTVManager sharedManager]
-        log:@"%@ fishhook CTRunGetTypographicBounds + CTLineGetTypographicBounds + CTFramesetterCreate (result=%d)",
+        log:@"%@ fishhook CTRun/CTLine/CTFramesetter/CTRunDelegateCreate (result=%d)",
         result == 0 ? @"\u2705" : @"\u274c", result];
 }
 
