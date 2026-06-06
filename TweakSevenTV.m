@@ -1375,27 +1375,124 @@ static void s7tv_swizzle_account_menu(void) {
 }
 
 
-// ── Couche D : Hook CTFramesetterCreateWithAttributedString via fishhook ─────
+// ── Couche D : Hook CTRunDelegateCreate + CTFramesetterCreateWithAttributedString ──
 //
-// Twitch.MessageStringView passe un NSAttributedString à CoreText via cette
-// fonction C. C'est ICI que CoreText lit NSTextAttachment.bounds pour calculer
-// le layout. Notre Couche C (addAttribute:) est appelée APRÈS → trop tard.
+// DIAGNOSTIC : fishhook CTFramesetterCreate est installé (result=0) mais
+// aucun "🎯 CTFramesetter patch" n'apparaît → Twitch ne passe PAS par
+// NSTextAttachment dans ce path. Il utilise CTRunDelegate directement :
+// une structure C avec callbacks getAscent/getDescent/getWidth hardcodées
+// à 18.0. Ces callbacks ignorent complètement NSTextAttachment.bounds.
 //
-// fishhook remplace l'entrée dans la PLT/GOT de Twitch (Mach-O lazy binding)
-// → notre wrapper est appelé à la place de CTFramesetterCreateWithAttributedString.
-// On patche les bounds de tous les NSTextAttachment dans le string AVANT de
-// passer à CoreText.
+// FIX DOUBLE :
+//   1. Hook CTRunDelegateCreate → wrapper les callbacks pour forcer 28pt
+//      quand la valeur retournée est dans [14, 20] (zone 18pt ± marge).
+//   2. Garder le hook CTFramesetterCreate pour patcher les NSTextAttachment
+//      résiduels (autres paths TextKit).
 //
-// ⚠️ fishhook ne fonctionne que sur les symboles importés dynamiquement
-//    (lazy/non-lazy pointers). CTFramesetterCreateWithAttributedString est
-//    dans CoreText.framework → importé dynamiquement par Twitch → hookable.
+// Architecture du wrapper CTRunDelegate :
+//   - On alloue un S7TVRunDelegateCtx qui embed le refcon original + callbacks
+//   - getAscent/getDescent/getWidth wrappées : si val ∈ [14,20] → retourne
+//     S7TV_EMOTE_TARGET_SIZE (ascent) ou 0 (descent) ou 28 (width)
+//   - dealloc wrappé pour libérer le contexte
+//
+// ⚠️ CTRunDelegateCreate est dans CoreText.framework → hookable par fishhook.
+// ⚠️ Les callbacks sont des pointeurs de fonction C → on ne peut pas les
+//    swizzler. On doit remplacer tout le CTRunDelegate par un neuf.
 
+// Contexte wrappé pour chaque CTRunDelegate intercepté
+typedef struct {
+    void                    *origRefCon;
+    CTRunDelegateGetValueCallback origGetAscent;
+    CTRunDelegateGetValueCallback origGetDescent;
+    CTRunDelegateGetValueCallback origGetWidth;
+    CTRunDelegateDeallocateCallback origDealloc;
+} S7TVRunDelegateCtx;
+
+static CGFloat s7tv_rd_getAscent(void *refCon) {
+    S7TVRunDelegateCtx *ctx = (S7TVRunDelegateCtx *)refCon;
+    CGFloat val = ctx->origGetAscent ? ctx->origGetAscent(ctx->origRefCon) : S7TV_EMOTE_TARGET_SIZE;
+    // Twitch hardcode 18pt ± marge → forcer à notre taille cible
+    if (val >= 14.0 && val <= 20.0) {
+        return S7TV_EMOTE_TARGET_SIZE;
+    }
+    return val;
+}
+
+static CGFloat s7tv_rd_getDescent(void *refCon) {
+    S7TVRunDelegateCtx *ctx = (S7TVRunDelegateCtx *)refCon;
+    CGFloat val = ctx->origGetDescent ? ctx->origGetDescent(ctx->origRefCon) : 0.0;
+    // Si on a forcé l'ascent, le descent doit rester 0 (baseline alignment)
+    CGFloat ascent = ctx->origGetAscent ? ctx->origGetAscent(ctx->origRefCon) : 0.0;
+    if (ascent >= 14.0 && ascent <= 20.0) {
+        return 0.0;
+    }
+    return val;
+}
+
+static CGFloat s7tv_rd_getWidth(void *refCon) {
+    S7TVRunDelegateCtx *ctx = (S7TVRunDelegateCtx *)refCon;
+    CGFloat val = ctx->origGetWidth ? ctx->origGetWidth(ctx->origRefCon) : S7TV_EMOTE_TARGET_SIZE;
+    if (val >= 14.0 && val <= 20.0) {
+        return S7TV_EMOTE_TARGET_SIZE;
+    }
+    return val;
+}
+
+static void s7tv_rd_dealloc(void *refCon) {
+    S7TVRunDelegateCtx *ctx = (S7TVRunDelegateCtx *)refCon;
+    if (ctx->origDealloc) ctx->origDealloc(ctx->origRefCon);
+    free(ctx);
+}
+
+// Pointeur vers l'original CTRunDelegateCreate
+static CTRunDelegateRef (*orig_CTRunDelegateCreate)(const CTRunDelegateCallbacks *, void *) = NULL;
+
+static CTRunDelegateRef s7tv_CTRunDelegateCreate(const CTRunDelegateCallbacks *callbacks,
+                                                  void *refCon) {
+    if (!callbacks) return orig_CTRunDelegateCreate(callbacks, refCon);
+
+    // Vérifier si les callbacks ressemblent à des emotes Twitch (ascent ∈ [14,20])
+    // en sondant directement (refCon peut être NULL → sécurisé)
+    // On wrappe systématiquement : overhead minimal, correctness maximale.
+    S7TVRunDelegateCtx *ctx = (S7TVRunDelegateCtx *)malloc(sizeof(S7TVRunDelegateCtx));
+    if (!ctx) return orig_CTRunDelegateCreate(callbacks, refCon);
+
+    ctx->origRefCon    = refCon;
+    ctx->origGetAscent = callbacks->getAscent;
+    ctx->origGetDescent= callbacks->getDescent;
+    ctx->origGetWidth  = callbacks->getWidth;
+    ctx->origDealloc   = callbacks->dealloc;
+
+    CTRunDelegateCallbacks wrapped = {
+        .version    = kCTRunDelegateCurrentVersion,
+        .dealloc    = s7tv_rd_dealloc,
+        .getAscent  = s7tv_rd_getAscent,
+        .getDescent = s7tv_rd_getDescent,
+        .getWidth   = s7tv_rd_getWidth,
+    };
+
+    // Sonder la valeur originale pour logger seulement quand c'est une emote
+    CGFloat origAscent = callbacks->getAscent ? callbacks->getAscent(refCon) : -1;
+    if (origAscent >= 14.0 && origAscent <= 20.0) {
+        static NSInteger s_rdCount = 0;
+        s_rdCount++;
+        if (s_rdCount <= 10 || (s_rdCount % 200) == 0) {
+            [[SevenTVManager sharedManager]
+                log:@"\U0001f3af CTRunDelegate patch #%ld ascent=%.1f→%.1f",
+                (long)s_rdCount, origAscent, (CGFloat)S7TV_EMOTE_TARGET_SIZE];
+        }
+    }
+
+    return orig_CTRunDelegateCreate(&wrapped, ctx);
+}
+
+// Hook CTFramesetterCreateWithAttributedString (gardé pour path NSTextAttachment)
 static CTFramesetterRef (*orig_CTFramesetterCreate)(CFAttributedStringRef, CFRange, CFDictionaryRef) = NULL;
 
 static CTFramesetterRef s7tv_CTFramesetterCreate(CFAttributedStringRef string,
                                                    CFRange stringRange,
                                                    CFDictionaryRef frameAttributes) {
-    // Patcher les bounds de tous les NSTextAttachment dans le string
+    // Patcher les NSTextAttachment résiduels (path TextKit / non-CTRunDelegate)
     NSAttributedString *attrStr = (__bridge NSAttributedString *)string;
     NSUInteger len = attrStr.length;
     if (len > 0) {
@@ -1414,14 +1511,14 @@ static CTFramesetterRef s7tv_CTFramesetterCreate(CFAttributedStringRef string,
                     s_ftCount++;
                     if (s_ftCount <= 20 || (s_ftCount % 100) == 0) {
                         [[SevenTVManager sharedManager]
-                            log:@"\U0001f3af CTFramesetter patch #%ld bounds=(%.1f,%.1f,%.1f,%.1f)",
-                            (long)s_ftCount, b.origin.x, b.origin.y, b.size.width, b.size.height];
+                            log:@"\U0001f4ce CTFramesetter attach patch #%ld (%.1f×%.1f)",
+                            (long)s_ftCount, b.size.width, b.size.height];
                     }
                     att.bounds = CGRectMake(0, -5, S7TV_EMOTE_TARGET_SIZE, S7TV_EMOTE_TARGET_SIZE);
                 }
             }
             NSUInteger nextLoc = effectiveRange.location + effectiveRange.length;
-            if (nextLoc <= searchRange.location) break; // sécurité boucle infinie
+            if (nextLoc <= searchRange.location) break;
             searchRange = NSMakeRange(nextLoc, len - nextLoc);
         }
     }
@@ -1430,13 +1527,16 @@ static CTFramesetterRef s7tv_CTFramesetterCreate(CFAttributedStringRef string,
 
 static void s7tv_hook_coretext_framesetter(void) {
     struct rebinding bindings[] = {
+        { "CTRunDelegateCreate",
+          s7tv_CTRunDelegateCreate,
+          (void **)&orig_CTRunDelegateCreate },
         { "CTFramesetterCreateWithAttributedString",
           s7tv_CTFramesetterCreate,
           (void **)&orig_CTFramesetterCreate }
     };
-    int result = rebind_symbols(bindings, 1);
+    int result = rebind_symbols(bindings, 2);
     [[SevenTVManager sharedManager]
-        log:@"%@ fishhook CTFramesetterCreateWithAttributedString (result=%d)",
+        log:@"%@ fishhook CTRunDelegateCreate + CTFramesetterCreate (result=%d)",
         result == 0 ? @"\u2705" : @"\u274c", result];
 }
 
