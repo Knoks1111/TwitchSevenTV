@@ -1161,10 +1161,17 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
 // ID de cellule pour la collection
 static NSString *const kEmoteCellID = @"S7TVEmoteCell";
 
-// Hauteur du picker
-static const CGFloat kPickerHeight  = 280.0;
+// Hauteur du picker — dynamique selon l'orientation
+// Portrait : 280pt (place suffisante, clavier caché)
+// Paysage  : 180pt (hauteur écran réduite, on économise l'espace)
+static CGFloat S7TVPickerHeight(void) {
+    CGSize screen = UIScreen.mainScreen.bounds.size;
+    BOOL landscape = screen.width > screen.height;
+    return landscape ? 180.0 : 280.0;
+}
+
 // Taille de chaque cellule par défaut (carré)
-static const CGFloat kCellSize      = 40.0;
+static const CGFloat kCellSize = 40.0;
 
 // Clé pour stocker la NSURLSessionDataTask courante dans chaque cellule
 // (annulation lors du recyclage)
@@ -1417,11 +1424,17 @@ static const char kS7TVTaskKey = 0;
     [self _updatePickerArraysForSearch:@""];
 
     // ── Créer le picker si besoin ─────────────────────────────────────
-    CGRect pickerFrame = CGRectMake(0, 0, UIScreen.mainScreen.bounds.size.width, kPickerHeight);
+    // Recalcule la taille à chaque ouverture pour s'adapter à l'orientation courante.
+    CGSize screenSz = UIScreen.mainScreen.bounds.size;
+    CGFloat pickerH = S7TVPickerHeight();
+    CGRect pickerFrame = CGRectMake(0, 0, screenSz.width, pickerH);
     if (!self.emotePickerView) {
         [self _createEmotePickerViewWithFrame:pickerFrame];
     }
     self.emotePickerView.frame = pickerFrame;
+    // Mettre à jour la frame de la collectionView aussi (elle est déjà en sous-vue)
+    CGFloat headerH = 48.0;
+    self.emoteCollectionView.frame = CGRectMake(0, headerH, screenSz.width, pickerH - headerH);
 
     // Reset la recherche
     self.emoteSearchField.text = @"";
@@ -1463,9 +1476,10 @@ static const char kS7TVTaskKey = 0;
                     if (w.isKeyWindow) { keyWindow = w; break; }
         if (!keyWindow) keyWindow = [UIApplication sharedApplication].windows.firstObject;
         if (keyWindow) {
+            CGFloat ph = S7TVPickerHeight();
             self.emotePickerView.frame = CGRectMake(0,
-                keyWindow.bounds.size.height - kPickerHeight - 56,
-                keyWindow.bounds.size.width, kPickerHeight);
+                keyWindow.bounds.size.height - ph - 56,
+                keyWindow.bounds.size.width, ph);
             [keyWindow addSubview:self.emotePickerView];
             self.emotePickerView.hidden = NO;
         }
@@ -1593,7 +1607,7 @@ static const char kS7TVTaskKey = 0;
     layout.headerReferenceSize     = CGSizeMake(frame.size.width, 28.0);
 
     UICollectionView *cv = [[UICollectionView alloc]
-        initWithFrame:CGRectMake(0, headerH, frame.size.width, kPickerHeight - headerH)
+        initWithFrame:CGRectMake(0, headerH, frame.size.width, frame.size.height - headerH)
  collectionViewLayout:layout];
     // Fond sombre = même couleur que les cellules.
     // La bordure blanche est sur chaque cellule (layer.border), pas sur le fond.
@@ -1896,14 +1910,20 @@ static const char kS7TVTaskKey = 0;
 //   • largeur max : cv.bounds.width (pas de débordement)
 //   • hauteur min : 32 pt
 
-static const CGFloat kRefCols = 6.0; // hauteur de référence = screenWidth / 6
+// Nombre de colonnes de référence — plus élevé en paysage pour des cellules plus petites.
+// Portrait  : 6 cols → cellules ~65pt (iPhone 390pt wide)
+// Paysage   : 10 cols → cellules ~84pt (iPhone 844pt wide) — taille réduite voulue
+static CGFloat S7TVRefCols(void) {
+    CGSize screen = UIScreen.mainScreen.bounds.size;
+    return screen.width > screen.height ? 10.0 : 6.0;
+}
 
 - (CGSize)collectionView:(UICollectionView *)cv
                   layout:(UICollectionViewLayout *)layout
   sizeForItemAtIndexPath:(NSIndexPath *)indexPath {
 
     CGFloat cvW   = cv.bounds.size.width > 0 ? cv.bounds.size.width : 390.0;
-    CGFloat cellH = MAX(32.0, floor(cvW / kRefCols));
+    CGFloat cellH = MAX(32.0, floor(cvW / S7TVRefCols()));
 
     SevenTVEmote *emote = [self _emoteForIndexPath:indexPath];
     if (!emote || emote.width <= 0 || emote.height <= 0) {
@@ -2225,11 +2245,34 @@ referenceSizeForHeaderInSection:(NSInteger)section {
 - (void)settingsButtonTapped:(UIButton *)sender {
     dispatch_async(dispatch_get_main_queue(), ^{
         SevenTVSettingsController *vc = [[SevenTVSettingsController alloc] init];
-        // Quand ouvert depuis le bouton flottant → modal avec bouton Close
         vc.openedAsModal = YES;
-        // S7TVSettingsNavController bloque la rotation en portrait →
-        // le modal ne passe jamais en plein écran paysage.
         S7TVSettingsNavController *nav = [[S7TVSettingsNavController alloc] initWithRootViewController:vc];
+
+        // ── Sheet de hauteur fixe (portrait ET paysage) ──────────────────────
+        // UISheetPresentationController (iOS 15+) : detent custom à 580pt.
+        // En paysage sur iPhone, une "automatic" sheet passe en plein écran ;
+        // un detent de hauteur fixe reste compact quelle que soit l'orientation.
+        if (@available(iOS 15.0, *)) {
+            UISheetPresentationController *sheet = nav.sheetPresentationController;
+            if (sheet) {
+                if (@available(iOS 16.0, *)) {
+                    // Detent custom : hauteur fixe 580pt indépendante de l'écran
+                    UISheetPresentationControllerDetent *fixed =
+                        [UISheetPresentationControllerDetent
+                            customDetentWithIdentifier:@"s7tvFixed"
+                            resolver:^CGFloat(id<UISheetPresentationControllerDetentResolutionContext> ctx) {
+                                return 580.0;
+                            }];
+                    sheet.detents = @[fixed];
+                } else {
+                    // iOS 15 : medium (≈50% écran) — suffisant pour le menu
+                    sheet.detents = @[UISheetPresentationControllerDetent.mediumDetent];
+                }
+                sheet.prefersScrollingExpandsWhenScrolledToEdge = NO;
+                sheet.prefersGrabberVisible = YES;
+            }
+        }
+
         [[self topViewController] presentViewController:nav animated:YES completion:nil];
     });
 }
