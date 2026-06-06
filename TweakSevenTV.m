@@ -1018,15 +1018,27 @@ static void s7tv_hook_message_string_layer(void) {
             // ── Appel original FIRST (pour que les layers soient créées) ─────
             ((void (*)(id, SEL))origDisplay)(self_, selDisplay);
 
-            // ── KVO scan COMPLET au premier appel pendant le chat (pas au boot) ─
+            // ── KVO scan COMPLET — se répète jusqu'à trouver des données réelles ─
             // On cherche une layer de taille raisonnable (message chat, pas plein écran)
-            BOOL isChatSize = (self_.bounds.size.width > 10 &&
-                               self_.bounds.size.width < 400 &&
-                               self_.bounds.size.height > 0 &&
-                               self_.bounds.size.height < 200);
+            // et on recommence tant que orderedImageLayers est nil (scan au boot = données vides).
+            BOOL isChatSize = (self_.bounds.size.width > 30 &&
+                               self_.bounds.size.width < 380 &&
+                               self_.bounds.size.height >= 10 &&
+                               self_.bounds.size.height < 120);
             static BOOL kvoScanned = NO;
-            if (!kvoScanned && isChatSize && cnt > 5) {
-                kvoScanned = YES;
+            static NSInteger kvoScanCount = 0;
+            // Re-scanner si pas encore trouvé de données (max 5 tentatives)
+            if (!kvoScanned && isChatSize && cnt > 5 && kvoScanCount < 5) {
+                kvoScanCount++;
+                // Vérifier si orderedImageLayers a des données
+                id oilCheck = nil;
+                @try { oilCheck = [self_ valueForKey:@"orderedImageLayers"]; } @catch (...) {}
+                // Marquer comme terminé seulement si on a des données OU après 5 essais
+                if ([oilCheck isKindOfClass:[NSArray class]] && [(NSArray*)oilCheck count] > 0) {
+                    kvoScanned = YES;
+                } else if (kvoScanCount >= 5) {
+                    kvoScanned = YES; // abandon après 5 essais
+                }
                 [[SevenTVManager sharedManager]
                     log:@"🔬 KVO SCAN sur layer %.0f×%.0f (display #%ld)",
                     self_.bounds.size.width, self_.bounds.size.height, (long)cnt];
@@ -1116,9 +1128,24 @@ static void s7tv_hook_message_string_layer(void) {
                     if (sublayerPatchLog <= 5) {
                         CGRect bAfter = sub.bounds;
                         [[SevenTVManager sharedManager]
-                            log:@"   → après patch: bounds=(%.1f,%.1f) [%@]",
+                            log:@"   → après patch: bounds=(%.1f,%.1f) [%@] superlayer clips=%@",
                             bAfter.size.width, bAfter.size.height,
-                            (fabs(bAfter.size.width - S7TV_EMOTE_TARGET_SIZE) < 0.5) ? @"✅ tenu" : @"❌ réécrit"];
+                            (fabs(bAfter.size.width - S7TV_EMOTE_TARGET_SIZE) < 0.5) ? @"✅ tenu" : @"❌ réécrit",
+                            self_.masksToBounds ? @"OUI" : @"NON"];
+                        // Si la superlayer (MessageStringLayer) clippe les sublayers
+                        // et est trop petite pour 28×28, l'élargir
+                        if (self_.masksToBounds &&
+                            (self_.bounds.size.width < S7TV_EMOTE_TARGET_SIZE ||
+                             self_.bounds.size.height < S7TV_EMOTE_TARGET_SIZE)) {
+                            [CATransaction begin];
+                            [CATransaction setDisableActions:YES];
+                            self_.bounds = CGRectMake(0, 0,
+                                MAX(self_.bounds.size.width,  S7TV_EMOTE_TARGET_SIZE),
+                                MAX(self_.bounds.size.height, S7TV_EMOTE_TARGET_SIZE));
+                            [CATransaction commit];
+                            [[SevenTVManager sharedManager]
+                                log:@"   ↳ MSL élargie pour éviter le clipping"];
+                        }
                     }
                     patchedNow++;
                     sublayerPatchTotal++;
@@ -1256,19 +1283,43 @@ static void s7tv_hook_message_string_layer(void) {
             fabs(b.size.height - S7TV_EMOTE_TARGET_SIZE) < 0.5) return;
         // Log patch + vérification post-patch
         static NSInteger addSubPatchCnt = 0; addSubPatchCnt++;
-        CGFloat cx = CGRectGetMidX(sublayer.frame);
-        CGFloat cy = CGRectGetMidY(sublayer.frame);
+        // Conserver la position existante. Si le frame est non-nul, recalculer le
+        // centre depuis le frame original. Si la layer vient juste d'être ajoutée
+        // avec une position déjà définie (ancre=centre par défaut), la conserver.
+        CGPoint existingPos = sublayer.position;
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
         sublayer.bounds = CGRectMake(0, 0, S7TV_EMOTE_TARGET_SIZE, S7TV_EMOTE_TARGET_SIZE);
-        sublayer.position = CGPointMake(cx, cy);
+        if (b.size.width > 0) {
+            CGFloat cx = CGRectGetMidX(sublayer.frame);
+            CGFloat cy = CGRectGetMidY(sublayer.frame);
+            sublayer.position = CGPointMake(cx, cy);
+        } else {
+            sublayer.position = existingPos;
+        }
         [CATransaction commit];
         if (addSubPatchCnt <= 5) {
             CGRect bAfter = sublayer.bounds;
+            // Aussi log la superlayer pour détecter un clipping
             [[SevenTVManager sharedManager]
-                log:@"   addSublayer patch #%ld → (%.1f,%.1f) [%@]",
+                log:@"   addSublayer patch #%ld → (%.1f,%.1f) [%@] superlayer=(%.0f×%.0f) clips=%@",
                 (long)addSubPatchCnt, bAfter.size.width, bAfter.size.height,
-                (fabs(bAfter.size.width - S7TV_EMOTE_TARGET_SIZE) < 0.5) ? @"✅ tenu" : @"❌ réécrit"];
+                (fabs(bAfter.size.width - S7TV_EMOTE_TARGET_SIZE) < 0.5) ? @"✅ tenu" : @"❌ réécrit",
+                self_.bounds.size.width, self_.bounds.size.height,
+                self_.masksToBounds ? @"OUI" : @"NON"];
+            // Si la superlayer clippe et est trop petite → l'élargir aussi
+            if (self_.masksToBounds &&
+                (self_.bounds.size.width < S7TV_EMOTE_TARGET_SIZE ||
+                 self_.bounds.size.height < S7TV_EMOTE_TARGET_SIZE)) {
+                [CATransaction begin];
+                [CATransaction setDisableActions:YES];
+                self_.bounds = CGRectMake(0, 0,
+                    MAX(self_.bounds.size.width,  S7TV_EMOTE_TARGET_SIZE),
+                    MAX(self_.bounds.size.height, S7TV_EMOTE_TARGET_SIZE));
+                [CATransaction commit];
+                [[SevenTVManager sharedManager]
+                    log:@"   ↳ superlayer élargie à 28×28 pour éviter le clipping"];
+            }
         }
     });
     if (mAddSub) {
@@ -1285,6 +1336,52 @@ static void s7tv_hook_message_string_layer(void) {
     // si la superlayer est MessageStringLayer.
     // NOTE : on NE hook PAS CALayer directement (trop global, risque de perf).
     // On utilise un test de superlayer dans display + un log post-patch.
+
+    // ── Hook setBounds: sur MessageStringLayer DIRECTEMENT ────────────────────
+    // Cela permettra de détecter si Twitch réécrit les bounds de la layer principale
+    // (la MessageStringLayer elle-même, pas ses sublayers).
+    SEL selSB = @selector(setBounds:);
+    Method mSB = class_getInstanceMethod(layerCls, selSB);
+    if (mSB) {
+        IMP origSB = method_getImplementation(mSB);
+        IMP newSB = imp_implementationWithBlock(^(CALayer *self_, CGRect newBounds) {
+            static NSInteger sbCnt = 0; sbCnt++;
+            // Log les setBounds qui arrivent avec taille emote (indique que Twitch fixe à 24pt)
+            if (newBounds.size.width >= 10 && newBounds.size.width <= 35 &&
+                newBounds.size.height >= 10 && newBounds.size.height <= 35) {
+                if (sbCnt <= 10 || (sbCnt % 100) == 0) {
+                    [[SevenTVManager sharedManager]
+                        log:@"🔒 MSL.setBounds: #%ld (%.1f×%.1f) — patchant à 28×28",
+                        (long)sbCnt, newBounds.size.width, newBounds.size.height];
+                }
+                // Si Twitch essaie de remettre à 24×24, on force 28×28
+                if (!(fabs(newBounds.size.width - S7TV_EMOTE_TARGET_SIZE) < 0.5 &&
+                      fabs(newBounds.size.height - S7TV_EMOTE_TARGET_SIZE) < 0.5)) {
+                    newBounds.size.width  = S7TV_EMOTE_TARGET_SIZE;
+                    newBounds.size.height = S7TV_EMOTE_TARGET_SIZE;
+                }
+            }
+            ((void (*)(id, SEL, CGRect))origSB)(self_, selSB, newBounds);
+            // Post-patch sublayers pour contrer tout reset
+            @try {
+                for (CALayer *sub in self_.sublayers) {
+                    if (!sub.contents) continue;
+                    CGRect b = sub.bounds;
+                    if (b.size.width < 10 || b.size.width > 35) continue;
+                    if (fabs(b.size.width - S7TV_EMOTE_TARGET_SIZE) < 0.5) continue;
+                    [CATransaction begin];
+                    [CATransaction setDisableActions:YES];
+                    CGFloat cx = self_.bounds.size.width > 0 ? CGRectGetMidX(sub.frame) : sub.position.x;
+                    CGFloat cy = self_.bounds.size.height > 0 ? CGRectGetMidY(sub.frame) : sub.position.y;
+                    sub.bounds = CGRectMake(0, 0, S7TV_EMOTE_TARGET_SIZE, S7TV_EMOTE_TARGET_SIZE);
+                    sub.position = CGPointMake(cx, cy);
+                    [CATransaction commit];
+                }
+            } @catch (...) {}
+        });
+        method_setImplementation(mSB, newSB);
+        [[SevenTVManager sharedManager] log:@"✅ MessageStringLayer.setBounds: hooké"];
+    }
 
     // ── Hook tous les setters candidats (setAttributedString:, setMessage:, etc.) ─
     for (NSString *name in allNames) {
