@@ -260,26 +260,6 @@ static const CGFloat kS7TVMenuHeight = 520.0;
 @end
 
 
-// Hauteur du picker — dynamique selon l'orientation
-// Portrait : 280pt (place suffisante, clavier caché)
-// Paysage  : 120pt (hauteur écran réduite, on économise l'espace)
-static CGFloat S7TVPickerHeight(void) {
-    CGSize screen = UIScreen.mainScreen.bounds.size;
-    BOOL landscape = screen.width > screen.height;
-    return landscape ? 120.0 : 280.0;
-}
-
-// Sous-classe UIView qui impose sa hauteur a UIKit via intrinsicContentSize.
-// Sans ca, quand la vue est utilisee comme inputView, UIKit ignore la frame
-// et calcule sa propre hauteur (souvent le double de ce qu'on veut).
-@interface S7TVPickerView : UIView
-@end
-@implementation S7TVPickerView
-- (CGSize)intrinsicContentSize {
-    return CGSizeMake(UIViewNoIntrinsicMetric, S7TVPickerHeight());
-}
-@end
-
 // ============================================================
 @implementation SevenTVManager
 
@@ -1275,10 +1255,6 @@ static CGFloat S7TVPickerHeight(void) {
 // ID de cellule pour la collection
 static NSString *const kEmoteCellID = @"S7TVEmoteCell";
 
-
-
-
-
 // Taille de chaque cellule par défaut (carré)
 static const CGFloat kCellSize = 40.0;
 
@@ -1535,7 +1511,7 @@ static const char kS7TVTaskKey = 0;
     // ── Créer le picker si besoin ─────────────────────────────────────
     // Recalcule la taille à chaque ouverture pour s'adapter à l'orientation courante.
     CGSize screenSz = UIScreen.mainScreen.bounds.size;
-    CGFloat pickerH = S7TVPickerHeight();
+    CGFloat pickerH = 280.0;
     CGRect pickerFrame = CGRectMake(0, 0, screenSz.width, pickerH);
     if (!self.emotePickerView) {
         [self _createEmotePickerViewWithFrame:pickerFrame];
@@ -1585,7 +1561,7 @@ static const char kS7TVTaskKey = 0;
                     if (w.isKeyWindow) { keyWindow = w; break; }
         if (!keyWindow) keyWindow = [UIApplication sharedApplication].windows.firstObject;
         if (keyWindow) {
-            CGFloat ph = S7TVPickerHeight();
+            CGFloat ph = 280.0;
             self.emotePickerView.frame = CGRectMake(0,
                 keyWindow.bounds.size.height - ph - 56,
                 keyWindow.bounds.size.width, ph);
@@ -1606,7 +1582,7 @@ static const char kS7TVTaskKey = 0;
     UIColor *searchBg    = [UIColor colorWithRed:0.122 green:0.122 blue:0.137 alpha:1.0]; // #1F1F23 — S7TVCellBg
 
     // ── Conteneur principal ────────────────────────────────────────────────
-    S7TVPickerView *picker = [[S7TVPickerView alloc] initWithFrame:frame];
+    UIView *picker = [[UIView alloc] initWithFrame:frame];
     picker.backgroundColor    = bgColor;
     picker.layer.shadowColor  = [UIColor blackColor].CGColor;
     picker.layer.shadowOffset = CGSizeMake(0, -3);
