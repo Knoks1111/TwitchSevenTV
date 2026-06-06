@@ -450,21 +450,12 @@ static void s7tv_handleRoomState(NSString *ircMessage) {
                     NSString *modified = [[SevenTVManager sharedManager]
                                           injectSevenTVEmotesIntoIRCMessage:textToProcess];
 
-                    if (modified && ![modified isEqualToString:textToProcess]) {
-                        completionHandler(
-                            [[NSURLSessionWebSocketMessage alloc] initWithString:modified],
-                            nil
-                        );
-                        return;
-                    }
-
-                    if (message.type == NSURLSessionWebSocketMessageTypeData) {
-                        completionHandler(
-                            [[NSURLSessionWebSocketMessage alloc] initWithString:textToProcess],
-                            nil
-                        );
-                        return;
-                    }
+                    NSString *finalText = (modified && modified.length > 0) ? modified : textToProcess;
+                    completionHandler(
+                        [[NSURLSessionWebSocketMessage alloc] initWithString:finalText],
+                        nil
+                    );
+                    return;
                 }
             }
             completionHandler(message, error);
