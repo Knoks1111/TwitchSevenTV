@@ -594,44 +594,47 @@ static void s7tv_handleRoomState(NSString *ircMessage) {
 // Optimisation : on remonte la hiérarchie max 4 niveaux (perf).
 
 @interface UIImageView (S7TVEmoteSize)
-- (void)s7tv_setFrame:(CGRect)frame;
+- (void)s7tv_didMoveToSuperview;
 @end
 
 @implementation UIImageView (S7TVEmoteSize)
 
-- (void)s7tv_setFrame:(CGRect)frame {
+- (void)s7tv_didMoveToSuperview {
+    [self s7tv_didMoveToSuperview]; // appel original
+
     // Filtre rapide : seulement si frame est exactement 18×18
-    if (fabs(frame.size.width  - S7TV_TWITCH_HARDCODED) < 0.5 &&
-        fabs(frame.size.height - S7TV_TWITCH_HARDCODED) < 0.5) {
+    CGRect f = self.frame;
+    if (!(fabs(f.size.width  - S7TV_TWITCH_HARDCODED) < 0.5 &&
+          fabs(f.size.height - S7TV_TWITCH_HARDCODED) < 0.5)) return;
 
-        // Remonter la hiérarchie (max 5 niveaux) pour détecter MessageStringView
-        UIView *ancestor = self.superview;
-        BOOL inMessageView = NO;
-        for (int i = 0; i < 5 && ancestor; i++) {
-            if ([NSStringFromClass([ancestor class]) isEqualToString:@"Twitch.MessageStringView"]) {
-                inMessageView = YES;
-                break;
-            }
-            ancestor = ancestor.superview;
+    // Remonter la hiérarchie (max 6 niveaux) pour détecter MessageStringView
+    UIView *ancestor = self.superview;
+    BOOL inMessageView = NO;
+    for (int i = 0; i < 6 && ancestor; i++) {
+        if ([NSStringFromClass([ancestor class]) isEqualToString:@"Twitch.MessageStringView"]) {
+            inMessageView = YES;
+            break;
         }
-
-        if (inMessageView) {
-            // Centrer le frame agrandi sur le même centre
-            CGFloat cx = frame.origin.x + frame.size.width  / 2.0;
-            CGFloat cy = frame.origin.y + frame.size.height / 2.0;
-            frame = CGRectMake(cx - S7TV_EMOTE_TARGET_SIZE / 2.0,
-                               cy - S7TV_EMOTE_TARGET_SIZE / 2.0,
-                               S7TV_EMOTE_TARGET_SIZE,
-                               S7TV_EMOTE_TARGET_SIZE);
-            static NSInteger s_eCount = 0;
-            s_eCount++;
-            if (s_eCount <= 10 || (s_eCount % 200) == 0) {
-                [[SevenTVManager sharedManager]
-                    log:@"\U0001f5bc UIImageView patch #%ld → 28×28", (long)s_eCount];
-            }
-        }
+        ancestor = ancestor.superview;
     }
-    [self s7tv_setFrame:frame];
+
+    if (!inMessageView) return;
+
+    // Frame centré agrandi à 28×28
+    CGFloat cx = f.origin.x + f.size.width  / 2.0;
+    CGFloat cy = f.origin.y + f.size.height / 2.0;
+    self.frame = CGRectMake(cx - S7TV_EMOTE_TARGET_SIZE / 2.0,
+                            cy - S7TV_EMOTE_TARGET_SIZE / 2.0,
+                            S7TV_EMOTE_TARGET_SIZE,
+                            S7TV_EMOTE_TARGET_SIZE);
+
+    static NSInteger s_eCount = 0;
+    s_eCount++;
+    if (s_eCount <= 10 || (s_eCount % 200) == 0) {
+        [[SevenTVManager sharedManager]
+            log:@"\U0001f5bc UIImageView patch #%ld → 28×28 (parent=%@)",
+            (long)s_eCount, NSStringFromClass([self.superview class])];
+    }
 }
 
 @end
@@ -639,8 +642,8 @@ static void s7tv_handleRoomState(NSString *ircMessage) {
 static void s7tv_swizzle_imageview_frame(void) {
     s7tv_swizzle([UIImageView class],
                  [UIImageView class],
-                 @selector(setFrame:),
-                 @selector(s7tv_setFrame:));
+                 @selector(didMoveToSuperview),
+                 @selector(s7tv_didMoveToSuperview));
 }
 
 static void s7tv_swizzle_layout_manager(void) {
