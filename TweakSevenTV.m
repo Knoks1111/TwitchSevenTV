@@ -939,30 +939,34 @@ static CGSize s7tv_imp_intrinsicContentSize(id self, SEL _cmd) {
 }
 
 // ────────────────────────────────────────────────────────────
-// MARK: - Hook Twitch.MessageStringLayer
+// MARK: - Hook Twitch.MessageStringLayer (CALayer custom)
 //
-// DIAGNOSTIC CONFIRMÉ (logs précédents) :
-//   MessageStringView.layer est une instance de Twitch.MessageStringLayer
-//   (CALayer custom, delegate=null → dessine elle-même)
-//   L'ivar `messageStringLayer` de MessageStringView pointe vers cette layer.
+// CONFIRMÉ par logs : MessageStringView.layer = Twitch.MessageStringLayer
+// Cette layer dessine elle-même (delegate=null).
+// Ivars connus : messageStringLayer, contentSize, delegate, layoutDelegate,
+//                preferredMaxLayoutWidth, networkImageRequester, notificationCenter
 //
 // STRATÉGIE :
-//   1. Dumper TOUTES les méthodes de MessageStringLayer
-//   2. Hooker `display` (point d'entrée du rendu CALayer)
-//   3. Hooker toute méthode contenant "set" + "attributed"/"string"/"message"
-//   4. Depuis le hook display : accéder au CTFrame ou NSAttributedString interne
-//      via KVO sur les clés candidates de la layer.
+//  1. Hooker directement par NSClassFromString dès l'attempt()
+//  2. Dumper toutes ses méthodes + ivars
+//  3. Hooker display / drawInContext: → point de rendu réel
+//  4. Hooker tout setter contenant "string"/"message"/"attributed"
 // ────────────────────────────────────────────────────────────
 
 static BOOL s_msgLayerHookDone = NO;
 
-static void s7tv_hook_message_string_layer(CALayer *layerInstance) {
+static void s7tv_hook_message_string_layer(void) {
     if (s_msgLayerHookDone) return;
 
-    Class layerCls = [layerInstance class];
-    NSString *layerClsName = NSStringFromClass(layerCls);
+    Class layerCls = NSClassFromString(@"Twitch.MessageStringLayer");
+    if (!layerCls) {
+        [[SevenTVManager sharedManager]
+            log:@"⚠️ Twitch.MessageStringLayer introuvable à cet instant"];
+        return;
+    }
+    s_msgLayerHookDone = YES;
 
-    // Dump de toutes les méthodes de MessageStringLayer
+    // ── Dump méthodes ────────────────────────────────────────────────────────
     unsigned int methodCount = 0;
     Method *methods = class_copyMethodList(layerCls, &methodCount);
     NSMutableArray *allNames = [NSMutableArray array];
@@ -973,7 +977,7 @@ static void s7tv_hook_message_string_layer(CALayer *layerInstance) {
     [allNames sortUsingSelector:@selector(compare:)];
 
     [[SevenTVManager sharedManager]
-        log:@"🏗 %@ — %u méthodes:", layerClsName, methodCount];
+        log:@"🏗 MessageStringLayer — %u méthodes:", methodCount];
     for (NSUInteger i = 0; i < allNames.count; i += 5) {
         NSRange r = NSMakeRange(i, MIN(5, allNames.count - i));
         [[SevenTVManager sharedManager]
@@ -981,137 +985,112 @@ static void s7tv_hook_message_string_layer(CALayer *layerInstance) {
             (unsigned long)(i + r.length - 1),
             [[allNames subarrayWithRange:r] componentsJoinedByString:@" | "]];
     }
-
-    // Superclass de MessageStringLayer
     [[SevenTVManager sharedManager]
-        log:@"🏗 %@ superclass: %@",
-        layerClsName, NSStringFromClass(class_getSuperclass(layerCls))];
+        log:@"🏗 MessageStringLayer superclass: %@",
+        NSStringFromClass(class_getSuperclass(layerCls))];
 
-    // Ivars de MessageStringLayer
+    // ── Dump ivars ───────────────────────────────────────────────────────────
     unsigned int ivarCount = 0;
     Ivar *ivars = class_copyIvarList(layerCls, &ivarCount);
-    if (ivarCount > 0) {
-        NSMutableString *ivarLog = [NSMutableString string];
-        for (unsigned int i = 0; i < ivarCount && i < 30; i++) {
-            [ivarLog appendFormat:@"%s(%s) ",
-                ivar_getName(ivars[i]),
-                ivar_getTypeEncoding(ivars[i])];
-        }
-        [[SevenTVManager sharedManager]
-            log:@"🏗 ivars[0-%u]: %@", MIN(ivarCount, 30) - 1, ivarLog];
-    } else {
-        [[SevenTVManager sharedManager] log:@"🏗 ivars: AUCUN"];
+    NSMutableString *ivarLog = [NSMutableString string];
+    for (unsigned int i = 0; i < ivarCount && i < 30; i++) {
+        [ivarLog appendFormat:@"%s(%s) ",
+            ivar_getName(ivars[i]), ivar_getTypeEncoding(ivars[i])];
     }
+    [[SevenTVManager sharedManager]
+        log:@"🏗 MessageStringLayer ivars[0-%u]: %@",
+        ivarCount > 0 ? MIN(ivarCount,30)-1 : 0, ivarLog];
     if (ivars) free(ivars);
 
-    // ── Hook display — point d'entrée du rendu de la layer ───────────────────
-    // display est appelé par Core Animation juste avant de rasteriser.
-    // C'est ICI que l'attributed string est rendu dans le CGContext.
+    // ── Hook display ─────────────────────────────────────────────────────────
     SEL selDisplay = @selector(display);
     Method mDisplay = class_getInstanceMethod(layerCls, selDisplay);
     if (mDisplay) {
         IMP origDisplay = method_getImplementation(mDisplay);
         IMP newDisplay = imp_implementationWithBlock(^(CALayer *self_) {
             static NSInteger cnt = 0; cnt++;
-
-            // Log premiers appels + éviter le flood
-            if (cnt <= 3 || (cnt % 200) == 0) {
+            if (cnt <= 5 || (cnt % 500) == 0) {
                 [[SevenTVManager sharedManager]
-                    log:@"🖼 MessageStringLayer.display #%ld bounds=(%.0f×%.0f)",
+                    log:@"🖼 MessageStringLayer.display #%ld (%.0f×%.0f)",
                     (long)cnt, self_.bounds.size.width, self_.bounds.size.height];
             }
-
-            // Scan des clés candidates UNE SEULE FOIS (cnt==1)
+            // KVO scan UNE FOIS
             if (cnt == 1) {
-                NSArray *keys = @[
-                    @"attributedString", @"attributedText", @"message",
-                    @"textString", @"string", @"text",
-                    @"frame", @"ctframe", @"framesetter",
-                    @"viewModel", @"model", @"content",
-                    @"emoteRanges", @"attachments"
-                ];
-                for (NSString *key in keys) {
+                for (NSString *key in @[@"attributedString",@"attributedText",
+                                        @"message",@"string",@"text",
+                                        @"ctframe",@"framesetter",
+                                        @"viewModel",@"model",@"content"]) {
                     @try {
                         id val = [self_ valueForKey:key];
                         if (val) {
-                            NSString *desc = [val description];
-                            if (desc.length > 100) desc = [desc substringToIndex:100];
+                            NSString *d = [val description];
+                            if (d.length > 120) d = [d substringToIndex:120];
                             [[SevenTVManager sharedManager]
                                 log:@"🔑 Layer KVO '%@': %@ = %@",
-                                key, NSStringFromClass([val class]), desc];
+                                key, NSStringFromClass([val class]), d];
                         }
                     } @catch (...) {}
                 }
             }
-
             ((void (*)(id, SEL))origDisplay)(self_, selDisplay);
         });
         method_setImplementation(mDisplay, newDisplay);
-        [[SevenTVManager sharedManager]
-            log:@"✅ %@.display hooké", layerClsName];
+        [[SevenTVManager sharedManager] log:@"✅ MessageStringLayer.display hooké"];
     } else {
-        [[SevenTVManager sharedManager]
-            log:@"⚠️ %@.display ABSENT — cherche drawInContext:", layerClsName];
-
-        // Fallback : hook drawInContext: (autre point d'entrée CALayer)
+        // Fallback drawInContext:
         SEL selDIC = @selector(drawInContext:);
         Method mDIC = class_getInstanceMethod(layerCls, selDIC);
         if (mDIC) {
             IMP origDIC = method_getImplementation(mDIC);
             IMP newDIC = imp_implementationWithBlock(^(CALayer *self_, CGContextRef ctx) {
-                static NSInteger cnt2 = 0; cnt2++;
-                if (cnt2 <= 3) {
+                static NSInteger cnt = 0; cnt++;
+                if (cnt <= 5) {
                     [[SevenTVManager sharedManager]
-                        log:@"🖌 MessageStringLayer.drawInContext: #%ld", (long)cnt2];
+                        log:@"🖌 MessageStringLayer.drawInContext: #%ld (%.0f×%.0f)",
+                        (long)cnt, self_.bounds.size.width, self_.bounds.size.height];
                 }
                 ((void (*)(id, SEL, CGContextRef))origDIC)(self_, selDIC, ctx);
             });
             method_setImplementation(mDIC, newDIC);
-            [[SevenTVManager sharedManager]
-                log:@"✅ %@.drawInContext: hooké", layerClsName];
+            [[SevenTVManager sharedManager] log:@"✅ MessageStringLayer.drawInContext: hooké"];
         } else {
             [[SevenTVManager sharedManager]
-                log:@"❌ %@: ni display ni drawInContext: trouvé", layerClsName];
+                log:@"❌ MessageStringLayer: ni display ni drawInContext: trouvé"];
         }
     }
 
-    // ── Hook toutes les méthodes "setter" candidates ─────────────────────────
-    // Chercher setAttributedString:, setMessage:, setViewModel:, etc.
+    // ── Hook tous les setters candidats (setAttributedString:, setMessage:, etc.) ─
     for (NSString *name in allNames) {
         NSString *lower = [name lowercaseString];
-        BOOL isCandidate = ([lower hasPrefix:@"set"] &&
-            ([lower containsString:@"attributed"] ||
-             [lower containsString:@"message"] ||
-             [lower containsString:@"string"] ||
-             [lower containsString:@"emote"] ||
-             [lower containsString:@"viewmodel"] ||
-             [lower containsString:@"content"]));
-        if (!isCandidate) continue;
+        if (![lower hasPrefix:@"set"]) continue;
+        if (!([lower containsString:@"attributed"] ||
+              [lower containsString:@"message"]    ||
+              [lower containsString:@"string"]     ||
+              [lower containsString:@"emote"]      ||
+              [lower containsString:@"viewmodel"]  ||
+              [lower containsString:@"content"]    ||
+              [lower containsString:@"frame"])) continue;
 
         SEL sel = NSSelectorFromString(name);
         Method m = class_getInstanceMethod(layerCls, sel);
         if (!m) continue;
-
         IMP origImp = method_getImplementation(m);
-        NSString *capturedName = [name copy];
+        NSString *captName = [name copy];
         IMP newImp = imp_implementationWithBlock(^(id self_, id arg) {
-            static NSInteger cnt3 = 0; cnt3++;
-            if (cnt3 <= 10) {
+            static NSInteger cnt = 0; cnt++;
+            if (cnt <= 15) {
                 NSString *desc = arg ? [arg description] : @"(nil)";
-                if (desc.length > 120) desc = [desc substringToIndex:120];
+                if (desc.length > 150) desc = [desc substringToIndex:150];
                 [[SevenTVManager sharedManager]
-                    log:@"📝 Layer.%@ #%ld argClass=%@ val=%@",
-                    capturedName, (long)cnt3,
-                    NSStringFromClass([arg class]), desc];
+                    log:@"📝 Layer.%@ #%ld class=%@ val=%@",
+                    captName, (long)cnt, NSStringFromClass([arg class]), desc];
             }
             ((void (*)(id, SEL, id))origImp)(self_, sel, arg);
         });
         method_setImplementation(m, newImp);
         [[SevenTVManager sharedManager]
-            log:@"✅ %@.%@ hooké", layerClsName, name];
+            log:@"✅ MessageStringLayer.%@ hooké", name];
     }
-
-    s_msgLayerHookDone = YES;
 }
 
 static void s7tv_swizzle_message_string_view(void) {
@@ -1123,7 +1102,7 @@ static void s7tv_swizzle_message_string_view(void) {
             return;
         }
 
-        // ── DUMP des méthodes de MessageStringView ───────────────────────────
+        // ── Dump méthodes MessageStringView ──────────────────────────────────
         unsigned int methodCount = 0;
         Method *methods = class_copyMethodList(cls, &methodCount);
         NSMutableArray *allNames = [NSMutableArray array];
@@ -1166,26 +1145,20 @@ static void s7tv_swizzle_message_string_view(void) {
         }
 
         // ── Hook layoutSubviews ───────────────────────────────────────────────
-        // CONFIRMÉ : appelé à chaque message de chat.
-        // On l'utilise pour accrocher MessageStringLayer au premier appel.
+        // Appelé à chaque message de chat (confirmé).
+        // On loggue la fréquence pour confirmer le flux, rien de plus.
         SEL selLS = @selector(layoutSubviews);
         Method mLS = class_getInstanceMethod(cls, selLS);
         if (mLS) {
             IMP origLS = method_getImplementation(mLS);
             IMP newLS = imp_implementationWithBlock(^(UIView *self_) {
                 ((void (*)(id, SEL))origLS)(self_, selLS);
-
-                // Accrocher MessageStringLayer dès la première instance réelle
-                // (avec une layer de taille non-nulle = message réel)
-                if (!s_msgLayerHookDone && self_.bounds.size.width > 10) {
-                    CALayer *layer = self_.layer;
-                    if (layer && ![NSStringFromClass([layer class])
-                                    isEqualToString:@"CALayer"]) {
-                        // C'est bien une layer custom (MessageStringLayer)
-                        dispatch_async(dispatch_get_main_queue(), ^{
-                            s7tv_hook_message_string_layer(layer);
-                        });
-                    }
+                static NSInteger cnt = 0; cnt++;
+                if (cnt <= 5 || (cnt % 100) == 0) {
+                    [[SevenTVManager sharedManager]
+                        log:@"🔁 MSV.layoutSubviews #%ld (%.0f×%.0f)",
+                        (long)cnt,
+                        self_.bounds.size.width, self_.bounds.size.height];
                 }
             });
             method_setImplementation(mLS, newLS);
@@ -1193,7 +1166,7 @@ static void s7tv_swizzle_message_string_view(void) {
                 log:@"✅ MessageStringView layoutSubviews hooké"];
         }
 
-        // ── Hook drawRect: (diagnostic uniquement) ───────────────────────────
+        // ── Hook drawRect: ───────────────────────────────────────────────────
         SEL selDR = @selector(drawRect:);
         Method mDR = class_getInstanceMethod(cls, selDR);
         if (mDR) {
@@ -1210,6 +1183,12 @@ static void s7tv_swizzle_message_string_view(void) {
             method_setImplementation(mDR, newDR);
             [[SevenTVManager sharedManager] log:@"✅ MessageStringView drawRect: hooké"];
         }
+
+        // ── Hook MessageStringLayer directement par son nom de classe ─────────
+        // On ne passe plus par layoutSubviews pour accrocher la layer :
+        // on la charge directement ici car elle est enregistrée dans le runtime
+        // au même moment que MessageStringView (même framework).
+        s7tv_hook_message_string_layer();
     };
 
     attempt();
