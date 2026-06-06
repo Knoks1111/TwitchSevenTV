@@ -478,7 +478,29 @@ static const CGFloat kS7TVMenuHeight = 520.0;
 // MARK: - Initialisation
 // ============================================================
 
+static void s7tv_uncaughtExceptionHandler(NSException *exception) {
+    NSString *docs = [NSSearchPathForDirectoriesInDomains(
+        NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
+    NSString *path = [docs stringByAppendingPathComponent:@"s7tv.log"];
+    NSString *crash = [NSString stringWithFormat:
+        @"\n========== CRASH ==========\n"
+        @"Name: %@\nReason: %@\nStack:\n%@\n===========================\n",
+        exception.name, exception.reason,
+        [exception.callStackSymbols componentsJoinedByString:@"\n"]];
+    NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
+    if (fh) {
+        [fh seekToEndOfFile];
+        [fh writeData:[crash dataUsingEncoding:NSUTF8StringEncoding]];
+        [fh closeFile];
+    } else {
+        [crash writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    }
+}
+
 - (void)setup {
+    // Installer le handler de crash non rattrapé → écrit dans s7tv.log
+    NSSetUncaughtExceptionHandler(&s7tv_uncaughtExceptionHandler);
+
     [self log:@"SevenTVManager: setup démarré"];
 
     // 1. Charger les emotes globales depuis le cache fichier (instantané)
@@ -2373,6 +2395,37 @@ referenceSizeForHeaderInSection:(NSInteger)section {
     if (self.debugLogging) {
         NSLog(@"[TwitchSevenTV] %@", msg);
     }
+
+    // ── Écriture fichier log (accessible depuis Fichiers.app → Twitch) ────────
+    // Écrit dans Documents/s7tv.log — lisible sans jailbreak via Fichiers.app.
+    // On utilise une queue série dédiée pour éviter les contentions I/O.
+    static dispatch_queue_t s_logFileQueue;
+    static dispatch_once_t s_logFileOnce;
+    dispatch_once(&s_logFileOnce, ^{
+        s_logFileQueue = dispatch_queue_create("app.s7tv.logfile", DISPATCH_QUEUE_SERIAL);
+    });
+    NSString *lineToWrite = [line stringByAppendingString:@"
+"];
+    dispatch_async(s_logFileQueue, ^{
+        NSString *docs = [NSSearchPathForDirectoriesInDomains(
+            NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
+        NSString *path = [docs stringByAppendingPathComponent:@"s7tv.log"];
+        // Rotation : si > 2 MB, vider le fichier pour éviter de remplir le storage
+        NSFileManager *fm = [NSFileManager defaultManager];
+        NSDictionary *attrs = [fm attributesOfItemAtPath:path error:nil];
+        if ([attrs[NSFileSize] unsignedLongLongValue] > 2 * 1024 * 1024) {
+            [@"" writeToFile:path atomically:NO encoding:NSUTF8StringEncoding error:nil];
+        }
+        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
+        if (!fh) {
+            [lineToWrite writeToFile:path atomically:NO encoding:NSUTF8StringEncoding error:nil];
+        } else {
+            [fh seekToEndOfFile];
+            [fh writeData:[lineToWrite dataUsingEncoding:NSUTF8StringEncoding]];
+            [fh closeFile];
+        }
+    });
+    // ─────────────────────────────────────────────────────────────────────────
 
     dispatch_async(dispatch_get_main_queue(), ^{
         [[NSNotificationCenter defaultCenter]
