@@ -123,12 +123,11 @@ static void S7TVLoadGlobalBadges(void) {
     [[S7TVBadgeSession() dataTaskWithURL:url
                       completionHandler:^(NSData *data, NSURLResponse *r, NSError *e) {
         if (!data || e) {
-            [[SevenTVManager sharedManager] log:@"⚠️ Badges global fetch error: %@",
+            // badges.twitch.tv inaccessible (DNS bloqué dans LiveContainer) — on log
+            // UNE SEULE FOIS et on ne retry pas (s_globalBadgesLoaded reste YES).
+            // Remettre NO créerait une boucle infinie : 950 prefetch → 950 retries.
+            [[SevenTVManager sharedManager] log:@"⚠️ Badges indisponibles (DNS bloqué): %@",
              e.localizedDescription];
-            // Réinitialiser le guard pour permettre un retry
-            os_unfair_lock_lock(&s_badgeLock);
-            s_globalBadgesLoaded = NO;
-            os_unfair_lock_unlock(&s_badgeLock);
             return;
         }
         NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data
@@ -237,10 +236,9 @@ static void S7TVFetchBadgeImage(NSString *badgeKey, void(^completion)(UIImage *)
     os_unfair_lock_unlock(&s_badgeLock);
 
     if (!imgURL) {
-        // URL inconnue → charger les badges globaux si pas encore fait, puis retry
-        if (!s_globalBadgesLoaded) {
-            S7TVLoadGlobalBadges();
-        }
+        // URL inconnue = badge non chargé (badges.twitch.tv probablement inaccessible).
+        // Ne pas appeler S7TVLoadGlobalBadges() ici — ça créerait une boucle :
+        // cellule → FetchBadgeImage → LoadGlobalBadges → échec réseau → cellule suivante → ...
         if (completion) completion(nil);
         return;
     }
@@ -412,6 +410,14 @@ static void S7TVFetchBadgeImage(NSString *badgeKey, void(^completion)(UIImage *)
     NSMutableAttributedString *attrStr = [[NSMutableAttributedString alloc] init];
 
     // ── 1. Badges ─────────────────────────────────────────────────────────────
+    // On ne tente les badges que si la map URL est peuplée (badges.twitch.tv accessible).
+    // Si la map est vide (DNS bloqué dans LiveContainer), on saute silencieusement.
+    BOOL badgesAvailable = NO;
+    os_unfair_lock_lock(&s_badgeLock);
+    badgesAvailable = (s_badgeURLMap.count > 0);
+    os_unfair_lock_unlock(&s_badgeLock);
+
+    if (badgesAvailable) {
     BOOL needsBadgeFetch = NO;
     for (NSDictionary *badge in message.badges) {
         NSString *badgeName    = badge[@"name"];
@@ -457,6 +463,7 @@ static void S7TVFetchBadgeImage(NSString *badgeKey, void(^completion)(UIImage *)
             });
         }
     }
+    } // fin if (badgesAvailable)
 
     // ── 2. Pseudo en couleur ──────────────────────────────────────────────────
     NSString *nameStr = [NSString stringWithFormat:@"%@: ", message.username];
