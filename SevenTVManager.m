@@ -117,11 +117,6 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
 // Protégé par @synchronized(self).
 @property (nonatomic, strong) NSMutableSet<NSString *> *activePrefetchKeys;
 
-// Cache image RAM : emoteID → UIImage (statique décompressée)
-// Alimenté en arrière-plan au JOIN → cellForItemAtIndexPath = affichage synchrone immédiat.
-// NSCache gère automatiquement la pression mémoire (évictions silencieuses).
-// Thread-safe : NSCache est thread-safe nativement.
-@property (nonatomic, strong) NSCache<NSString *, UIImage *> *imageRAMCache;
 
 @end
 
@@ -302,9 +297,7 @@ static const CGFloat kS7TVMenuHeight = 520.0;
 
         // Cache image RAM : 40 MB max — environ 1000 emotes statiques 40×40pt décompressées.
         // NSCache évicte automatiquement sous pression mémoire → jamais de crash OOM.
-        _imageRAMCache = [[NSCache alloc] init];
-        _imageRAMCache.name         = @"tv.s7tv.image-ram-cache";
-        _imageRAMCache.totalCostLimit = 40 * 1024 * 1024; // 40 MB
+
 
         _logBuffer = [NSMutableArray arrayWithCapacity:256];
         _logLock   = [[NSLock alloc] init];
@@ -808,13 +801,6 @@ static const CGFloat kS7TVMenuHeight = 520.0;
          (unsigned long)(total - skipped),
          (unsigned long)skipped];
 
-        // ── Chauffer le cache image RAM après le prefetch réseau ─────────────
-        // Toutes les images sont maintenant dans NSURLCache (disque/mémoire).
-        // On les décode en arrière-plan (QOS_CLASS_UTILITY = basse prio, pas de lag)
-        // et on les met dans imageRAMCache → cellForItemAtIndexPath = affichage synchrone
-        // immédiat, sans aucun dispatch_async ni flash "cellule vide".
-        [self _warmImageRAMCacheForEmotes:allEmotes label:label];
-
         // Libérer la clé → permettre un re-prefetch si le set change
         @synchronized(self) {
             [self.activePrefetchKeys removeObject:setKey];
@@ -822,70 +808,7 @@ static const CGFloat kS7TVMenuHeight = 520.0;
     });
 }
 
-// ── Décodage en RAM de toutes les emotes statiques d'un set ──────────────────
-//
-// Appelé après la fin du prefetch réseau → NSURLCache est plein.
-// On parcourt chaque emote, on lit les données depuis NSURLCache (sync, en mémoire)
-// et on décode CGImageSourceCreateImageAtIndex (frame 0) → UIImage.
-// Le résultat est stocké dans imageRAMCache (NSCache, thread-safe).
-//
-// QOS_CLASS_UTILITY : basse priorité → ne compete pas avec le réseau ou l'UI.
-// La queue SÉRIE animationDecodeQueue n'est pas utilisée ici (on veut du concurrent
-// pour aller vite, et on ne décode que la frame 0 donc pas de spike RAM).
-//
-- (void)_warmImageRAMCacheForEmotes:(NSArray<SevenTVEmote *> *)emotes
-                              label:(NSString *)label {
-    if (!emotes.count) return;
 
-    NSURLCache *urlCache = [SevenTVURLProtocol sharedEmoteCache];
-    NSCache<NSString *, UIImage *> *ramCache = self.imageRAMCache;
-
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        NSUInteger warmed = 0;
-        NSUInteger alreadyWarm = 0;
-
-        for (SevenTVEmote *emote in emotes) {
-            NSString *eid = emote.emoteID;
-            if (!eid.length) continue;
-
-            // Déjà dans le cache RAM → skip
-            if ([ramCache objectForKey:eid]) { alreadyWarm++; continue; }
-
-            // Lire depuis NSURLCache (synchrone — les données sont en mémoire après prefetch)
-            NSURL *url = [NSURL URLWithString:
-                [NSString stringWithFormat:@"https://cdn.7tv.app/emote/%@/4x.webp", eid]];
-            NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
-            req.cachePolicy = NSURLRequestReturnCacheDataDontLoad;
-            NSCachedURLResponse *cached = [urlCache cachedResponseForRequest:req];
-            if (!cached.data) continue;
-
-            // Décoder frame 0 uniquement (statique)
-            @autoreleasepool {
-                CGImageSourceRef src = CGImageSourceCreateWithData(
-                    (__bridge CFDataRef)cached.data, NULL);
-                if (!src) continue;
-
-                CGImageRef cgImg = CGImageSourceCreateImageAtIndex(src, 0, NULL);
-                CFRelease(src);
-                if (!cgImg) continue;
-
-                UIImage *img = [UIImage imageWithCGImage:cgImg];
-                CGImageRelease(cgImg);
-
-                if (img) {
-                    // Coût approximatif : largeur × hauteur × 4 octets (RGBA)
-                    NSUInteger cost = (NSUInteger)(img.size.width * img.scale
-                                                * img.size.height * img.scale * 4);
-                    [ramCache setObject:img forKey:eid cost:cost];
-                    warmed++;
-                }
-            }
-        }
-
-        [self log:@"🖼️ RAM cache %@ — %lu décodées, %lu déjà chaudes",
-         label, (unsigned long)warmed, (unsigned long)alreadyWarm];
-    });
-}
 
 
 // ============================================================
@@ -1106,10 +1029,6 @@ static const CGFloat kS7TVMenuHeight = 520.0;
                 @synchronized(self.fetchingChannelIDs) {
                     if (oldID) [self.fetchingChannelIDs removeObject:oldID];
                 }
-                // Vider le cache RAM des emotes de l'ancien channel
-                // (les emotes globales restent valides — NSCache les gardera si possible)
-                [self.imageRAMCache removeAllObjects];
-
                 self.currentChannelTwitchID = broadcasterID;
                 [self loadEmotesForChannelTwitchID:broadcasterID];
                 break;
@@ -2159,47 +2078,9 @@ referenceSizeForHeaderInSection:(NSInteger)section {
     BOOL isFavoriteCell = (indexPath.section == 0);
     BOOL wantsAnimated = emote.isAnimated && self.showPickerAnimations && isFavoriteCell;
 
-    // ── Étape 0 : cache image RAM — affichage instantané, zéro disque/réseau ──
-    // Alimenté par _warmImageRAMCacheForEmotes: après chaque prefetch au JOIN.
-    // Les emotes statiques (99% des cas) sont disponibles ici dès l'ouverture
-    // du picker si le JOIN a eu le temps de se terminer (~2-5s selon réseau).
-    if (!wantsAnimated) {
-        UIImage *ramImg = [self.imageRAMCache objectForKey:emote.emoteID];
-        if (ramImg) {
-            iv.image = ramImg;
-            return cell; // ← affichage immédiat, fin de la méthode
-        }
-    }
-
-    // ── Étape 1 : check NSURLCache synchrone — zéro réseau si image déjà là ──
-    // SevenTVURLProtocol.sharedEmoteCache est le MÊME cache que celui utilisé
-    // par le chat (URLProtocol + prefetch au JOIN). Une emote déjà vue dans le
-    // chat → disponible immédiatement dans le picker, et vice versa.
-    NSCachedURLResponse *cached = [[SevenTVURLProtocol sharedEmoteCache] cachedResponseForRequest:req];
-    if (cached.data) {
-        if (wantsAnimated) {
-            // Animé → décodage asynchrone (queue série, ~5-10ms par frame)
-            NSData *imgData = cached.data;
-            dispatch_async([self _animationDecodeQueue], ^{
-                UIImage *img = [self _decodePickerImageData:imgData wantsAnimated:YES];
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    NSIndexPath *nowPath = [cv indexPathForCell:cell];
-                    if (nowPath && nowPath.section == indexPath.section
-                                && nowPath.item   == indexPath.item) {
-                        iv.image = img;
-                    }
-                });
-            });
-        } else {
-            // Statique → décodage SYNCHRONE (frame 0 uniquement, <1ms)
-            // Évite le flash "cellule vide puis image" visible quand tout vient du cache.
-            UIImage *img = [self _decodePickerImageData:cached.data wantsAnimated:NO];
-            iv.image = img; // immédiat, même call stack que cellForItem
-        }
-        return cell;
-    }
-
-    // ── Étape 2 : image absente du cache → fetch réseau (session partagée) ─
+    // ── Check NSURLCache + fetch réseau ──────────────────────────────────────
+    // sharedEmoteCache = même cache que le chat (prefetch au JOIN).
+    // Une emote déjà vue dans le chat est dispo immédiatement ici.
     NSURLSessionDataTask *task = [[self _pickerImageSession]
         dataTaskWithURL:emoteURL
       completionHandler:^(NSData *data, NSURLResponse *r, NSError *e) {
@@ -2209,12 +2090,6 @@ referenceSizeForHeaderInSection:(NSInteger)section {
             : dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0);
         dispatch_async(decodeQ, ^{
             UIImage *img = [self _decodePickerImageData:data wantsAnimated:wantsAnimated];
-            // Stocker dans le cache RAM pour les prochaines ouvertures du picker
-            if (img && !wantsAnimated) {
-                NSUInteger cost = (NSUInteger)(img.size.width * img.scale
-                                            * img.size.height * img.scale * 4);
-                [self.imageRAMCache setObject:img forKey:emote.emoteID cost:cost];
-            }
             dispatch_async(dispatch_get_main_queue(), ^{
                 NSIndexPath *nowPath = [cv indexPathForCell:cell];
                 if (nowPath && nowPath.section == indexPath.section
