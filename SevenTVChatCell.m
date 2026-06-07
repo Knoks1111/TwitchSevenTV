@@ -7,7 +7,7 @@
  *      NSURLRequestUseProtocolCachePolicy → plus de miss quand l'image est en cache.
  *   3. Badges hardcodés : badges.twitch.tv est DNS-bloqué dans LiveContainer.
  *      On embarque directement les URLs CDN Twitch des badges globaux les plus
- *      communs. Ces URLs sont stables depuis 2019 (format v1/badges/*).
+ *      communs. Ces URLs sont stables depuis 2019 (format v1/badges/...).
  *      Pour les badges channel-specific (sub tiers) : on tente toujours l'API
  *      mais on affiche les badges globaux en fallback immédiatement.
  */
@@ -20,7 +20,7 @@
 NSString * const kSevenTVChatCellReuseID = @"SevenTVChatCell";
 
 static const CGFloat kEmoteTargetHeight = 28.0;  // était 22 → plus grand
-static const CGFloat kBadgeTargetSize   = 20.0;  // était 18 → plus grand
+static const CGFloat kBadgeTargetSize   = 18.0;
 
 
 // ────────────────────────────────────────────────────────────
