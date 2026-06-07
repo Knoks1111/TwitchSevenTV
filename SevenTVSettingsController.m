@@ -462,7 +462,7 @@ typedef NS_ENUM(NSInteger, S7TVHomeRow) {
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tv { return 2; }
 
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s {
-    return s == 0 ? 1 : 3;
+    return s == 0 ? 1 : 2; // section 1 : animées + picker (favoris déplacés vers Statistiques)
 }
 
 - (CGFloat)tableView:(UITableView *)tv heightForHeaderInSection:(NSInteger)s {
@@ -503,45 +503,6 @@ typedef NS_ENUM(NSInteger, S7TVHomeRow) {
                     [UIColor colorWithWhite:0.75 alpha:1.0],
                     mgr.showPickerAnimations,
                     self, @selector(togglePickerAnimations:));
-        case 2: {
-            // Cellule info : nombre d'emotes en favoris
-            UITableViewCell *cell = [[UITableViewCell alloc]
-                initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
-            cell.selectionStyle  = UITableViewCellSelectionStyleNone;
-            cell.backgroundColor = S7TVCellBg();
-
-            UIImageView *icon = S7TVIcon(@"star.fill",
-                [UIColor colorWithRed:0.60 green:0.35 blue:1.0 alpha:1.0]);
-            [cell.contentView addSubview:icon];
-
-            UILabel *lbl = [[UILabel alloc] init];
-            lbl.text = @"Emotes en favoris";
-            lbl.font = [UIFont systemFontOfSize:17 weight:UIFontWeightRegular];
-            lbl.textColor = [UIColor whiteColor];
-            lbl.numberOfLines = 1;
-            lbl.translatesAutoresizingMaskIntoConstraints = NO;
-            [cell.contentView addSubview:lbl];
-
-            NSUserDefaults *prefs = [NSUserDefaults standardUserDefaults];
-            NSArray *favs = [prefs arrayForKey:@"s7tv_favorites"];
-            UILabel *countLbl = [[UILabel alloc] init];
-            countLbl.text = [NSString stringWithFormat:@"%lu", (unsigned long)(favs.count)];
-            countLbl.font = [UIFont monospacedDigitSystemFontOfSize:17 weight:UIFontWeightRegular];
-            countLbl.textColor = [UIColor colorWithRed:0.60 green:0.35 blue:1.0 alpha:1.0];
-            countLbl.translatesAutoresizingMaskIntoConstraints = NO;
-            [cell.contentView addSubview:countLbl];
-
-            [NSLayoutConstraint activateConstraints:@[
-                [icon.leadingAnchor    constraintEqualToAnchor:cell.contentView.leadingAnchor constant:16],
-                [icon.centerYAnchor    constraintEqualToAnchor:cell.contentView.centerYAnchor],
-                [lbl.leadingAnchor     constraintEqualToAnchor:icon.trailingAnchor constant:14],
-                [lbl.topAnchor         constraintEqualToAnchor:cell.contentView.topAnchor constant:13],
-                [lbl.bottomAnchor      constraintEqualToAnchor:cell.contentView.bottomAnchor constant:-13],
-                [countLbl.trailingAnchor constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-16],
-                [countLbl.centerYAnchor  constraintEqualToAnchor:cell.contentView.centerYAnchor],
-            ]];
-            return cell;
-        }
         default: return [[UITableViewCell alloc] init];
     }
 }
@@ -561,7 +522,7 @@ typedef NS_ENUM(NSInteger, S7TVHomeRow) {
 // MARK: - SevenTVStatsPageController
 // ─────────────────────────────────────────────────────────────────────────────
 
-@interface SevenTVStatsPageController ()
+@interface SevenTVStatsPageController () <UIDocumentPickerDelegate>
 @property (nonatomic, strong) NSTimer *refreshTimer;
 @end
 
@@ -592,10 +553,15 @@ typedef NS_ENUM(NSInteger, S7TVHomeRow) {
 
 - (void)refresh { [self.tableView reloadData]; }
 
-- (NSInteger)numberOfSectionsInTableView:(UITableView *)tv { return 2; }
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tv { return 3; }
 
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s {
-    return s == 0 ? 1 : 3;
+    switch (s) {
+        case 0: return 1;  // Channel actif
+        case 1: return 3;  // Emotes chargées
+        case 2: return 2;  // Favoris (count + import)
+        default: return 0;
+    }
 }
 
 - (CGFloat)tableView:(UITableView *)tv heightForRowAtIndexPath:(NSIndexPath *)ip {
@@ -607,7 +573,12 @@ typedef NS_ENUM(NSInteger, S7TVHomeRow) {
 }
 
 - (UIView *)tableView:(UITableView *)tv viewForHeaderInSection:(NSInteger)s {
-    return S7TVSectionHeader(s == 0 ? @"Channel actif" : @"Emotes chargées", NO);
+    switch (s) {
+        case 0: return S7TVSectionHeader(@"Channel actif",    NO);
+        case 1: return S7TVSectionHeader(@"Emotes chargées",  NO);
+        case 2: return S7TVSectionHeader(@"Favoris",          NO);
+        default: return [[UIView alloc] init];
+    }
 }
 
 - (CGFloat)tableView:(UITableView *)tv heightForFooterInSection:(NSInteger)s {
@@ -670,6 +641,88 @@ typedef NS_ENUM(NSInteger, S7TVHomeRow) {
         return cell;
     }
 
+    // ── Section 2 : Favoris ─────────────────────────────────────────────────
+    if (ip.section == 2) {
+        NSUserDefaults *prefs = [NSUserDefaults standardUserDefaults];
+        NSArray *favs = [prefs arrayForKey:@"s7tv_favorites"] ?: @[];
+
+        if (ip.row == 0) {
+            // Cellule info : nombre d'emotes en favoris
+            cell.selectionStyle = UITableViewCellSelectionStyleNone;
+
+            UIImageView *icon = S7TVIcon(@"star.fill",
+                [UIColor colorWithRed:0.60 green:0.35 blue:1.0 alpha:1.0]);
+            [cell.contentView addSubview:icon];
+
+            UILabel *lbl = [[UILabel alloc] init];
+            lbl.text = @"Emotes en favoris";
+            lbl.font = [UIFont systemFontOfSize:15 weight:UIFontWeightRegular];
+            lbl.textColor = [UIColor whiteColor];
+            lbl.numberOfLines = 1;
+            lbl.translatesAutoresizingMaskIntoConstraints = NO;
+            [cell.contentView addSubview:lbl];
+
+            UILabel *countLbl = [[UILabel alloc] init];
+            countLbl.text = [NSString stringWithFormat:@"%lu", (unsigned long)favs.count];
+            countLbl.font = [UIFont monospacedDigitSystemFontOfSize:15 weight:UIFontWeightRegular];
+            countLbl.textColor = [UIColor colorWithRed:0.60 green:0.35 blue:1.0 alpha:1.0];
+            countLbl.translatesAutoresizingMaskIntoConstraints = NO;
+            [cell.contentView addSubview:countLbl];
+
+            [NSLayoutConstraint activateConstraints:@[
+                [icon.leadingAnchor     constraintEqualToAnchor:cell.contentView.leadingAnchor constant:16],
+                [icon.centerYAnchor     constraintEqualToAnchor:cell.contentView.centerYAnchor],
+                [lbl.leadingAnchor      constraintEqualToAnchor:icon.trailingAnchor constant:14],
+                [lbl.topAnchor          constraintEqualToAnchor:cell.contentView.topAnchor constant:10],
+                [lbl.bottomAnchor       constraintEqualToAnchor:cell.contentView.bottomAnchor constant:-10],
+                [countLbl.trailingAnchor constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-16],
+                [countLbl.centerYAnchor  constraintEqualToAnchor:cell.contentView.centerYAnchor],
+            ]];
+            return cell;
+        }
+
+        // Row 1 : Importer depuis fichier PC
+        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        cell.selectedBackgroundView = [[UIView alloc] init];
+        cell.selectedBackgroundView.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.06];
+
+        UIImageView *importIcon = S7TVIcon(@"square.and.arrow.down",
+            [UIColor colorWithRed:0.60 green:0.35 blue:1.0 alpha:1.0]);
+        [cell.contentView addSubview:importIcon];
+
+        UILabel *importLbl = [[UILabel alloc] init];
+        importLbl.text = @"Importer depuis PC";
+        importLbl.font = [UIFont systemFontOfSize:15 weight:UIFontWeightRegular];
+        importLbl.textColor = [UIColor whiteColor];
+        importLbl.translatesAutoresizingMaskIntoConstraints = NO;
+
+        UILabel *importSub = [[UILabel alloc] init];
+        importSub.text = @"Export JSON 7TV (Settings → … → Export)";
+        importSub.font = [UIFont systemFontOfSize:11 weight:UIFontWeightRegular];
+        importSub.textColor = S7TVGray();
+        importSub.translatesAutoresizingMaskIntoConstraints = NO;
+
+        UIStackView *importStack = [[UIStackView alloc]
+            initWithArrangedSubviews:@[importLbl, importSub]];
+        importStack.axis      = UILayoutConstraintAxisVertical;
+        importStack.spacing   = 2;
+        importStack.alignment = UIStackViewAlignmentLeading;
+        importStack.translatesAutoresizingMaskIntoConstraints = NO;
+        [cell.contentView addSubview:importStack];
+
+        [NSLayoutConstraint activateConstraints:@[
+            [importIcon.leadingAnchor   constraintEqualToAnchor:cell.contentView.leadingAnchor constant:16],
+            [importIcon.centerYAnchor   constraintEqualToAnchor:cell.contentView.centerYAnchor],
+            [importStack.leadingAnchor  constraintEqualToAnchor:importIcon.trailingAnchor constant:14],
+            [importStack.centerYAnchor  constraintEqualToAnchor:cell.contentView.centerYAnchor],
+            [importStack.trailingAnchor constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-8],
+            [importStack.topAnchor      constraintGreaterThanOrEqualToAnchor:cell.contentView.topAnchor constant:8],
+            [importStack.bottomAnchor   constraintLessThanOrEqualToAnchor:cell.contentView.bottomAnchor constant:-8],
+        ]];
+        return cell;
+    }
+
+    // ── Section 1 : Emotes chargées ─────────────────────────────────────────
     NSString *sfName, *label;
     NSUInteger count = 0;
     UIColor *valColor = [UIColor whiteColor];
@@ -717,6 +770,116 @@ typedef NS_ENUM(NSInteger, S7TVHomeRow) {
 
 - (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
     [tv deselectRowAtIndexPath:ip animated:YES];
+    if (ip.section == 2 && ip.row == 1) {
+        [self importFavoritesFromFile];
+    }
+}
+
+// ── Import favoris depuis fichier JSON 7TV PC ────────────────────────────────
+
+- (void)importFavoritesFromFile {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc]
+        initWithDocumentTypes:@[@"public.json", @"public.text", @"public.data"]
+                       inMode:UIDocumentPickerModeImport];
+#pragma clang diagnostic pop
+    picker.delegate = self;
+    picker.allowsMultipleSelection = NO;
+    picker.modalPresentationStyle  = UIModalPresentationFormSheet;
+    [self presentViewController:picker animated:YES completion:nil];
+}
+
+- (void)documentPicker:(UIDocumentPickerViewController *)controller
+didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
+    NSURL *url = urls.firstObject;
+    if (!url) return;
+
+    NSError *err = nil;
+    NSData *data = [NSData dataWithContentsOfURL:url options:0 error:&err];
+    if (!data) {
+        [self s7tv_showAlert:@"Erreur"
+                     message:@"Impossible de lire le fichier."];
+        return;
+    }
+
+    id json = [NSJSONSerialization JSONObjectWithData:data options:0 error:&err];
+    if (!json) {
+        [self s7tv_showAlert:@"Format invalide"
+                     message:@"Le fichier n'est pas un JSON valide."];
+        return;
+    }
+
+    // L'export 7TV PC peut avoir deux structures :
+    //   - Tableau directement : [ "7TV:xxx", ... ]
+    //   - Dict racine avec "ui.emote_menu.favorites" (format v0 hypothétique)
+    //   - Dict racine avec "settings" → "ui.emote_menu.favorites" (format réel v1)
+    NSArray *rawFavs = nil;
+    if ([json isKindOfClass:[NSArray class]]) {
+        rawFavs = (NSArray *)json;
+    } else if ([json isKindOfClass:[NSDictionary class]]) {
+        NSDictionary *dict = (NSDictionary *)json;
+        // Format réel : { "settings": { "ui.emote_menu.favorites": [...] } }
+        NSDictionary *settings = dict[@"settings"];
+        if ([settings isKindOfClass:[NSDictionary class]]) {
+            rawFavs = settings[@"ui.emote_menu.favorites"];
+        }
+        // Fallback : clé à la racine (format alternatif)
+        if (!rawFavs) {
+            rawFavs = dict[@"ui.emote_menu.favorites"];
+        }
+    }
+
+    if (!rawFavs) {
+        [self s7tv_showAlert:@"Format inconnu"
+                     message:@"Clé « ui.emote_menu.favorites » introuvable.\nVérifie que c'est bien un export 7TV PC."];
+        return;
+    }
+
+    // Filtrer les entrées "7TV:<id>" — ignorer "PLATFORM:..."
+    NSMutableArray<NSString *> *newIDs = [NSMutableArray array];
+    for (id entry in rawFavs) {
+        if (![entry isKindOfClass:[NSString class]]) continue;
+        NSString *s = (NSString *)entry;
+        if ([s hasPrefix:@"7TV:"]) {
+            [newIDs addObject:[s substringFromIndex:4]];
+        }
+    }
+
+    if (newIDs.count == 0) {
+        [self s7tv_showAlert:@"Aucun favori 7TV"
+                     message:@"Ce fichier ne contient pas d'emotes 7TV en favoris."];
+        return;
+    }
+
+    NSUserDefaults *prefs = [NSUserDefaults standardUserDefaults];
+    NSArray<NSString *> *existing = [prefs arrayForKey:@"s7tv_favorites"] ?: @[];
+    NSMutableOrderedSet<NSString *> *merged =
+        [NSMutableOrderedSet orderedSetWithArray:existing];
+    [merged addObjectsFromArray:newIDs];
+    [prefs setObject:merged.array forKey:@"s7tv_favorites"];
+    [prefs synchronize];
+
+    NSUInteger added = merged.count - existing.count;
+    [self.tableView reloadData];
+    [self s7tv_showAlert:[NSString stringWithFormat:@"%lu emote(s) importée(s)", (unsigned long)newIDs.count]
+                 message:[NSString stringWithFormat:
+                          @"%lu nouvelle(s) ajoutée(s), %lu déjà en favoris.",
+                          (unsigned long)added,
+                          (unsigned long)(newIDs.count - added)]];
+    [[SevenTVManager sharedManager] log:@"📥 Import favoris 7TV : %lu total, %lu ajoutés",
+     (unsigned long)merged.count, (unsigned long)added];
+}
+
+- (void)documentPickerWasCancelled:(UIDocumentPickerViewController *)controller { }
+
+- (void)s7tv_showAlert:(NSString *)title message:(NSString *)msg {
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:title
+                                                               message:msg
+                                                        preferredStyle:UIAlertControllerStyleAlert];
+    [a addAction:[UIAlertAction actionWithTitle:@"OK"
+                                          style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:a animated:YES completion:nil];
 }
 
 @end

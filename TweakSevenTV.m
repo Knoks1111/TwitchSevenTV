@@ -777,9 +777,21 @@ static void s7tv_swizzle_account_menu(void) {
         ^(SEL origSel, SEL newSel, IMP newIMP, const char *types) {
             Method origMethod = class_getInstanceMethod(target, origSel);
             if (!origMethod) return;
+            // CRITICAL FIX: if the method is only *inherited* (not defined directly on
+            // target), class_getInstanceMethod returns the superclass's Method object.
+            // Calling method_exchangeImplementations on it would modify the superclass,
+            // affecting ALL subclasses including SearchTopResultsViewController → crash.
+            // Solution: add the original IMP directly on target first so the exchange
+            // only touches target's own method table.
+            class_addMethod(target, origSel,
+                            method_getImplementation(origMethod),
+                            method_getTypeEncoding(origMethod));
+            // Add our replacement under the s7tv_ selector
             class_addMethod(target, newSel, newIMP, types);
-            Method newMethod = class_getInstanceMethod(target, newSel);
-            if (newMethod) method_exchangeImplementations(origMethod, newMethod);
+            // Re-fetch: origMethod now points to target's own copy (not superclass)
+            Method orig = class_getInstanceMethod(target, origSel);
+            Method repl = class_getInstanceMethod(target, newSel);
+            if (orig && repl) method_exchangeImplementations(orig, repl);
         };
 
     swizzleWithIMP(@selector(numberOfSectionsInTableView:),
