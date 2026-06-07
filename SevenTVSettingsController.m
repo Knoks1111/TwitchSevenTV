@@ -14,7 +14,11 @@
 #import "SevenTVSettingsController.h"
 #import "SevenTVManager.h"
 #import "SevenTVLogsController.h"
+#import "SevenTVURLProtocol.h"
 #import "SevenTVLogo.h"
+
+@interface SevenTVFavoritesListController : UITableViewController
+@end
 
 // ─────────────────────────────────────────────────────────────────────────────
 // MARK: - Palette couleurs
@@ -647,8 +651,11 @@ typedef NS_ENUM(NSInteger, S7TVHomeRow) {
         NSArray *favs = [prefs arrayForKey:@"s7tv_favorites"] ?: @[];
 
         if (ip.row == 0) {
-            // Cellule info : nombre d'emotes en favoris
-            cell.selectionStyle = UITableViewCellSelectionStyleNone;
+            // Cellule tappable : ouvre la liste des favoris
+            cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+            cell.accessoryType  = UITableViewCellAccessoryDisclosureIndicator;
+            cell.selectedBackgroundView = [[UIView alloc] init];
+            cell.selectedBackgroundView.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.06];
 
             UIImageView *icon = S7TVIcon(@"star.fill",
                 [UIColor colorWithRed:0.60 green:0.35 blue:1.0 alpha:1.0]);
@@ -675,7 +682,7 @@ typedef NS_ENUM(NSInteger, S7TVHomeRow) {
                 [lbl.leadingAnchor      constraintEqualToAnchor:icon.trailingAnchor constant:14],
                 [lbl.topAnchor          constraintEqualToAnchor:cell.contentView.topAnchor constant:10],
                 [lbl.bottomAnchor       constraintEqualToAnchor:cell.contentView.bottomAnchor constant:-10],
-                [countLbl.trailingAnchor constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-16],
+                [countLbl.trailingAnchor constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-8],
                 [countLbl.centerYAnchor  constraintEqualToAnchor:cell.contentView.centerYAnchor],
             ]];
             return cell;
@@ -770,6 +777,12 @@ typedef NS_ENUM(NSInteger, S7TVHomeRow) {
 
 - (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
     [tv deselectRowAtIndexPath:ip animated:YES];
+    if (ip.section == 2 && ip.row == 0) {
+        // Ouvre la liste des favoris
+        SevenTVFavoritesListController *favsVC = [[SevenTVFavoritesListController alloc] init];
+        [self.navigationController pushViewController:favsVC animated:YES];
+        return;
+    }
     if (ip.section == 2 && ip.row == 1) {
         [self importFavoritesFromFile];
     }
@@ -856,17 +869,19 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     NSArray<NSString *> *existing = [prefs arrayForKey:@"s7tv_favorites"] ?: @[];
     NSMutableOrderedSet<NSString *> *merged =
         [NSMutableOrderedSet orderedSetWithArray:existing];
+    NSUInteger beforeCount = merged.count;
     [merged addObjectsFromArray:newIDs];
     [prefs setObject:merged.array forKey:@"s7tv_favorites"];
     [prefs synchronize];
 
-    NSUInteger added = merged.count - existing.count;
+    NSUInteger added = merged.count - beforeCount;
+    NSUInteger skipped = newIDs.count - added;
     [self.tableView reloadData];
-    [self s7tv_showAlert:[NSString stringWithFormat:@"%lu emote(s) importée(s)", (unsigned long)newIDs.count]
+    [self s7tv_showAlert:[NSString stringWithFormat:@"%lu emote(s) ajoutée(s)", (unsigned long)added]
                  message:[NSString stringWithFormat:
-                          @"%lu nouvelle(s) ajoutée(s), %lu déjà en favoris.",
+                          @"%lu nouvelle(s) importée(s), %lu déjà en favoris.",
                           (unsigned long)added,
-                          (unsigned long)(newIDs.count - added)]];
+                          (unsigned long)skipped]];
     [[SevenTVManager sharedManager] log:@"📥 Import favoris 7TV : %lu total, %lu ajoutés",
      (unsigned long)merged.count, (unsigned long)added];
 }
@@ -880,6 +895,246 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     [a addAction:[UIAlertAction actionWithTitle:@"OK"
                                           style:UIAlertActionStyleDefault handler:nil]];
     [self presentViewController:a animated:YES completion:nil];
+}
+
+@end
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MARK: - SevenTVFavoritesListController
+// Liste de toutes les emotes en favoris (IDs 7TV + noms résolus).
+// ─────────────────────────────────────────────────────────────────────────────
+
+@interface SevenTVFavoritesListController : UITableViewController
+@end
+
+@implementation SevenTVFavoritesListController {
+    NSArray<NSString *> *_favIDs;      // IDs purs (sans préfixe)
+    NSDictionary<NSString *, NSString *> *_idToName; // emoteID → emoteName
+}
+
+- (instancetype)init {
+    self = [super initWithStyle:UITableViewStyleInsetGrouped];
+    return self;
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"Mes favoris";
+    S7TVStyleTableView(self.tableView);
+    [self reloadFavs];
+
+    // Bouton Vider
+    UIBarButtonItem *clear = [[UIBarButtonItem alloc]
+        initWithTitle:@"Vider"
+                style:UIBarButtonItemStylePlain
+               target:self
+               action:@selector(clearAllFavs)];
+    clear.tintColor = [UIColor systemRedColor];
+    self.navigationItem.rightBarButtonItem = clear;
+}
+
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    [self reloadFavs];
+}
+
+- (void)reloadFavs {
+    NSUserDefaults *prefs = [NSUserDefaults standardUserDefaults];
+    _favIDs = [[prefs arrayForKey:@"s7tv_favorites"] ?: @[] copy];
+
+    // Construire le dictionnaire id → nom à partir des emotes chargées
+    SevenTVManager *mgr = [SevenTVManager sharedManager];
+    NSMutableDictionary *map = [NSMutableDictionary dictionary];
+    void (^scan)(NSDictionary<NSString *, SevenTVEmote *> *) = ^(NSDictionary *dict) {
+        [dict enumerateKeysAndObjectsUsingBlock:^(NSString *name, SevenTVEmote *emote, BOOL *stop) {
+            if (emote.emoteID) map[emote.emoteID] = name;
+        }];
+    };
+    dispatch_sync(mgr.emoteQueue, ^{
+        scan(mgr.globalEmotes ?: @{});
+        scan(mgr.channelEmotes ?: @{});
+    });
+    _idToName = [map copy];
+
+    [self.tableView reloadData];
+}
+
+// ── TableView ──
+
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tv { return 1; }
+
+- (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s {
+    return _favIDs.count == 0 ? 1 : (NSInteger)_favIDs.count;
+}
+
+- (CGFloat)tableView:(UITableView *)tv heightForHeaderInSection:(NSInteger)s {
+    return 44;
+}
+
+- (UIView *)tableView:(UITableView *)tv viewForHeaderInSection:(NSInteger)s {
+    NSString *title = _favIDs.count > 0
+        ? [NSString stringWithFormat:@"%lu emote(s) en favoris", (unsigned long)_favIDs.count]
+        : @"Favoris";
+    return S7TVSectionHeader(title, NO);
+}
+
+- (CGFloat)tableView:(UITableView *)tv heightForRowAtIndexPath:(NSIndexPath *)ip {
+    return 52;
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
+
+    // Cas liste vide
+    if (_favIDs.count == 0) {
+        UITableViewCell *cell = [[UITableViewCell alloc]
+            initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
+        cell.selectionStyle  = UITableViewCellSelectionStyleNone;
+        cell.backgroundColor = S7TVCellBg();
+        cell.textLabel.text  = @"Aucun favori pour l'instant.";
+        cell.textLabel.textColor = S7TVGray();
+        cell.textLabel.textAlignment = NSTextAlignmentCenter;
+        cell.textLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightRegular];
+        return cell;
+    }
+
+    NSString *emoteID = _favIDs[ip.row];
+    NSString *name    = _idToName[emoteID];   // nil si emote pas chargée
+
+    UITableViewCell *cell = [[UITableViewCell alloc]
+        initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
+    cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+    cell.backgroundColor = S7TVCellBg();
+    cell.selectedBackgroundView = [[UIView alloc] init];
+    cell.selectedBackgroundView.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.06];
+
+    // Image emote (chargée via URLCache si dispo)
+    UIImageView *thumb = [[UIImageView alloc] init];
+    thumb.contentMode = UIViewContentModeScaleAspectFit;
+    thumb.translatesAutoresizingMaskIntoConstraints = NO;
+    thumb.clipsToBounds = YES;
+    [cell.contentView addSubview:thumb];
+
+    // Essayer de trouver l'image en cache
+    NSString *urlStr = [NSString stringWithFormat:@"https://cdn.7tv.app/emote/%@/1x.webp", emoteID];
+    NSURL *cdnURL = [NSURL URLWithString:urlStr];
+    NSURLRequest *req = [NSURLRequest requestWithURL:cdnURL];
+    NSCachedURLResponse *cached = [[SevenTVURLProtocol sharedEmoteCache] cachedResponseForRequest:req];
+    if (cached) {
+        UIImage *img = [UIImage imageWithData:cached.data];
+        thumb.image = img;
+    } else {
+        // Placeholder étoile violette
+        UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration
+            configurationWithPointSize:16 weight:UIImageSymbolWeightRegular];
+        thumb.image = [UIImage systemImageNamed:@"star.fill" withConfiguration:cfg];
+        thumb.tintColor = [UIColor colorWithRed:0.60 green:0.35 blue:1.0 alpha:1.0];
+
+        // Télécharge en arrière-plan et met à jour si la cellule est encore visible
+        NSIndexPath *indexPath = ip;
+        [SevenTVURLProtocol prefetchEmoteID:emoteID completion:^{
+            dispatch_async(dispatch_get_main_queue(), ^{
+                UITableViewCell *visible = [tv cellForRowAtIndexPath:indexPath];
+                if (!visible) return;
+                UIImageView *iv = (UIImageView *)[visible.contentView viewWithTag:7700];
+                NSCachedURLResponse *r = [[SevenTVURLProtocol sharedEmoteCache]
+                    cachedResponseForRequest:req];
+                if (r) iv.image = [UIImage imageWithData:r.data];
+            });
+        }];
+    }
+    thumb.tag = 7700;
+
+    // Labels
+    UILabel *nameLbl = [[UILabel alloc] init];
+    nameLbl.text = name ?: @"(emote non chargée)";
+    nameLbl.font = [UIFont systemFontOfSize:15 weight:
+        name ? UIFontWeightRegular : UIFontWeightLight];
+    nameLbl.textColor = name ? [UIColor whiteColor] : S7TVGray();
+    nameLbl.numberOfLines = 1;
+    nameLbl.translatesAutoresizingMaskIntoConstraints = NO;
+    [cell.contentView addSubview:nameLbl];
+
+    UILabel *idLbl = [[UILabel alloc] init];
+    // Tronquer l'ID pour ne pas déborder
+    NSString *shortID = emoteID.length > 14
+        ? [NSString stringWithFormat:@"%@…", [emoteID substringToIndex:14]]
+        : emoteID;
+    idLbl.text = shortID;
+    idLbl.font = [UIFont monospacedSystemFontOfSize:10 weight:UIFontWeightRegular];
+    idLbl.textColor = S7TVGray();
+    idLbl.translatesAutoresizingMaskIntoConstraints = NO;
+    [cell.contentView addSubview:idLbl];
+
+    UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[nameLbl, idLbl]];
+    stack.axis      = UILayoutConstraintAxisVertical;
+    stack.spacing   = 2;
+    stack.alignment = UIStackViewAlignmentLeading;
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    [cell.contentView addSubview:stack];
+
+    // Bouton supprimer (swipe to delete géré via editingStyle, mais on ajoute aussi un bouton trash)
+    [NSLayoutConstraint activateConstraints:@[
+        [thumb.leadingAnchor  constraintEqualToAnchor:cell.contentView.leadingAnchor constant:16],
+        [thumb.centerYAnchor  constraintEqualToAnchor:cell.contentView.centerYAnchor],
+        [thumb.widthAnchor    constraintEqualToConstant:32],
+        [thumb.heightAnchor   constraintEqualToConstant:32],
+        [stack.leadingAnchor  constraintEqualToAnchor:thumb.trailingAnchor constant:14],
+        [stack.centerYAnchor  constraintEqualToAnchor:cell.contentView.centerYAnchor],
+        [stack.trailingAnchor constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-16],
+        [stack.topAnchor      constraintGreaterThanOrEqualToAnchor:cell.contentView.topAnchor constant:8],
+        [stack.bottomAnchor   constraintLessThanOrEqualToAnchor:cell.contentView.bottomAnchor constant:-8],
+    ]];
+
+    return cell;
+}
+
+// Swipe-to-delete
+- (BOOL)tableView:(UITableView *)tv canEditRowAtIndexPath:(NSIndexPath *)ip {
+    return _favIDs.count > 0;
+}
+
+- (UITableViewCellEditingStyle)tableView:(UITableView *)tv
+           editingStyleForRowAtIndexPath:(NSIndexPath *)ip {
+    return _favIDs.count > 0 ? UITableViewCellEditingStyleDelete : UITableViewCellEditingStyleNone;
+}
+
+- (void)tableView:(UITableView *)tv
+commitEditingStyle:(UITableViewCellEditingStyle)es
+forRowAtIndexPath:(NSIndexPath *)ip {
+    if (es != UITableViewCellEditingStyleDelete) return;
+    NSString *removedID = _favIDs[ip.row];
+    NSUserDefaults *prefs = [NSUserDefaults standardUserDefaults];
+    NSMutableArray *cur = [([prefs arrayForKey:@"s7tv_favorites"] ?: @[]) mutableCopy];
+    [cur removeObject:removedID];
+    [prefs setObject:cur forKey:@"s7tv_favorites"];
+    [prefs synchronize];
+    [self reloadFavs];
+}
+
+- (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
+    [tv deselectRowAtIndexPath:ip animated:YES];
+}
+
+// Bouton Vider
+- (void)clearAllFavs {
+    if (_favIDs.count == 0) return;
+    UIAlertController *alert = [UIAlertController
+        alertControllerWithTitle:@"Vider les favoris"
+                         message:@"Supprimer les %lu emotes en favoris ?"
+        preferredStyle:UIAlertControllerStyleActionSheet];
+    alert.message = [NSString stringWithFormat:@"Supprimer les %lu emotes en favoris ?",
+                     (unsigned long)_favIDs.count];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Vider"
+        style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
+            NSUserDefaults *prefs = [NSUserDefaults standardUserDefaults];
+            [prefs removeObjectForKey:@"s7tv_favorites"];
+            [prefs synchronize];
+            [self reloadFavs];
+        }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Annuler"
+        style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
 }
 
 @end

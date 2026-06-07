@@ -20,3 +20,4 @@
 @interface SevenTVEmotesPageController    : UITableViewController @end
 @interface SevenTVStatsPageController     : UITableViewController @end
 @interface SevenTVDebugPageController     : UITableViewController @end
+@interface SevenTVFavoritesListController : UITableViewController @end
