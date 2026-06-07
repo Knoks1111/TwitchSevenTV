@@ -61,7 +61,6 @@ extern NSString *const S7TVLogsDidUpdateNotification;
 @property (nonatomic, assign) BOOL showFloatingButton;    // Afficher/masquer le bouton flottant 7TV
 @property (nonatomic, assign) BOOL debugLogging;          // NSLog console activé
 @property (nonatomic, assign) BOOL tapLogging;            // Logs des taps (indépendant de debugLogging)
-@property (nonatomic, assign) BOOL useCustomChat;         // Utiliser le chat overlay custom 7TV (debug)
 
 // --- Données des emotes ---
 // Dictionnaire: @{ "KEKW": SevenTVEmote*, "Pog": SevenTVEmote*, ... }

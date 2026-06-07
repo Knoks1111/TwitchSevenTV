@@ -16,10 +16,7 @@ TwitchSevenTV_FILES = \
     SevenTVManager.m \
     SevenTVURLProtocol.m \
     SevenTVSettingsController.m \
-    SevenTVLogsController.m \
-    SevenTVChatMessage.m \
-    SevenTVChatCell.m \
-    SevenTVChatOverlayView.m
+    SevenTVLogsController.m
 
 # ── Options de compilation ──
 TwitchSevenTV_CFLAGS = \

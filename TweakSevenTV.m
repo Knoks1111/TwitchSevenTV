@@ -18,8 +18,7 @@
 #import "SevenTVURLProtocol.h"
 #import "SevenTVLogo.h"
 #import "SevenTVSettingsController.h"
-#import "SevenTVChatMessage.h"
-#import "SevenTVChatOverlayView.h"
+
 
 
 // ────────────────────────────────────────────────────────────
@@ -29,7 +28,6 @@
 static const char kS7TVTextFieldTagged = 5;
 static const char kS7TVBitsHijacked    = 6;
 static const char kS7TVOrigSectionCount = 7;
-static const char kS7TVChatOverlay     = 8;
 
 
 // ────────────────────────────────────────────────────────────
@@ -78,8 +76,6 @@ static void s7tv_swizzle(Class targetClass,
 
 @interface UIView (S7TVChatInputHook)
 - (void)s7tv_didMoveToWindow;
-- (void)s7tv_ensureChatOverlay;
-- (void)s7tv_removeChatOverlay;
 @end
 
 @implementation UIView (S7TVChatInputHook)
@@ -88,46 +84,6 @@ static void s7tv_swizzle(Class targetClass,
     [self s7tv_didMoveToWindow]; // appel original
 
     NSString *selfClass = NSStringFromClass([self class]);
-
-    // ── Hook ChatTranscriptView → cacher/montrer selon useCustomChat ──────────
-    if ([selfClass isEqualToString:@"Twitch.ChatTranscriptView"]) {
-        UIView *chatView = self;
-        SevenTVManager *mgr = [SevenTVManager sharedManager];
-
-        // Appliquer l'état actuel immédiatement
-        chatView.alpha = mgr.useCustomChat ? 0.0 : 1.0;
-
-        // Créer l'overlay si useCustomChat est activé et qu'il n'existe pas encore
-        if (mgr.useCustomChat) {
-            [self s7tv_ensureChatOverlay];
-        }
-
-        // Observer les changements futurs du toggle
-        NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
-        [nc removeObserver:chatView name:@"S7TVCustomChatDidChange" object:nil];
-
-        __weak UIView *weakChat = chatView;
-        [nc addObserverForName:@"S7TVCustomChatDidChange"
-                        object:nil
-                         queue:[NSOperationQueue mainQueue]
-                    usingBlock:^(NSNotification *n) {
-            BOOL enabled = [n.userInfo[@"enabled"] boolValue];
-            [UIView animateWithDuration:0.25 animations:^{
-                weakChat.alpha = enabled ? 0.0 : 1.0;
-            }];
-            if (enabled) {
-                [weakChat s7tv_ensureChatOverlay];
-            } else {
-                [weakChat s7tv_removeChatOverlay];
-            }
-            [[SevenTVManager sharedManager]
-                log:@"💬 ChatTranscriptView alpha → %.0f", enabled ? 0.0 : 1.0];
-        }];
-
-        [[SevenTVManager sharedManager]
-            log:@"📺 ChatTranscriptView hookée (useCustomChat=%@)",
-            mgr.useCustomChat ? @"YES" : @"NO"];
-    }
 
     // ── Hijack du bouton Bits → bouton 7TV ───────────────────────────────────
     if (![selfClass isEqualToString:@"Twitch.ChatInputView"]) return;
@@ -275,41 +231,6 @@ static void s7tv_swizzle(Class targetClass,
             [mgr log:@"ℹ️ Bouton Bits déjà hijacké, rien à faire"];
         }
     });
-}
-
-// ── Overlay chat custom ────────────────────────────────────────────────────────
-
-- (void)s7tv_ensureChatOverlay {
-    // Si l'overlay existe déjà, rien à faire
-    if (objc_getAssociatedObject(self, &kS7TVChatOverlay)) return;
-
-    SevenTVChatOverlayView *overlay =
-        [[SevenTVChatOverlayView alloc] initWithFrame:self.bounds];
-    overlay.autoresizingMask =
-        UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-
-    [self.superview addSubview:overlay];
-    // Positionner exactement sur le chat natif
-    overlay.frame = self.frame;
-
-    // Stocker l'overlay pour le retrouver plus tard
-    objc_setAssociatedObject(self, &kS7TVChatOverlay, overlay,
-                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-
-    [[SevenTVManager sharedManager] log:@"✅ Chat overlay créé (frame=%.0f,%.0f,%.0f,%.0f)",
-     self.frame.origin.x, self.frame.origin.y,
-     self.frame.size.width, self.frame.size.height];
-}
-
-- (void)s7tv_removeChatOverlay {
-    SevenTVChatOverlayView *overlay =
-        objc_getAssociatedObject(self, &kS7TVChatOverlay);
-    if (overlay) {
-        [overlay removeFromSuperview];
-        objc_setAssociatedObject(self, &kS7TVChatOverlay, nil,
-                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        [[SevenTVManager sharedManager] log:@"🗑 Chat overlay supprimé"];
-    }
 }
 
 @end
@@ -479,80 +400,6 @@ static void s7tv_handleRoomState(NSString *ircMessage) {
                 if (textToProcess) {
                     if ([textToProcess containsString:@"ROOMSTATE"]) {
                         s7tv_handleRoomState(textToProcess);
-                    }
-
-                    // ── Router vers le chat custom si activé ──────────────
-                    // CRITIQUE : tout le bloc UIKit doit être sur le main thread.
-                    // NSNotificationCenter délivre sur le thread appelant (ici
-                    // background libdispatch) → AutoLayout crash. On capture
-                    // capturedText (NSString immuable, thread-safe) avant dispatch.
-                    if ([SevenTVManager sharedManager].useCustomChat) {
-                        NSString *capturedText = [textToProcess copy];
-                        dispatch_async(dispatch_get_main_queue(), ^{
-
-                        // Gérer CLEARCHAT (ban/timeout)
-                        if ([capturedText containsString:@"CLEARCHAT"]) {
-                            NSRange clearchatRange = [capturedText rangeOfString:@"CLEARCHAT #"];
-                            if (clearchatRange.location != NSNotFound) {
-                                // Format: CLEARCHAT #channel :username  (avec username = ban)
-                                // ou     CLEARCHAT #channel             (purge complète)
-                                NSRange colonRange = [capturedText
-                                    rangeOfString:@":"
-                                    options:0
-                                    range:NSMakeRange(clearchatRange.location + clearchatRange.length,
-                                                      capturedText.length - clearchatRange.location - clearchatRange.length)];
-                                if (colonRange.location != NSNotFound) {
-                                    NSString *bannedUser = [[capturedText substringFromIndex:colonRange.location + 1]
-                                        stringByTrimmingCharactersInSet:
-                                            [NSCharacterSet whitespaceAndNewlineCharacterSet]];
-                                    if (bannedUser.length > 0) {
-                                        [[NSNotificationCenter defaultCenter]
-                                            postNotificationName:@"S7TVChatClear"
-                                                          object:nil
-                                                        userInfo:@{@"username": bannedUser}];
-                                    }
-                                }
-                            }
-                        }
-
-                        // Gérer CLEARMSG (suppression d'un message)
-                        if ([capturedText containsString:@"CLEARMSG"]) {
-                            NSRange targetIDRange = [capturedText rangeOfString:@"target-msg-id="];
-                            if (targetIDRange.location != NSNotFound) {
-                                NSString *afterID = [capturedText
-                                    substringFromIndex:targetIDRange.location + targetIDRange.length];
-                                NSMutableString *msgID = [NSMutableString string];
-                                for (NSUInteger i = 0; i < afterID.length; i++) {
-                                    unichar c = [afterID characterAtIndex:i];
-                                    if (c == ';' || c == ' ' || c == '\r' || c == '\n') break;
-                                    [msgID appendFormat:@"%C", c];
-                                }
-                                if (msgID.length > 0) {
-                                    [[NSNotificationCenter defaultCenter]
-                                        postNotificationName:@"S7TVChatDeleteMessage"
-                                                      object:nil
-                                                    userInfo:@{@"messageId": [msgID copy]}];
-                                }
-                            }
-                        }
-
-                        // Parser le PRIVMSG en SevenTVChatMessage
-                        // On split par \r\n car IRC peut envoyer plusieurs lignes
-                        NSArray<NSString *> *lines =
-                            [capturedText componentsSeparatedByString:@"\r\n"];
-                        for (NSString *line in lines) {
-                            if (![line containsString:@" PRIVMSG "]) continue;
-                            SevenTVChatMessage *msg =
-                                [SevenTVChatMessage messageFromIRCString:line];
-                            if (msg) {
-                                [[NSNotificationCenter defaultCenter]
-                                    postNotificationName:@"S7TVNewChatMessage"
-                                                  object:nil
-                                                userInfo:@{@"message": msg}];
-                            }
-                        }
-
-                        }); // fin dispatch_async main_queue
                     }
 
                     NSString *modified = [[SevenTVManager sharedManager]
