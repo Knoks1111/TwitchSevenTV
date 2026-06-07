@@ -19,6 +19,7 @@
 #import "SevenTVChatCell.h"
 #import "SevenTVManager.h"
 #import "SevenTVURLProtocol.h"
+#import <os/lock.h>
 
 NSString * const kSevenTVChatCellReuseID = @"SevenTVChatCell";
 
@@ -58,6 +59,9 @@ static NSMutableDictionary<NSString *, NSString *> *s_badgeURLMap = nil;
 // Map globale : imageURLString → UIImage (cache mémoire)
 static NSMutableDictionary<NSString *, UIImage *>  *s_badgeImgMap = nil;
 static dispatch_once_t s_badgeMapsOnce;
+// os_unfair_lock : protège les deux maps sans risque de deadlock depuis n'importe quel thread
+// (contrairement à dispatch_sync qui deadlocke si le thread appelant possède déjà la queue)
+static os_unfair_lock s_badgeLock = OS_UNFAIR_LOCK_INIT;
 
 static void S7TVEnsureBadgeMaps(void) {
     dispatch_once(&s_badgeMapsOnce, ^{
@@ -93,70 +97,77 @@ static UIImage *S7TVPlaceholderImage(CGSize size) {
 
 
 // Charge le JSON de badges depuis l'API publique Twitch et peuple s_badgeURLMap
-// Appelé une seule fois (guard interne). Thread-safe (dispatch_async sur serial queue).
-static dispatch_queue_t S7TVBadgeQueue(void) {
-    static dispatch_queue_t q;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        q = dispatch_queue_create("app.s7tv.badge", DISPATCH_QUEUE_SERIAL);
-    });
-    return q;
-}
+// Appelé une seule fois (guard interne). Thread-safe via os_unfair_lock.
+// NOTE: os_unfair_lock remplace l'ancienne serial queue pour éviter tout deadlock
+// depuis le main thread (dispatch_sync sur une serial queue depuis le main thread
+// pouvait deadlocker si la queue avait un bloc en attente qui postait sur main).
 
 static BOOL s_globalBadgesLoaded = NO;
 
 static void S7TVLoadGlobalBadges(void) {
     S7TVEnsureBadgeMaps();
-    dispatch_async(S7TVBadgeQueue(), ^{
-        if (s_globalBadgesLoaded) return;
-        s_globalBadgesLoaded = YES; // marquer avant la requête (guard)
 
-        // API publique sans auth — retourne les badges globaux avec URLs d'image
-        NSURL *url = [NSURL URLWithString:
-            @"https://badges.twitch.tv/v1/badges/global/display?language=en"];
+    // Guard sans lock (lecture atomique suffisante ici — on double-check sous lock)
+    if (s_globalBadgesLoaded) return;
 
-        [[S7TVBadgeSession() dataTaskWithURL:url
-                          completionHandler:^(NSData *data, NSURLResponse *r, NSError *e) {
-            if (!data || e) {
-                [[SevenTVManager sharedManager] log:@"⚠️ Badges global fetch error: %@",
-                 e.localizedDescription];
-                // Réinitialiser le guard pour permettre un retry
-                dispatch_async(S7TVBadgeQueue(), ^{ s_globalBadgesLoaded = NO; });
-                return;
-            }
-            NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data
-                                                                 options:0 error:nil];
-            // Structure: { "badge_sets": { "broadcaster": { "versions": { "1": { "image_url_1x": "..." } } } } }
-            NSDictionary *badgeSets = json[@"badge_sets"];
-            if (![badgeSets isKindOfClass:[NSDictionary class]]) return;
+    os_unfair_lock_lock(&s_badgeLock);
+    BOOL alreadyLoaded = s_globalBadgesLoaded;
+    if (!alreadyLoaded) s_globalBadgesLoaded = YES;
+    os_unfair_lock_unlock(&s_badgeLock);
+    if (alreadyLoaded) return;
 
-            dispatch_async(S7TVBadgeQueue(), ^{
-                S7TVEnsureBadgeMaps();
-                [badgeSets enumerateKeysAndObjectsUsingBlock:
-                    ^(NSString *badgeName, NSDictionary *setData, BOOL *stop) {
-                    NSDictionary *versions = setData[@"versions"];
-                    if (![versions isKindOfClass:[NSDictionary class]]) return;
-                    [versions enumerateKeysAndObjectsUsingBlock:
-                        ^(NSString *version, NSDictionary *vData, BOOL *stop2) {
-                        // Préférer 2x pour Retina, fallback 1x
-                        NSString *imgURL = vData[@"image_url_2x"] ?: vData[@"image_url_1x"];
-                        if (imgURL.length) {
-                            NSString *key = [NSString stringWithFormat:@"%@/%@",
-                                             badgeName, version];
-                            s_badgeURLMap[key] = imgURL;
-                        }
-                    }];
-                }];
-                [[SevenTVManager sharedManager] log:@"✅ %lu URLs de badges globaux chargées",
-                 (unsigned long)s_badgeURLMap.count];
-                // Notifier pour que les cellules déjà affichées se rechargent
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    [[NSNotificationCenter defaultCenter]
-                        postNotificationName:@"S7TVBadgesLoaded" object:nil];
-                });
-            });
-        }] resume];
-    });
+    // API publique sans auth — retourne les badges globaux avec URLs d'image
+    NSURL *url = [NSURL URLWithString:
+        @"https://badges.twitch.tv/v1/badges/global/display?language=en"];
+
+    [[S7TVBadgeSession() dataTaskWithURL:url
+                      completionHandler:^(NSData *data, NSURLResponse *r, NSError *e) {
+        if (!data || e) {
+            [[SevenTVManager sharedManager] log:@"⚠️ Badges global fetch error: %@",
+             e.localizedDescription];
+            // Réinitialiser le guard pour permettre un retry
+            os_unfair_lock_lock(&s_badgeLock);
+            s_globalBadgesLoaded = NO;
+            os_unfair_lock_unlock(&s_badgeLock);
+            return;
+        }
+        NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data
+                                                             options:0 error:nil];
+        // Structure: { "badge_sets": { "broadcaster": { "versions": { "1": { "image_url_1x": "..." } } } } }
+        NSDictionary *badgeSets = json[@"badge_sets"];
+        if (![badgeSets isKindOfClass:[NSDictionary class]]) return;
+
+        // Construire les entrées dans un dict temporaire hors lock
+        NSMutableDictionary *newEntries = [NSMutableDictionary dictionary];
+        [badgeSets enumerateKeysAndObjectsUsingBlock:
+            ^(NSString *badgeName, NSDictionary *setData, BOOL *stop) {
+            NSDictionary *versions = setData[@"versions"];
+            if (![versions isKindOfClass:[NSDictionary class]]) return;
+            [versions enumerateKeysAndObjectsUsingBlock:
+                ^(NSString *version, NSDictionary *vData, BOOL *stop2) {
+                NSString *imgURL = vData[@"image_url_2x"] ?: vData[@"image_url_1x"];
+                if (imgURL.length) {
+                    NSString *key = [NSString stringWithFormat:@"%@/%@", badgeName, version];
+                    newEntries[key] = imgURL;
+                }
+            }];
+        }];
+
+        // Écriture sous lock (rapide — juste une fusion de dictionnaires)
+        os_unfair_lock_lock(&s_badgeLock);
+        S7TVEnsureBadgeMaps();
+        [s_badgeURLMap addEntriesFromDictionary:newEntries];
+        NSUInteger count = s_badgeURLMap.count;
+        os_unfair_lock_unlock(&s_badgeLock);
+
+        [[SevenTVManager sharedManager] log:@"✅ %lu URLs de badges globaux chargées",
+         (unsigned long)count];
+        // Notifier pour que les cellules déjà affichées se rechargent
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[NSNotificationCenter defaultCenter]
+                postNotificationName:@"S7TVBadgesLoaded" object:nil];
+        });
+    }] resume];
 }
 
 // Charge les badges d'un channel spécifique (abonné, bits, etc.)
@@ -176,28 +187,32 @@ static void S7TVLoadChannelBadges(NSString *channelID) {
         NSDictionary *badgeSets = json[@"badge_sets"];
         if (![badgeSets isKindOfClass:[NSDictionary class]]) return;
 
-        dispatch_async(S7TVBadgeQueue(), ^{
-            S7TVEnsureBadgeMaps();
-            [badgeSets enumerateKeysAndObjectsUsingBlock:
-                ^(NSString *badgeName, NSDictionary *setData, BOOL *stop) {
-                NSDictionary *versions = setData[@"versions"];
-                if (![versions isKindOfClass:[NSDictionary class]]) return;
-                [versions enumerateKeysAndObjectsUsingBlock:
-                    ^(NSString *version, NSDictionary *vData, BOOL *stop2) {
-                    NSString *imgURL = vData[@"image_url_2x"] ?: vData[@"image_url_1x"];
-                    if (imgURL.length) {
-                        NSString *key = [NSString stringWithFormat:@"%@/%@",
-                                         badgeName, version];
-                        // Channel badges écrasent les globaux si même clé
-                        s_badgeURLMap[key] = imgURL;
-                    }
-                }];
+        // Construire les entrées dans un dict temporaire hors lock
+        NSMutableDictionary *newEntries = [NSMutableDictionary dictionary];
+        [badgeSets enumerateKeysAndObjectsUsingBlock:
+            ^(NSString *badgeName, NSDictionary *setData, BOOL *stop) {
+            NSDictionary *versions = setData[@"versions"];
+            if (![versions isKindOfClass:[NSDictionary class]]) return;
+            [versions enumerateKeysAndObjectsUsingBlock:
+                ^(NSString *version, NSDictionary *vData, BOOL *stop2) {
+                NSString *imgURL = vData[@"image_url_2x"] ?: vData[@"image_url_1x"];
+                if (imgURL.length) {
+                    NSString *key = [NSString stringWithFormat:@"%@/%@",
+                                     badgeName, version];
+                    newEntries[key] = imgURL;
+                }
             }];
-            [[SevenTVManager sharedManager] log:@"✅ Badges channel %@ chargés", channelID];
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [[NSNotificationCenter defaultCenter]
-                    postNotificationName:@"S7TVBadgesLoaded" object:nil];
-            });
+        }];
+
+        os_unfair_lock_lock(&s_badgeLock);
+        S7TVEnsureBadgeMaps();
+        [s_badgeURLMap addEntriesFromDictionary:newEntries];
+        os_unfair_lock_unlock(&s_badgeLock);
+
+        [[SevenTVManager sharedManager] log:@"✅ Badges channel %@ chargés", channelID];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[NSNotificationCenter defaultCenter]
+                postNotificationName:@"S7TVBadgesLoaded" object:nil];
         });
     }] resume];
 }
@@ -205,25 +220,21 @@ static void S7TVLoadChannelBadges(NSString *channelID) {
 // Retourne l'image en cache ou nil. Jamais de réseau ici.
 static UIImage *S7TVCachedBadgeImage(NSString *badgeKey) {
     S7TVEnsureBadgeMaps();
-    __block NSString *imgURL = nil;
-    dispatch_sync(S7TVBadgeQueue(), ^{
-        imgURL = s_badgeURLMap[badgeKey];
-    });
-    if (!imgURL) return nil;
-    __block UIImage *img = nil;
-    dispatch_sync(S7TVBadgeQueue(), ^{
-        img = s_badgeImgMap[imgURL];
-    });
+    os_unfair_lock_lock(&s_badgeLock);
+    NSString *imgURL = s_badgeURLMap[badgeKey];
+    UIImage  *img    = imgURL ? s_badgeImgMap[imgURL] : nil;
+    os_unfair_lock_unlock(&s_badgeLock);
     return img;
 }
 
 // Télécharge l'image d'un badge et appelle completion sur main thread
 static void S7TVFetchBadgeImage(NSString *badgeKey, void(^completion)(UIImage *)) {
     S7TVEnsureBadgeMaps();
-    __block NSString *imgURL = nil;
-    dispatch_sync(S7TVBadgeQueue(), ^{
-        imgURL = s_badgeURLMap[badgeKey];
-    });
+
+    os_unfair_lock_lock(&s_badgeLock);
+    NSString *imgURL = s_badgeURLMap[badgeKey];
+    UIImage  *cached = imgURL ? s_badgeImgMap[imgURL] : nil;
+    os_unfair_lock_unlock(&s_badgeLock);
 
     if (!imgURL) {
         // URL inconnue → charger les badges globaux si pas encore fait, puis retry
@@ -234,11 +245,6 @@ static void S7TVFetchBadgeImage(NSString *badgeKey, void(^completion)(UIImage *)
         return;
     }
 
-    // Check cache
-    __block UIImage *cached = nil;
-    dispatch_sync(S7TVBadgeQueue(), ^{
-        cached = s_badgeImgMap[imgURL];
-    });
     if (cached) {
         if (completion) completion(cached);
         return;
@@ -253,9 +259,9 @@ static void S7TVFetchBadgeImage(NSString *badgeKey, void(^completion)(UIImage *)
         if (data && !e) {
             img = [UIImage imageWithData:data scale:[UIScreen mainScreen].scale];
             if (img) {
-                dispatch_async(S7TVBadgeQueue(), ^{
-                    s_badgeImgMap[imgURL] = img;
-                });
+                os_unfair_lock_lock(&s_badgeLock);
+                s_badgeImgMap[imgURL] = img;
+                os_unfair_lock_unlock(&s_badgeLock);
             }
         }
         dispatch_async(dispatch_get_main_queue(), ^{
