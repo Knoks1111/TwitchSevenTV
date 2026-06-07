@@ -36,10 +36,6 @@
 #import "SevenTVURLProtocol.h"
 #import "SevenTVLogo.h"
 #import <objc/runtime.h>
-#import <execinfo.h>
-#import <signal.h>
-#import <unistd.h>
-#import <fcntl.h>
 
 // ============================================================
 // Constante de notification
@@ -99,9 +95,11 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
 
 // Favoris : IDs 7TV des emotes mise en favoris (persisté dans NSUserDefaults)
 @property (nonatomic, strong) NSMutableSet<NSString *> *favoriteEmoteIDs;
-// Arrays filtrés pour l'affichage dans le picker (2 sections)
+// Arrays filtrés pour l'affichage dans le picker (3 sections)
 @property (nonatomic, strong) NSArray<SevenTVEmote *> *emotePickerFavoriteEmotes;
-@property (nonatomic, strong) NSArray<SevenTVEmote *> *emotePickerOtherEmotes;
+@property (nonatomic, strong) NSArray<SevenTVEmote *> *emotePickerChannelEmotes;
+@property (nonatomic, strong) NSArray<SevenTVEmote *> *emotePickerGlobalEmotes;
+@property (nonatomic, strong) NSArray<SevenTVEmote *> *emotePickerOtherEmotes; // compatibilité
 
 // Buffer de logs in-app
 @property (nonatomic, strong) NSMutableArray<NSString *> *logBuffer;
@@ -301,6 +299,8 @@ static const CGFloat kS7TVMenuHeight = 520.0;
 
         _favoriteEmoteIDs        = [NSMutableSet set];
         _emotePickerFavoriteEmotes = @[];
+        _emotePickerChannelEmotes  = @[];
+        _emotePickerGlobalEmotes   = @[];
         _emotePickerOtherEmotes    = @[];
 
         [self loadPreferences];
@@ -482,81 +482,7 @@ static const CGFloat kS7TVMenuHeight = 520.0;
 // MARK: - Initialisation
 // ============================================================
 
-static void s7tv_uncaughtExceptionHandler(NSException *exception) {
-    NSString *docs = [NSSearchPathForDirectoriesInDomains(
-        NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
-    NSString *path = [docs stringByAppendingPathComponent:@"s7tv.log"];
-    NSString *crash = [NSString stringWithFormat:
-        @"\n========== CRASH (NSException) ==========\n"
-        @"Name: %@\nReason: %@\nStack:\n%@\n===========================\n",
-        exception.name, exception.reason,
-        [exception.callStackSymbols componentsJoinedByString:@"\n"]];
-    NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
-    if (fh) {
-        [fh seekToEndOfFile];
-        [fh writeData:[crash dataUsingEncoding:NSUTF8StringEncoding]];
-        [fh closeFile];
-    } else {
-        [crash writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
-    }
-}
-
-// Handler pour les signaux Unix (SIGSEGV, SIGABRT, SIGBUS, SIGILL)
-// Ces crashs ne passent PAS par NSSetUncaughtExceptionHandler.
-static void s7tv_signalHandler(int sig) {
-    NSString *docs = [NSSearchPathForDirectoriesInDomains(
-        NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
-    NSString *path = [docs stringByAppendingPathComponent:@"s7tv.log"];
-
-    const char *sigName = "UNKNOWN";
-    switch (sig) {
-        case SIGSEGV: sigName = "SIGSEGV (bad memory access)"; break;
-        case SIGABRT: sigName = "SIGABRT (abort / assertion)"; break;
-        case SIGBUS:  sigName = "SIGBUS (bus error)";          break;
-        case SIGILL:  sigName = "SIGILL (illegal instruction)"; break;
-        case SIGFPE:  sigName = "SIGFPE (arithmetic error)";   break;
-    }
-
-    // callstack via backtrace (symbols pas dispo sans dSYM, mais les adresses suffisent)
-    void *frames[64];
-    int count = backtrace(frames, 64);
-    char **symbols = backtrace_symbols(frames, count);
-
-    NSMutableString *stack = [NSMutableString string];
-    for (int i = 0; i < count && symbols; i++) {
-        [stack appendFormat:@"  %s\n", symbols[i]];
-    }
-
-    NSString *crash = [NSString stringWithFormat:
-        @"\n========== CRASH (Signal) ==========\n"
-        @"Signal: %s (%d)\nStack:\n%@===========================\n",
-        sigName, sig, stack];
-
-    // Écriture synchrone — on est dans un signal handler, pas de dispatch
-    int fd = open([path fileSystemRepresentation], O_WRONLY | O_CREAT | O_APPEND, 0644);
-    if (fd >= 0) {
-        const char *bytes = [crash UTF8String];
-        write(fd, bytes, strlen(bytes));
-        close(fd);
-    }
-
-    // Réinstaller le handler par défaut et re-envoyer le signal pour générer le crash natif
-    signal(sig, SIG_DFL);
-    raise(sig);
-}
-
 - (void)setup {
-    // Installer le handler de crash non rattrapé → écrit dans s7tv.log
-    NSSetUncaughtExceptionHandler(&s7tv_uncaughtExceptionHandler);
-
-    // Installer les signal handlers pour SIGSEGV/SIGABRT/SIGBUS/SIGILL/SIGFPE
-    // (ces crashs ne passent PAS par NSSetUncaughtExceptionHandler)
-    signal(SIGSEGV, s7tv_signalHandler);
-    signal(SIGABRT, s7tv_signalHandler);
-    signal(SIGBUS,  s7tv_signalHandler);
-    signal(SIGILL,  s7tv_signalHandler);
-    signal(SIGFPE,  s7tv_signalHandler);
-
     [self log:@"SevenTVManager: setup démarré"];
 
     // 1. Charger les emotes globales depuis le cache fichier (instantané)
@@ -1733,22 +1659,33 @@ static const char kS7TVTaskKey = 0;
     NSString *q = [query stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
     NSString *lower = q.lowercaseString;
 
-    NSMutableArray<SevenTVEmote *> *favs   = [NSMutableArray array];
-    NSMutableArray<SevenTVEmote *> *others = [NSMutableArray array];
+    NSMutableArray<SevenTVEmote *> *favs    = [NSMutableArray array];
+    NSMutableArray<SevenTVEmote *> *channel = [NSMutableArray array];
+    NSMutableArray<SevenTVEmote *> *global  = [NSMutableArray array];
+
+    // Snapshot des dicts pour distinguer channel vs global
+    __block NSDictionary *channelDict;
+    dispatch_sync(self.emoteQueue, ^{
+        channelDict = self.channelEmotes ?: @{};
+    });
 
     for (SevenTVEmote *e in self.emotePickerAllEmotes) {
         BOOL matches = (q.length == 0) || [e.emoteName.lowercaseString containsString:lower];
         if (!matches) continue;
         if ([self.favoriteEmoteIDs containsObject:e.emoteID]) {
             [favs addObject:e];
+        } else if (channelDict[e.emoteName] != nil) {
+            [channel addObject:e];
         } else {
-            [others addObject:e];
+            [global addObject:e];
         }
     }
     self.emotePickerFavoriteEmotes = [favs copy];
-    self.emotePickerOtherEmotes    = [others copy];
-    // Maintenir emotePickerEmotes pour compatibilité
-    self.emotePickerEmotes = self.emotePickerOtherEmotes;
+    self.emotePickerChannelEmotes  = [channel copy];
+    self.emotePickerGlobalEmotes   = [global copy];
+    // Maintenir emotePickerOtherEmotes pour compatibilité
+    self.emotePickerOtherEmotes    = self.emotePickerChannelEmotes;
+    self.emotePickerEmotes         = self.emotePickerOtherEmotes;
 }
 
 // ── UITextFieldDelegate — intercepte le focus du champ de recherche ────────
@@ -1902,9 +1839,12 @@ static const char kS7TVTaskKey = 0;
     if (ip.section == 0) {
         if ((NSUInteger)ip.item < self.emotePickerFavoriteEmotes.count)
             return self.emotePickerFavoriteEmotes[(NSUInteger)ip.item];
+    } else if (ip.section == 1) {
+        if ((NSUInteger)ip.item < self.emotePickerChannelEmotes.count)
+            return self.emotePickerChannelEmotes[(NSUInteger)ip.item];
     } else {
-        if ((NSUInteger)ip.item < self.emotePickerOtherEmotes.count)
-            return self.emotePickerOtherEmotes[(NSUInteger)ip.item];
+        if ((NSUInteger)ip.item < self.emotePickerGlobalEmotes.count)
+            return self.emotePickerGlobalEmotes[(NSUInteger)ip.item];
     }
     return nil;
 }
@@ -1916,12 +1856,13 @@ static const char kS7TVTaskKey = 0;
 // ── UICollectionViewDataSource ─────────────────────────────────────────────
 
 - (NSInteger)numberOfSectionsInCollectionView:(UICollectionView *)cv {
-    return 2; // Section 0 = favoris, Section 1 = toutes les autres
+    return 3; // Section 0 = favoris, Section 1 = emotes de channel, Section 2 = emotes globales
 }
 
 - (NSInteger)collectionView:(UICollectionView *)cv numberOfItemsInSection:(NSInteger)section {
     if (section == 0) return (NSInteger)self.emotePickerFavoriteEmotes.count;
-    return (NSInteger)self.emotePickerOtherEmotes.count;
+    if (section == 1) return (NSInteger)self.emotePickerChannelEmotes.count;
+    return (NSInteger)self.emotePickerGlobalEmotes.count;
 }
 
 // ── Headers de section ────────────────────────────────────────────────────
@@ -1965,14 +1906,30 @@ static const char kS7TVTaskKey = 0;
         botSep.backgroundColor = sepColor;
         [header addSubview:botSep];
 
-    } else if (indexPath.section == 1 && self.emotePickerFavoriteEmotes.count > 0) {
-        // Séparateur entre favoris et toutes les emotes
+    } else if (indexPath.section == 1) {
+        // Header "Emotes de channel"
         UIView *topSep = [[UIView alloc] initWithFrame:CGRectMake(8, 0, cv.bounds.size.width - 16, 0.5)];
         topSep.backgroundColor = sepColor;
         [header addSubview:topSep];
 
         UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(14, 4, 200, 20)];
-        lbl.text      = @"Toutes les emotes";
+        lbl.text      = @"Emotes de channel";
+        lbl.font      = [UIFont boldSystemFontOfSize:11];
+        lbl.textColor = textColor;
+        [header addSubview:lbl];
+
+        UIView *botSep = [[UIView alloc] initWithFrame:CGRectMake(8, 27.5, cv.bounds.size.width - 16, 0.5)];
+        botSep.backgroundColor = sepColor;
+        [header addSubview:botSep];
+
+    } else if (indexPath.section == 2 && self.emotePickerGlobalEmotes.count > 0) {
+        // Header "Emotes globales" tout en bas
+        UIView *topSep = [[UIView alloc] initWithFrame:CGRectMake(8, 0, cv.bounds.size.width - 16, 0.5)];
+        topSep.backgroundColor = sepColor;
+        [header addSubview:topSep];
+
+        UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(14, 4, 200, 20)];
+        lbl.text      = @"Emotes globales";
         lbl.font      = [UIFont boldSystemFontOfSize:11];
         lbl.textColor = textColor;
         [header addSubview:lbl];
@@ -1981,7 +1938,6 @@ static const char kS7TVTaskKey = 0;
         botSep.backgroundColor = sepColor;
         [header addSubview:botSep];
     }
-    // Section 1 sans favoris = pas de header visible (hauteur 0 via delegate)
 
     return header;
 }
@@ -2035,12 +1991,15 @@ static CGFloat S7TVRefCols(void) {
 - (CGSize)collectionView:(UICollectionView *)cv
                   layout:(UICollectionViewLayout *)layout
 referenceSizeForHeaderInSection:(NSInteger)section {
+    CGSize headerSize = CGSizeMake(cv.bounds.size.width, 28);
     if (section == 0) {
-        // Toujours visible même si vide (pour guider l'utilisateur)
-        return self.emotePickerFavoriteEmotes.count > 0 ? CGSizeMake(cv.bounds.size.width, 28) : CGSizeZero;
+        return self.emotePickerFavoriteEmotes.count > 0 ? headerSize : CGSizeZero;
     }
-    // Section 1 : header "Toutes les emotes" seulement si favoris non vides
-    return self.emotePickerFavoriteEmotes.count > 0 ? CGSizeMake(cv.bounds.size.width, 28) : CGSizeZero;
+    if (section == 1) {
+        return self.emotePickerChannelEmotes.count > 0 ? headerSize : CGSizeZero;
+    }
+    // Section 2 (globales) — header visible si au moins une emote globale
+    return self.emotePickerGlobalEmotes.count > 0 ? headerSize : CGSizeZero;
 }
 
 - (UICollectionViewCell *)collectionView:(UICollectionView *)cv
@@ -2437,36 +2396,6 @@ referenceSizeForHeaderInSection:(NSInteger)section {
     if (self.debugLogging) {
         NSLog(@"[TwitchSevenTV] %@", msg);
     }
-
-    // ── Écriture fichier log (accessible depuis Fichiers.app → Twitch) ────────
-    // Écrit dans Documents/s7tv.log — lisible sans jailbreak via Fichiers.app.
-    // On utilise une queue série dédiée pour éviter les contentions I/O.
-    static dispatch_queue_t s_logFileQueue;
-    static dispatch_once_t s_logFileOnce;
-    dispatch_once(&s_logFileOnce, ^{
-        s_logFileQueue = dispatch_queue_create("app.s7tv.logfile", DISPATCH_QUEUE_SERIAL);
-    });
-    NSString *lineToWrite = [line stringByAppendingString:@"\n"];
-    dispatch_async(s_logFileQueue, ^{
-        NSString *docs = [NSSearchPathForDirectoriesInDomains(
-            NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
-        NSString *path = [docs stringByAppendingPathComponent:@"s7tv.log"];
-        // Rotation : si > 2 MB, vider le fichier pour éviter de remplir le storage
-        NSFileManager *fm = [NSFileManager defaultManager];
-        NSDictionary *attrs = [fm attributesOfItemAtPath:path error:nil];
-        if ([attrs[NSFileSize] unsignedLongLongValue] > 2 * 1024 * 1024) {
-            [@"" writeToFile:path atomically:NO encoding:NSUTF8StringEncoding error:nil];
-        }
-        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
-        if (!fh) {
-            [lineToWrite writeToFile:path atomically:NO encoding:NSUTF8StringEncoding error:nil];
-        } else {
-            [fh seekToEndOfFile];
-            [fh writeData:[lineToWrite dataUsingEncoding:NSUTF8StringEncoding]];
-            [fh closeFile];
-        }
-    });
-    // ─────────────────────────────────────────────────────────────────────────
 
     dispatch_async(dispatch_get_main_queue(), ^{
         [[NSNotificationCenter defaultCenter]

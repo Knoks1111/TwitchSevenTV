@@ -462,7 +462,7 @@ typedef NS_ENUM(NSInteger, S7TVHomeRow) {
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tv { return 2; }
 
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s {
-    return s == 0 ? 1 : 2;
+    return s == 0 ? 1 : 3;
 }
 
 - (CGFloat)tableView:(UITableView *)tv heightForHeaderInSection:(NSInteger)s {
@@ -503,6 +503,45 @@ typedef NS_ENUM(NSInteger, S7TVHomeRow) {
                     [UIColor colorWithWhite:0.75 alpha:1.0],
                     mgr.showPickerAnimations,
                     self, @selector(togglePickerAnimations:));
+        case 2: {
+            // Cellule info : nombre d'emotes en favoris
+            UITableViewCell *cell = [[UITableViewCell alloc]
+                initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
+            cell.selectionStyle  = UITableViewCellSelectionStyleNone;
+            cell.backgroundColor = S7TVCellBg();
+
+            UIImageView *icon = S7TVIcon(@"star.fill",
+                [UIColor colorWithRed:0.60 green:0.35 blue:1.0 alpha:1.0]);
+            [cell.contentView addSubview:icon];
+
+            UILabel *lbl = [[UILabel alloc] init];
+            lbl.text = @"Emotes en favoris";
+            lbl.font = [UIFont systemFontOfSize:17 weight:UIFontWeightRegular];
+            lbl.textColor = [UIColor whiteColor];
+            lbl.numberOfLines = 1;
+            lbl.translatesAutoresizingMaskIntoConstraints = NO;
+            [cell.contentView addSubview:lbl];
+
+            NSUserDefaults *prefs = [NSUserDefaults standardUserDefaults];
+            NSArray *favs = [prefs arrayForKey:@"s7tv_favorites"];
+            UILabel *countLbl = [[UILabel alloc] init];
+            countLbl.text = [NSString stringWithFormat:@"%lu", (unsigned long)(favs.count)];
+            countLbl.font = [UIFont monospacedDigitSystemFontOfSize:17 weight:UIFontWeightRegular];
+            countLbl.textColor = [UIColor colorWithRed:0.60 green:0.35 blue:1.0 alpha:1.0];
+            countLbl.translatesAutoresizingMaskIntoConstraints = NO;
+            [cell.contentView addSubview:countLbl];
+
+            [NSLayoutConstraint activateConstraints:@[
+                [icon.leadingAnchor    constraintEqualToAnchor:cell.contentView.leadingAnchor constant:16],
+                [icon.centerYAnchor    constraintEqualToAnchor:cell.contentView.centerYAnchor],
+                [lbl.leadingAnchor     constraintEqualToAnchor:icon.trailingAnchor constant:14],
+                [lbl.topAnchor         constraintEqualToAnchor:cell.contentView.topAnchor constant:13],
+                [lbl.bottomAnchor      constraintEqualToAnchor:cell.contentView.bottomAnchor constant:-13],
+                [countLbl.trailingAnchor constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-16],
+                [countLbl.centerYAnchor  constraintEqualToAnchor:cell.contentView.centerYAnchor],
+            ]];
+            return cell;
+        }
         default: return [[UITableViewCell alloc] init];
     }
 }
