@@ -613,6 +613,13 @@ static const CGFloat kS7TVMenuHeight = 520.0;
             self.globalEmotes = parsed;
             [self log:@"✅ %lu emotes globales chargées depuis API", (unsigned long)parsed.count];
         });
+        // Invalider le cache de tri du picker
+        dispatch_async(dispatch_get_main_queue(), ^{
+            extern NSArray *s_cachedSortedEmotes;
+            extern NSString *s_cachedSortKey;
+            s_cachedSortedEmotes = nil;
+            s_cachedSortKey = nil;
+        });
 
         [self saveCacheForName:@"global" withEmotes:parsed];
         [self _prefetchAllEmotes:parsed setKey:@"global" label:@"globales (API)"];
@@ -888,6 +895,13 @@ static const CGFloat kS7TVMenuHeight = 520.0;
         dispatch_barrier_async(self.emoteQueue, ^{
             self.channelEmotes = parsed;
             [self log:@"✅ %lu emotes du channel chargées depuis API", (unsigned long)parsed.count];
+        });
+        // Invalider le cache de tri du picker — les nouvelles emotes doivent apparaître
+        dispatch_async(dispatch_get_main_queue(), ^{
+            extern NSArray *s_cachedSortedEmotes;
+            extern NSString *s_cachedSortKey;
+            s_cachedSortedEmotes = nil;
+            s_cachedSortKey = nil;
         });
 
         [self saveCacheForName:cacheName withEmotes:parsed];
@@ -1373,6 +1387,18 @@ static const char kS7TVTaskKey = 0;
     self.emotePickerView.hidden = YES;
 }
 
+// IVar de cache pour le tri — invalidé quand globalEmotes/channelEmotes changent
+// Accédé UNIQUEMENT depuis le main thread (picker).
+static NSArray<SevenTVEmote *> *s_cachedSortedEmotes    = nil;
+static NSString                *s_cachedSortKey          = nil; // hash des deux sets
+
+static NSString *s7tv_emoteSetKey(NSDictionary *global, NSDictionary *channel) {
+    // Clé simple = count@channel|count@global — si les deux counts n'ont pas changé,
+    // la liste est identique dans la grande majorité des cas.
+    return [NSString stringWithFormat:@"%lu|%lu",
+            (unsigned long)channel.count, (unsigned long)global.count];
+}
+
 - (void)_buildAndShowEmotePickerForView:(UIView *)chatInputView {
     // ── Rassembler toutes les emotes (channel d'abord, puis globales) ──────
     __block NSDictionary *global, *channel;
@@ -1381,58 +1407,50 @@ static const char kS7TVTaskKey = 0;
         channel = self.channelEmotes ?: @{};
     });
 
-    NSMutableArray<SevenTVEmote *> *all = [NSMutableArray array];
-    // Channel en premier (plus pertinent)
-    for (NSString *key in [channel.allKeys sortedArrayUsingSelector:@selector(caseInsensitiveCompare:)])
-        [all addObject:channel[key]];
-    for (NSString *key in [global.allKeys sortedArrayUsingSelector:@selector(caseInsensitiveCompare:)]) {
-        if (!channel[key]) [all addObject:global[key]]; // pas de doublons
+    // ── Tri mis en cache ─────────────────────────────────────────────────────
+    // Le tri de 500 emotes sur main thread prend ~20-40ms → lag visible à chaque ouverture.
+    // On le met en cache et on ne retrie que si les sets ont changé.
+    NSString *setKey = s7tv_emoteSetKey(global, channel);
+    if (!s_cachedSortedEmotes || ![setKey isEqualToString:s_cachedSortKey]) {
+        NSMutableArray<SevenTVEmote *> *all = [NSMutableArray array];
+        // Channel en premier (plus pertinent)
+        for (NSString *key in [channel.allKeys sortedArrayUsingSelector:@selector(caseInsensitiveCompare:)])
+            [all addObject:channel[key]];
+        for (NSString *key in [global.allKeys sortedArrayUsingSelector:@selector(caseInsensitiveCompare:)]) {
+            if (!channel[key]) [all addObject:global[key]]; // pas de doublons
+        }
+        NSArray<SevenTVEmote *> *sorted = [all sortedArrayUsingComparator:
+            ^NSComparisonResult(SevenTVEmote *a, SevenTVEmote *b) {
+                BOOL aSquare = (a.width > 0 && a.height > 0 && a.width == a.height);
+                BOOL bSquare = (b.width > 0 && b.height > 0 && b.width == b.height);
+                if (aSquare != bSquare) return aSquare ? NSOrderedAscending : NSOrderedDescending;
+                NSInteger aArea = a.width * a.height;
+                NSInteger bArea = b.width * b.height;
+                if (aArea == 0 && bArea == 0)
+                    return [a.emoteName compare:b.emoteName options:NSCaseInsensitiveSearch|NSNumericSearch];
+                if (aArea == 0) return NSOrderedDescending;
+                if (bArea == 0) return NSOrderedAscending;
+                if (aArea < bArea) return NSOrderedAscending;
+                if (aArea > bArea) return NSOrderedDescending;
+                NSString *aName = a.emoteName ?: @"";
+                NSString *bName = b.emoteName ?: @"";
+                NSUInteger len = MIN(aName.length, bName.length);
+                for (NSUInteger i = 0; i < len; i++) {
+                    unichar ac = [aName characterAtIndex:i];
+                    unichar bc = [bName characterAtIndex:i];
+                    if (ac >= 'a' && ac <= 'z') ac -= 32;
+                    if (bc >= 'a' && bc <= 'z') bc -= 32;
+                    if (ac < bc) return NSOrderedAscending;
+                    if (ac > bc) return NSOrderedDescending;
+                }
+                if (aName.length < bName.length) return NSOrderedAscending;
+                if (aName.length > bName.length) return NSOrderedDescending;
+                return NSOrderedSame;
+            }];
+        s_cachedSortedEmotes = sorted;
+        s_cachedSortKey      = setKey;
     }
-    // Tri :
-    //   1. Emotes CARRÉES en premier (width == height), du plus petit au plus grand
-    //   2. Emotes NON-CARRÉES ensuite, du plus petit au plus grand (surface = w × h)
-    //   3. Emotes sans dimensions (w=0 ou h=0) tout en dernier
-    //   4. À taille égale : ordre alphabétique du nom
-    //      → !, ?, chiffres (0-9) avant les lettres (A-Z)
-    //        (Unicode : ! = 33, ? = 63, '0'-'9' = 48-57, 'A'-'Z' = 65-90)
-    NSArray<SevenTVEmote *> *sorted = [all sortedArrayUsingComparator:
-        ^NSComparisonResult(SevenTVEmote *a, SevenTVEmote *b) {
-            BOOL aSquare = (a.width > 0 && a.height > 0 && a.width == a.height);
-            BOOL bSquare = (b.width > 0 && b.height > 0 && b.width == b.height);
-            // 1. Carrées avant non-carrées
-            if (aSquare != bSquare) return aSquare ? NSOrderedAscending : NSOrderedDescending;
-            // 2. Plus petite surface en premier
-            NSInteger aArea = a.width * a.height;
-            NSInteger bArea = b.width * b.height;
-            // Emotes sans dimensions → tout en dernier
-            if (aArea == 0 && bArea == 0) {
-                // Même groupe "sans dims" → trier alphabétiquement
-                return [a.emoteName compare:b.emoteName options:NSCaseInsensitiveSearch|NSNumericSearch];
-            }
-            if (aArea == 0) return NSOrderedDescending;
-            if (bArea == 0) return NSOrderedAscending;
-            if (aArea < bArea) return NSOrderedAscending;
-            if (aArea > bArea) return NSOrderedDescending;
-            // 3. Même taille → alphabétique (!, ?, 0-9 avant A-Z en Unicode)
-            //    On compare caractère par caractère pour respecter l'ordre ASCII :
-            //    spéciaux < chiffres < majuscules < minuscules
-            NSString *aName = a.emoteName ?: @"";
-            NSString *bName = b.emoteName ?: @"";
-            NSUInteger len = MIN(aName.length, bName.length);
-            for (NSUInteger i = 0; i < len; i++) {
-                unichar ac = [aName characterAtIndex:i];
-                unichar bc = [bName characterAtIndex:i];
-                // Convertir minuscules en majuscules pour comparaison insensible à la casse
-                if (ac >= 'a' && ac <= 'z') ac -= 32;
-                if (bc >= 'a' && bc <= 'z') bc -= 32;
-                if (ac < bc) return NSOrderedAscending;
-                if (ac > bc) return NSOrderedDescending;
-            }
-            if (aName.length < bName.length) return NSOrderedAscending;
-            if (aName.length > bName.length) return NSOrderedDescending;
-            return NSOrderedSame;
-        }];
-    self.emotePickerAllEmotes = sorted;
+    self.emotePickerAllEmotes = s_cachedSortedEmotes;
     self.emotePickerEmotes    = self.emotePickerAllEmotes;
     [self _updatePickerArraysForSearch:@""];
 
@@ -2064,22 +2082,25 @@ referenceSizeForHeaderInSection:(NSInteger)section {
     // chat → disponible immédiatement dans le picker, et vice versa.
     NSCachedURLResponse *cached = [[SevenTVURLProtocol sharedEmoteCache] cachedResponseForRequest:req];
     if (cached.data) {
-        // Animé → queue SÉRIE (1 decode à la fois → pas de spike RAM)
-        // Statique → queue concurrent (rapide, pas de risque mémoire)
-        dispatch_queue_t decodeQ = wantsAnimated
-            ? [self _animationDecodeQueue]
-            : dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0);
-        NSData *imgData = cached.data;
-        dispatch_async(decodeQ, ^{
-            UIImage *img = [self _decodePickerImageData:imgData wantsAnimated:wantsAnimated];
-            dispatch_async(dispatch_get_main_queue(), ^{
-                NSIndexPath *nowPath = [cv indexPathForCell:cell];
-                if (nowPath && nowPath.section == indexPath.section
-                            && nowPath.item   == indexPath.item) {
-                    iv.image = img;
-                }
+        if (wantsAnimated) {
+            // Animé → décodage asynchrone (queue série, ~5-10ms par frame)
+            NSData *imgData = cached.data;
+            dispatch_async([self _animationDecodeQueue], ^{
+                UIImage *img = [self _decodePickerImageData:imgData wantsAnimated:YES];
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    NSIndexPath *nowPath = [cv indexPathForCell:cell];
+                    if (nowPath && nowPath.section == indexPath.section
+                                && nowPath.item   == indexPath.item) {
+                        iv.image = img;
+                    }
+                });
             });
-        });
+        } else {
+            // Statique → décodage SYNCHRONE (frame 0 uniquement, <1ms)
+            // Évite le flash "cellule vide puis image" visible quand tout vient du cache.
+            UIImage *img = [self _decodePickerImageData:cached.data wantsAnimated:NO];
+            iv.image = img; // immédiat, même call stack que cellForItem
+        }
         return cell;
     }
 
@@ -2177,27 +2198,60 @@ referenceSizeForHeaderInSection:(NSInteger)section {
     NSString *toAppend = [NSString stringWithFormat:@"%@%@ ", prefix, emote.emoteName];
 
     // ── Étape 4: insertion ─────────────────────────────────────────────────
-    // inputAccessoryView garantit que textView EST firstResponder.
-    // insertText: passe par UITextInput que SwiftUI observe -> le @Binding est mis à jour.
+    // insertText: seul ne suffit pas : le UITextView de Twitch est un
+    // composant SwiftUI bridgé. UITextInput/insertText: modifie le buffer
+    // interne de UITextView mais ne déclenche PAS le @Binding SwiftUI ni
+    // textViewDidChange: du côté natif de Twitch.
+    //
+    // Solution : simuler une saisie clavier complète —
+    //   1. Copier le texte voulu dans le presse-papier
+    //   2. Appeler paste: sur le firstResponder
+    // paste: passe par UITextInput.insertText: ET déclenche le
+    // UITextViewTextDidChangeNotification + le delegate textViewDidChange:
+    // que Twitch observe → le binding SwiftUI est mis à jour.
+    //
+    // Effet de bord UIPasteboard : le contenu du presse-papier est temporairement
+    // remplacé. On restaure l'ancien contenu juste après via dispatch_async.
     BOOL inserted = NO;
 
     if (textView) {
-        // Cas normal: textView est firstResponder via inputAccessoryView
-        if (textView.isFirstResponder) {
-            textView.selectedRange = NSMakeRange(textView.text.length, 0);
-            [textView insertText:toAppend];
-            [self log:@"✅ insertText: direct (firstResponder) → «Text%@»", toAppend];
+        // Aller à la fin
+        textView.selectedRange = NSMakeRange(textView.text.length, 0);
+
+        // Sauvegarder et remplacer le presse-papier
+        UIPasteboard *pb = [UIPasteboard generalPasteboard];
+        NSString *savedString = pb.string;
+        pb.string = toAppend;
+
+        // paste: déclenche le pipeline UITextInput complet + notifie SwiftUI
+        if ([textView respondsToSelector:@selector(paste:)]) {
+            [textView paste:nil];
             inserted = YES;
+            [self log:@"✅ paste: emote → «%@»", emote.emoteName];
         } else {
-            // Ne devrait plus arriver avec inputAccessoryView, mais fallback
-            [textView becomeFirstResponder];
-            dispatch_async(dispatch_get_main_queue(), ^{
-                textView.selectedRange = NSMakeRange(textView.text.length, 0);
-                [textView insertText:toAppend];
-                [self log:@"✅ insertText: (après becomeFirstResponder) → «%@»", toAppend];
-            });
+            // Ultime fallback
+            [textView insertText:toAppend];
             inserted = YES;
+            [self log:@"⚠️ paste: non dispo → insertText: fallback"];
         }
+
+        // Restaurer le presse-papier après l'animation de paste
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            pb.string = savedString ?: @"";
+        });
+
+        // Forcer la notification UITextViewTextDidChangeNotification
+        // au cas où paste: ne l'aurait pas déclenchée (bridge SwiftUI parfois silencieux)
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[NSNotificationCenter defaultCenter]
+                postNotificationName:UITextViewTextDidChangeNotification
+                              object:textView];
+            // Déclencher aussi le delegate si Twitch l'a assigné
+            if ([textView.delegate respondsToSelector:@selector(textViewDidChange:)]) {
+                [textView.delegate textViewDidChange:textView];
+            }
+        });
     } else if (textField) {
         [textField becomeFirstResponder];
         [(id<UIKeyInput>)textField insertText:toAppend];
