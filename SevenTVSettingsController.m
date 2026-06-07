@@ -17,9 +17,6 @@
 #import "SevenTVURLProtocol.h"
 #import "SevenTVLogo.h"
 
-@interface SevenTVFavoritesListController : UITableViewController
-@end
-
 // ─────────────────────────────────────────────────────────────────────────────
 // MARK: - Palette couleurs
 // ─────────────────────────────────────────────────────────────────────────────
@@ -904,9 +901,6 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
 // MARK: - SevenTVFavoritesListController
 // Liste de toutes les emotes en favoris (IDs 7TV + noms résolus).
 // ─────────────────────────────────────────────────────────────────────────────
-
-@interface SevenTVFavoritesListController : UITableViewController
-@end
 
 @implementation SevenTVFavoritesListController {
     NSArray<NSString *> *_favIDs;      // IDs purs (sans préfixe)
