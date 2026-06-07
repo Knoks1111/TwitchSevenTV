@@ -285,11 +285,13 @@ static void S7TVFetchBadgeImage(NSString *badgeKey, void(^completion)(UIImage *)
     os_unfair_lock_unlock(&s_badgeLock);
 
     if (!imgURL) {
-        if (completion) completion(nil);
+        // IMPORTANT : appel ASYNC pour éviter la récursion synchrone
+        // (configureWithMessage → fetch(nil) → configureWithMessage → … → stack overflow)
+        if (completion) dispatch_async(dispatch_get_main_queue(), ^{ completion(nil); });
         return;
     }
     if (cached) {
-        if (completion) completion(cached);
+        if (completion) dispatch_async(dispatch_get_main_queue(), ^{ completion(cached); });
         return;
     }
 
@@ -492,7 +494,9 @@ static void S7TVFetchBadgeImage(NSString *badgeKey, void(^completion)(UIImage *)
             NSString *badgeVersion = badge[@"version"] ?: @"1";
             NSString *key = [NSString stringWithFormat:@"%@/%@", badgeName, badgeVersion];
             S7TVFetchBadgeImage(key, ^(UIImage *fetched) {
-                if (weakSelf && weakSelf.currentMessage == capturedMsg) {
+                // Ne reconfigurer QUE si on a une image — évite la boucle infinie
+                // quand le badge est inconnu (fetched == nil en boucle)
+                if (fetched && weakSelf && weakSelf.currentMessage == capturedMsg) {
                     [weakSelf configureWithMessage:capturedMsg];
                 }
             });
