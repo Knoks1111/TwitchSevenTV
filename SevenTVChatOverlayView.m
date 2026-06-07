@@ -146,27 +146,24 @@ static const NSUInteger kMaxMessages = 200;
     // Trimmer à 200 messages
     while (self.messages.count >= kMaxMessages) {
         [self.messages removeObjectAtIndex:0];
+        // Après trim, la tableView est désynchronisée → on doit reloadData
+        // mais on attend d'avoir ajouté le nouveau message d'abord
     }
 
     [self.messages addObject:message];
 
-    NSInteger newRow = (NSInteger)self.messages.count - 1;
-    NSIndexPath *ip  = [NSIndexPath indexPathForRow:newRow inSection:0];
-
-    // CRITIQUE : insertRowsAtIndexPaths avec UITableViewAutomaticDimension crashe
-    // (SIGSEGV dans le layout engine) si la tableView n'a pas encore été layoutée
-    // (frame zéro ou pas encore dans la hiérarchie de fenêtre).
-    // On force reloadData dans ce cas.
-    BOOL tableViewReady = (self.tableView.window != nil)
-                       && !CGSizeEqualToSize(self.tableView.bounds.size, CGSizeZero);
-
+    NSInteger newRow     = (NSInteger)self.messages.count - 1;
+    NSIndexPath *ip      = [NSIndexPath indexPathForRow:newRow inSection:0];
     NSInteger visibleRows = [self.tableView numberOfRowsInSection:0];
-    if (tableViewReady && visibleRows == newRow) {
+
+    if (visibleRows == newRow) {
+        // Cas normal : insertRows (ne perturbe pas le scroll en cours)
         [self.tableView beginUpdates];
         [self.tableView insertRowsAtIndexPaths:@[ip]
                               withRowAnimation:UITableViewRowAnimationNone];
         [self.tableView endUpdates];
     } else {
+        // Désynchronisation (trim, premier message, etc.) → reloadData
         [self.tableView reloadData];
     }
 
@@ -189,8 +186,9 @@ static const NSUInteger kMaxMessages = 200;
          cellForRowAtIndexPath:(NSIndexPath *)ip {
     SevenTVChatCell *cell = [tv dequeueReusableCellWithIdentifier:kSevenTVChatCellReuseID
                                                      forIndexPath:ip];
-    // Guard out-of-bounds : peut arriver si reloadData est en cours
+    // Guard out-of-bounds
     if (ip.row < 0 || (NSUInteger)ip.row >= self.messages.count) {
+        [cell prepareForReuse]; // vide le contenu résiduel
         return cell;
     }
     SevenTVChatMessage *msg = self.messages[ip.row];

@@ -371,6 +371,14 @@ static void S7TVFetchBadgeImage(NSString *badgeKey, void(^completion)(UIImage *)
     }
 }
 
+- (void)prepareForReuse {
+    [super prepareForReuse];
+    // Vider immédiatement pour qu'on ne voie jamais l'ancienne emote/texte
+    // pendant que configureWithMessage: recalcule le nouvel attributedText.
+    self.textView.attributedText = nil;
+    self.currentMessage = nil;
+}
+
 - (void)configureWithMessage:(SevenTVChatMessage *)message {
     self.currentMessage = message;
 
@@ -499,7 +507,7 @@ static void S7TVFetchBadgeImage(NSString *badgeKey, void(^completion)(UIImage *)
                 }
             }
 
-            // Lookup cache via URL CDN réelle (fix v2)
+            // Lookup cache via URL CDN réelle
             NSString *emoteID = seg[@"emoteID"];
             NSString *cdnURLStr = [NSString stringWithFormat:
                 @"https://cdn.7tv.app/emote/%@/4x.webp", emoteID];
@@ -511,15 +519,28 @@ static void S7TVFetchBadgeImage(NSString *badgeKey, void(^completion)(UIImage *)
             attachment.targetSize     = targetSize;
             attachment.baselineOffset = -5.0;
 
+            UIImage *emoteImg = nil;
             if (cached.data) {
-                UIImage *img = [UIImage imageWithData:cached.data
-                                               scale:[UIScreen mainScreen].scale];
-                if (img) attachment.image = img;
+                emoteImg = [UIImage imageWithData:cached.data
+                                           scale:[UIScreen mainScreen].scale];
             }
 
-            if (!attachment.image) {
-                // Placeholder garanti non-nil
+            if (emoteImg) {
+                attachment.image = emoteImg;
+            } else {
+                // Image pas encore en cache → placeholder + prefetch + reconfigure
                 attachment.image = S7TVPlaceholderImage(targetSize);
+
+                __weak SevenTVChatCell *weakSelf = self;
+                SevenTVChatMessage *capturedMsg  = message;
+                [SevenTVURLProtocol prefetchEmoteID:emoteID completion:^{
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        // Reconfigurer seulement si la cellule affiche encore ce message
+                        if (weakSelf && weakSelf.currentMessage == capturedMsg) {
+                            [weakSelf configureWithMessage:capturedMsg];
+                        }
+                    });
+                }];
             }
 
             [attrStr appendAttributedString:
