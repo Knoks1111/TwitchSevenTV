@@ -153,11 +153,15 @@ static const NSUInteger kMaxMessages = 200;
     NSInteger newRow = (NSInteger)self.messages.count - 1;
     NSIndexPath *ip  = [NSIndexPath indexPathForRow:newRow inSection:0];
 
-    // Utiliser insertRows uniquement si la tableView est cohérente avec notre
-    // tableau (visibleRows == newRow signifie qu'elle connaît déjà newRow-1 lignes).
-    // En cas de désynchronisation (trim, première insertion, etc.) → reloadData.
+    // CRITIQUE : insertRowsAtIndexPaths avec UITableViewAutomaticDimension crashe
+    // (SIGSEGV dans le layout engine) si la tableView n'a pas encore été layoutée
+    // (frame zéro ou pas encore dans la hiérarchie de fenêtre).
+    // On force reloadData dans ce cas.
+    BOOL tableViewReady = (self.tableView.window != nil)
+                       && !CGSizeEqualToSize(self.tableView.bounds.size, CGSizeZero);
+
     NSInteger visibleRows = [self.tableView numberOfRowsInSection:0];
-    if (visibleRows == newRow) {
+    if (tableViewReady && visibleRows == newRow) {
         [self.tableView beginUpdates];
         [self.tableView insertRowsAtIndexPaths:@[ip]
                               withRowAnimation:UITableViewRowAnimationNone];

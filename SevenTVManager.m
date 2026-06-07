@@ -36,6 +36,10 @@
 #import "SevenTVURLProtocol.h"
 #import "SevenTVLogo.h"
 #import <objc/runtime.h>
+#import <execinfo.h>
+#import <signal.h>
+#import <unistd.h>
+#import <fcntl.h>
 
 // ============================================================
 // Constante de notification
@@ -483,7 +487,7 @@ static void s7tv_uncaughtExceptionHandler(NSException *exception) {
         NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
     NSString *path = [docs stringByAppendingPathComponent:@"s7tv.log"];
     NSString *crash = [NSString stringWithFormat:
-        @"\n========== CRASH ==========\n"
+        @"\n========== CRASH (NSException) ==========\n"
         @"Name: %@\nReason: %@\nStack:\n%@\n===========================\n",
         exception.name, exception.reason,
         [exception.callStackSymbols componentsJoinedByString:@"\n"]];
@@ -497,9 +501,61 @@ static void s7tv_uncaughtExceptionHandler(NSException *exception) {
     }
 }
 
+// Handler pour les signaux Unix (SIGSEGV, SIGABRT, SIGBUS, SIGILL)
+// Ces crashs ne passent PAS par NSSetUncaughtExceptionHandler.
+static void s7tv_signalHandler(int sig) {
+    NSString *docs = [NSSearchPathForDirectoriesInDomains(
+        NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
+    NSString *path = [docs stringByAppendingPathComponent:@"s7tv.log"];
+
+    const char *sigName = "UNKNOWN";
+    switch (sig) {
+        case SIGSEGV: sigName = "SIGSEGV (bad memory access)"; break;
+        case SIGABRT: sigName = "SIGABRT (abort / assertion)"; break;
+        case SIGBUS:  sigName = "SIGBUS (bus error)";          break;
+        case SIGILL:  sigName = "SIGILL (illegal instruction)"; break;
+        case SIGFPE:  sigName = "SIGFPE (arithmetic error)";   break;
+    }
+
+    // callstack via backtrace (symbols pas dispo sans dSYM, mais les adresses suffisent)
+    void *frames[64];
+    int count = backtrace(frames, 64);
+    char **symbols = backtrace_symbols(frames, count);
+
+    NSMutableString *stack = [NSMutableString string];
+    for (int i = 0; i < count && symbols; i++) {
+        [stack appendFormat:@"  %s\n", symbols[i]];
+    }
+
+    NSString *crash = [NSString stringWithFormat:
+        @"\n========== CRASH (Signal) ==========\n"
+        @"Signal: %s (%d)\nStack:\n%@===========================\n",
+        sigName, sig, stack];
+
+    // Écriture synchrone — on est dans un signal handler, pas de dispatch
+    int fd = open([path fileSystemRepresentation], O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd >= 0) {
+        const char *bytes = [crash UTF8String];
+        write(fd, bytes, strlen(bytes));
+        close(fd);
+    }
+
+    // Réinstaller le handler par défaut et re-envoyer le signal pour générer le crash natif
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
 - (void)setup {
     // Installer le handler de crash non rattrapé → écrit dans s7tv.log
     NSSetUncaughtExceptionHandler(&s7tv_uncaughtExceptionHandler);
+
+    // Installer les signal handlers pour SIGSEGV/SIGABRT/SIGBUS/SIGILL/SIGFPE
+    // (ces crashs ne passent PAS par NSSetUncaughtExceptionHandler)
+    signal(SIGSEGV, s7tv_signalHandler);
+    signal(SIGABRT, s7tv_signalHandler);
+    signal(SIGBUS,  s7tv_signalHandler);
+    signal(SIGILL,  s7tv_signalHandler);
+    signal(SIGFPE,  s7tv_signalHandler);
 
     [self log:@"SevenTVManager: setup démarré"];
 
