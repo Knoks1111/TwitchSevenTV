@@ -71,6 +71,14 @@ static const NSUInteger kMaxMessages = 200;
            selector:@selector(handleDeleteMessage:)
                name:@"S7TVChatDeleteMessage"
              object:nil];
+
+    // Badges chargés (hardcodés + API Twitch) → recharger UNIQUEMENT les cellules
+    // visibles. Évite de reconstruire les NSAttributedString de toutes les 200 cellules
+    // d'un coup, ce qui bloque le main thread plusieurs secondes.
+    [nc addObserver:self
+           selector:@selector(_badgesLoaded:)
+               name:@"S7TVBadgesLoaded"
+             object:nil];
 }
 
 - (void)dealloc {
@@ -138,37 +146,70 @@ static const NSUInteger kMaxMessages = 200;
     if (msgId) [self deleteMessageWithID:msgId];
 }
 
+// FIX — badges chargés : recharger UNIQUEMENT les cellules visibles.
+// Avant : chaque cellule avait son propre observer et appelait configureWithMessage:
+// → jusqu'à 200 NSAttributedString reconstruits simultanément → freeze principal.
+// Maintenant : une seule source de vérité ici, reloadRowsAtIndexPaths: sur les
+// cellules visibles seulement (typiquement 10–15 cellules à l'écran).
+- (void)_badgesLoaded:(NSNotification *)n {
+    NSArray<NSIndexPath *> *visible = [self.tableView indexPathsForVisibleRows];
+    if (visible.count > 0) {
+        [self.tableView reloadRowsAtIndexPaths:visible
+                              withRowAnimation:UITableViewRowAnimationNone];
+    }
+}
+
 // ────────────────────────────────────────────────────────────
 // MARK: - Logique interne (main thread uniquement)
 // ────────────────────────────────────────────────────────────
 
 - (void)_addMessageOnMain:(SevenTVChatMessage *)message {
-    // Trimmer à 200 messages
-    while (self.messages.count >= kMaxMessages) {
-        [self.messages removeObjectAtIndex:0];
-        // Après trim, la tableView est désynchronisée → on doit reloadData
-        // mais on attend d'avoir ajouté le nouveau message d'abord
-    }
+    // FIX — Trim + reloadData = freeze au-delà de 200 messages.
+    //
+    // AVANT : on retirait du tableau PUIS on comparait visibleRows vs newRow.
+    // Comme la table n'avait pas encore été mise à jour, les deux valeurs
+    // divergeaient systématiquement → reloadData sur CHAQUE nouveau message
+    // dès que le buffer est plein → main thread bloqué en permanence.
+    //
+    // MAINTENANT :
+    //   • Pas de trim → insertRows simple (chemin normal).
+    //   • Trim (buffer plein) → batch beginUpdates/deleteRows+insertRows/endUpdates.
+    //     La table reste synchronisée avec le tableau sans jamais faire reloadData.
 
+    BOOL needsTrim = (self.messages.count >= kMaxMessages);
+
+    if (needsTrim) {
+        [self.messages removeObjectAtIndex:0];
+    }
     [self.messages addObject:message];
 
-    NSInteger newRow     = (NSInteger)self.messages.count - 1;
-    NSIndexPath *ip      = [NSIndexPath indexPathForRow:newRow inSection:0];
-    NSInteger visibleRows = [self.tableView numberOfRowsInSection:0];
+    NSInteger newRow = (NSInteger)self.messages.count - 1;
+    NSIndexPath *newIP = [NSIndexPath indexPathForRow:newRow inSection:0];
 
-    if (visibleRows == newRow) {
-        // Cas normal : insertRows (ne perturbe pas le scroll en cours)
+    if (needsTrim) {
+        // Supprimer la première ligne (décalée) + insérer la nouvelle dernière ligne
+        NSIndexPath *firstIP = [NSIndexPath indexPathForRow:0 inSection:0];
         [self.tableView beginUpdates];
-        [self.tableView insertRowsAtIndexPaths:@[ip]
+        [self.tableView deleteRowsAtIndexPaths:@[firstIP]
+                              withRowAnimation:UITableViewRowAnimationNone];
+        [self.tableView insertRowsAtIndexPaths:@[newIP]
                               withRowAnimation:UITableViewRowAnimationNone];
         [self.tableView endUpdates];
     } else {
-        // Désynchronisation (trim, premier message, etc.) → reloadData
-        [self.tableView reloadData];
+        NSInteger visibleRows = [self.tableView numberOfRowsInSection:0];
+        if (visibleRows == newRow) {
+            [self.tableView beginUpdates];
+            [self.tableView insertRowsAtIndexPaths:@[newIP]
+                                  withRowAnimation:UITableViewRowAnimationNone];
+            [self.tableView endUpdates];
+        } else {
+            // Désynchronisation initiale (premier message, reloadData forcé externe, etc.)
+            [self.tableView reloadData];
+        }
     }
 
     if (self.autoScroll && self.messages.count > 0) {
-        [self.tableView scrollToRowAtIndexPath:ip
+        [self.tableView scrollToRowAtIndexPath:newIP
                               atScrollPosition:UITableViewScrollPositionBottom
                                       animated:NO];
     }

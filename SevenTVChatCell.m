@@ -81,30 +81,50 @@ static NSDictionary<NSString *, NSString *> *S7TVHardcodedBadgeURLs(void) {
             @"subscriber/3":  @"https://static-cdn.jtvnw.net/badges/v1/5d9f2208-5dd8-11e7-8513-2ff4adfae661/2",
             // bits (quelques paliers)
             @"bits/1":        @"https://static-cdn.jtvnw.net/badges/v1/73b5c3fb-24f9-4a82-a852-2f475b59411c/2",
-            @"bits/100":      @"https://static-cdn.jtvnaw.net/badges/v1/0d85a29e-79ad-4c63-a285-3acd2c66f2ba/2",
-            @"bits/1000":     @"https://static-cdn.jtvnaw.net/badges/v1/62310ba7-9916-4235-9eba-40110d67ad04/2",
-            @"bits/5000":     @"https://static-cdn.jtvnaw.net/badges/v1/fa0f6772-f66c-4018-9c6d-82e4e5f6c547/2",
-            @"bits/10000":    @"https://static-cdn.jtvnaw.net/badges/v1/3bade859-5a41-4e6b-a8df-c8c58a67b6c5/2",
-            @"bits/100000":   @"https://static-cdn.jtvnaw.net/badges/v1/96f0540f-aa63-49e1-a8b3-259ece3bd098/2",
+            @"bits/100":      @"https://static-cdn.jtvnw.net/badges/v1/0d85a29e-79ad-4c63-a285-3acd2c66f2ba/2",
+            @"bits/1000":     @"https://static-cdn.jtvnw.net/badges/v1/62310ba7-9916-4235-9eba-40110d67ad04/2",
+            @"bits/5000":     @"https://static-cdn.jtvnw.net/badges/v1/fa0f6772-f66c-4018-9c6d-82e4e5f6c547/2",
+            @"bits/10000":    @"https://static-cdn.jtvnw.net/badges/v1/3bade859-5a41-4e6b-a8df-c8c58a67b6c5/2",
+            @"bits/100000":   @"https://static-cdn.jtvnw.net/badges/v1/96f0540f-aa63-49e1-a8b3-259ece3bd098/2",
             // sub-gifter
-            @"sub-gifter/1":  @"https://static-cdn.jtvnaw.net/badges/v1/f1d8a71a-bb52-4d80-b432-ad91c2bd72ea/2",
-            @"sub-gifter/5":  @"https://static-cdn.jtvnaw.net/badges/v1/9ef4bcf8-3d2c-4870-a49f-a81da2a5e3c2/2",
-            @"sub-gifter/10": @"https://static-cdn.jtvnaw.net/badges/v1/e25b1c52-cb4c-4d02-86ff-bf4f4af4d3d2/2",
-            @"sub-gifter/25": @"https://static-cdn.jtvnaw.net/badges/v1/56a6ef6d-c5a8-4cf9-abc0-7a37014e4abc/2",
-            @"sub-gifter/50": @"https://static-cdn.jtvnaw.net/badges/v1/f985019b-63ec-4012-a3e3-26bca95ea551/2",
-            @"sub-gifter/100":@"https://static-cdn.jtvnaw.net/badges/v1/e10b4d84-9db5-4478-a4e1-4b2b6e69c9bb/2",
+            @"sub-gifter/1":  @"https://static-cdn.jtvnw.net/badges/v1/f1d8a71a-bb52-4d80-b432-ad91c2bd72ea/2",
+            @"sub-gifter/5":  @"https://static-cdn.jtvnw.net/badges/v1/9ef4bcf8-3d2c-4870-a49f-a81da2a5e3c2/2",
+            @"sub-gifter/10": @"https://static-cdn.jtvnw.net/badges/v1/e25b1c52-cb4c-4d02-86ff-bf4f4af4d3d2/2",
+            @"sub-gifter/25": @"https://static-cdn.jtvnw.net/badges/v1/56a6ef6d-c5a8-4cf9-abc0-7a37014e4abc/2",
+            @"sub-gifter/50": @"https://static-cdn.jtvnw.net/badges/v1/f985019b-63ec-4012-a3e3-26bca95ea551/2",
+            @"sub-gifter/100":@"https://static-cdn.jtvnw.net/badges/v1/e10b4d84-9db5-4478-a4e1-4b2b6e69c9bb/2",
         };
     });
     return d;
 }
 
-// Résout la clé badge → URL : d'abord la map runtime (depuis API), puis le hardcode.
+// Résout la clé badge → URL : d'abord la map runtime (depuis API), puis le hardcode,
+// puis un fallback générique pour les versions de badges channel-specific non mappées
+// (ex: subscriber/3000, subscriber/3006, sub-gifter/200...).
 // Appelé sous s_badgeLock uniquement.
 static NSString *S7TVResolveBadgeURL(NSString *key,
                                      NSDictionary *runtimeMap) {
+    // 1. Map runtime (badges API Twitch, overrides tout)
     NSString *url = runtimeMap[key];
     if (url.length) return url;
-    return S7TVHardcodedBadgeURLs()[key];
+
+    // 2. Hardcodé exact
+    url = S7TVHardcodedBadgeURLs()[key];
+    if (url.length) return url;
+
+    // 3. Fallback générique : badge channel-specific avec version inconnue.
+    //    Les badges subscriber/* ont des versions comme 3000/3006/3012 selon le channel.
+    //    On affiche le badge générique tier-1 plutôt que rien.
+    if ([key hasPrefix:@"subscriber/"]) {
+        return S7TVHardcodedBadgeURLs()[@"subscriber/0"];
+    }
+    if ([key hasPrefix:@"sub-gifter/"]) {
+        return S7TVHardcodedBadgeURLs()[@"sub-gifter/1"];
+    }
+    if ([key hasPrefix:@"bits/"]) {
+        return S7TVHardcodedBadgeURLs()[@"bits/1"];
+    }
+    return nil;
 }
 
 
@@ -392,24 +412,16 @@ static void S7TVFetchBadgeImage(NSString *badgeKey, void(^completion)(UIImage *)
 
         self.textView = tv;
 
-        [[NSNotificationCenter defaultCenter]
-            addObserver:self
-               selector:@selector(_badgesLoaded:)
-                   name:@"S7TVBadgesLoaded"
-                 object:nil];
+        // NOTE : l'observer S7TVBadgesLoaded EST GÉRÉ PAR SevenTVChatOverlayView.
+        // Il recharge uniquement les cellules visibles via reloadRowsAtIndexPaths:
+        // au lieu de faire configureWithMessage: sur chaque cellule individuellement.
+        // Ne pas re-ajouter d'observer ici → évite le freeze collectif.
     }
     return self;
 }
 
 - (void)dealloc {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
-}
-
-- (void)_badgesLoaded:(NSNotification *)n {
-    SevenTVChatMessage *msg = self.currentMessage;
-    if (msg && msg.badges.count > 0) {
-        [self configureWithMessage:msg];
-    }
 }
 
 - (void)prepareForReuse {
