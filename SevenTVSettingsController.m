@@ -325,6 +325,11 @@ typedef NS_ENUM(NSInteger, S7TVHomeSection) {
     }
 }
 
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    [self.tableView reloadData];
+}
+
 - (void)closeTapped {
     [self dismissViewControllerAnimated:YES completion:^{
         [[NSNotificationCenter defaultCenter]
@@ -797,7 +802,20 @@ typedef NS_ENUM(NSInteger, S7TVProxySection) {
 - (void)toggleSanitize:(UISwitch *)sw       { S7TVSetBool(kTCStreamProxySanitizeM3U8, sw.isOn); }
 - (void)toggleAnyHost:(UISwitch *)sw        { S7TVSetBool(kTCStreamProxyAnyM3U8Host, sw.isOn); }
 - (void)toggleGraphQL:(UISwitch *)sw        { S7TVSetBool(kTCStreamProxyGraphQLTokenOps, sw.isOn); }
-- (void)toggleLocalProxy:(UISwitch *)sw     { S7TVSetBool(kTCStreamProxyLocalEnabled, sw.isOn); [self refreshStatus]; }
+- (void)toggleLocalProxy:(UISwitch *)sw {
+    S7TVSetBool(kTCStreamProxyLocalEnabled, sw.isOn);
+    if (sw.isOn) {
+        NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+        NSInteger port = [ud integerForKey:kTCStreamProxyLocalPort];
+        if (port == 0) port = 9595;
+        NSString *loopbackURL = [NSString stringWithFormat:@"http://127.0.0.1:%ld/proxy?url=$url", (long)port];
+        [ud setObject:loopbackURL forKey:kTCStreamProxyURL];
+        [ud synchronize];
+        [self.tableView reloadSections:[NSIndexSet indexSetWithIndex:S7TVProxySectionAddress]
+                      withRowAnimation:UITableViewRowAnimationNone];
+    }
+    [self refreshStatus];
+}
 
 - (void)proxyURLChanged:(UITextField *)field {
     [[NSUserDefaults standardUserDefaults] setObject:field.text ?: @"" forKey:kTCStreamProxyURL];
@@ -1104,8 +1122,40 @@ typedef NS_ENUM(NSInteger, S7TVProxySection) {
     [self reload];
 }
 
+- (NSArray<NSString *> *)defaultBlockedURLs {
+    return @[
+        @"edge.ads.twitch.tv",
+        @"edge.ads.twitch.tv/ads",
+        @"edge.ads.twitch.tv/ads/feeds",
+        @"edge.ads.twitch.tv/ads/format",
+        @"edge.ads.twitch.tv/2018-01-01/ads",
+        @"edge.ads.twitch.tv/2018-01-01/vod-ads",
+        @"spade.twitch.tv",
+        @"spade.twitch.tv/track",
+        @"analytics.twitch.tv",
+        @"usher.ttvnw.net",
+        @"amazon-adsystem.com",
+        @"c.amazon-adsystem.com",
+        @"s.amazon-adsystem.com",
+        @"doubleclick",
+        @"googleads",
+        @"google-analytics",
+        @"branch.io",
+        @"api-safetrack.branch.io",
+        @"api-safetrack-eu.branch.io",
+    ];
+}
+
 - (void)reload {
-    self.entries = [NSMutableArray arrayWithArray:[[NSUserDefaults standardUserDefaults] arrayForKey:kTCBlockedURLList] ?: @[]];
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    NSArray *saved = [ud arrayForKey:kTCBlockedURLList];
+    if (!saved) {
+        // Premier lancement : injecter les règles par défaut
+        saved = [self defaultBlockedURLs];
+        [ud setObject:saved forKey:kTCBlockedURLList];
+        [ud synchronize];
+    }
+    self.entries = [NSMutableArray arrayWithArray:saved];
     [self.tableView reloadData];
 }
 
