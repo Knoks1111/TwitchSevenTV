@@ -34,7 +34,7 @@ TwitchSevenTV_LDFLAGS = \
     -Wl,-w
 
 # ── Frameworks Apple ──
-TwitchSevenTV_FRAMEWORKS = UIKit Foundation QuartzCore Network
+TwitchSevenTV_FRAMEWORKS = UIKit Foundation QuartzCore Network AVFoundation
 
 include $(THEOS_MAKE_PATH)/library.mk
 

@@ -19,7 +19,18 @@
 #import "SevenTVLogo.h"
 #import "SevenTVSettingsController.h"
 #import "SevenTVAdBlock.h"
+
+// Helpers inline pour éviter les implicit function declaration warnings
+static inline BOOL _s7tv_bool(NSString *key) {
+    return [[NSUserDefaults standardUserDefaults] boolForKey:key];
+}
+#undef S7TVBool
+#define S7TVBool(k) _s7tv_bool(k)
 #import <Network/Network.h>
+#import <AVFoundation/AVFoundation.h>
+
+// Forward declarations
+@class S7TVChannelPointsObserver;
 
 
 
@@ -107,24 +118,6 @@ static void s7tv_swizzle(Class targetClass,
             [[SevenTVManager sharedManager] log:@"🎬 _areEmoteAnimationsEnabled: %d → %d (offset=%td)",
              before, after, offset];
         });
-    }
-
-    // ── Auto Collect Channel Points ──────────────────────────────────────────
-    if ([selfClass isEqualToString:@"Twitch.ChannelPointsChatButton"] ||
-        [selfClass isEqualToString:@"_TtC6Twitch23ChannelPointsChatButton"]) {
-        if (S7TVBool(kTCLiveAutoCollectChannelPoints)) {
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
-                           dispatch_get_main_queue(), ^{
-                [self s7tv_tryAutoCollect];
-            });
-            @try {
-                [self addObserver:[S7TVChannelPointsObserver sharedObserver]
-                       forKeyPath:@"showsClaim"
-                          options:NSKeyValueObservingOptionNew
-                          context:(__bridge void * _Nullable)@"s7tv_autoCollect"];
-            } @catch (NSException *e) {}
-        }
-        return;
     }
 
     // ── Hijack du bouton Bits → bouton 7TV ───────────────────────────────────
@@ -981,8 +974,7 @@ static BOOL s7tv_shouldBlockURL(NSURL *url) {
 // Sanitize une playlist HLS — supprime les segments pub
 static NSString *s7tv_sanitizeM3U8(NSString *playlist) {
     if (!S7TVBool(kTCStreamProxySanitizeM3U8)) return playlist;
-    NSMutableArray<NSString *> *lines = [[playlist componentsSeparatedByString:@"
-"] mutableCopy];
+    NSMutableArray<NSString *> *lines = [[playlist componentsSeparatedByString:@"\n"] mutableCopy];
     NSMutableArray<NSString *> *out   = [NSMutableArray array];
     BOOL skipNext = NO;
     for (NSString *line in lines) {
@@ -1005,8 +997,7 @@ static NSString *s7tv_sanitizeM3U8(NSString *playlist) {
         skipNext = NO;
         [out addObject:line];
     }
-    return [out componentsJoinedByString:@"
-"];
+    return [out componentsJoinedByString:@"\n"];
 }
 
 // Hook NSURLSession — blocage URLs + sanitize HLS
@@ -1072,15 +1063,14 @@ static dispatch_queue_t s7tv_proxy_queue = nil;
 
 // Forward d'une connexion cliente vers le vrai serveur
 static void s7tv_forward_connection(nw_connection_t client_conn) {
-    nw_connection_retain(client_conn);
     nw_connection_start(client_conn);
 
     // Lire la requête HTTP du client
-    nw_connection_receive(client_conn, 1, 65536,
+    nw_connection_receive(client_conn, 1, (uint32_t)65536,
         ^(dispatch_data_t content, nw_content_context_t context, bool is_complete, nw_error_t receive_error) {
             if (!content || receive_error) {
                 nw_connection_cancel(client_conn);
-                nw_connection_release(client_conn);
+                // release handled by ARC
                 return;
             }
 
@@ -1110,7 +1100,7 @@ Content-Length: 0
                 nw_connection_send(client_conn, (dispatch_data_t)resp400Data,
                     NW_CONNECTION_DEFAULT_MESSAGE_CONTEXT, true, ^(nw_error_t e){
                     nw_connection_cancel(client_conn);
-                    nw_connection_release(client_conn);
+                    // release handled by ARC
                 });
                 return;
             }
@@ -1119,7 +1109,7 @@ Content-Length: 0
             NSURL *targetURL = [NSURL URLWithString:targetURLStr];
             if (!targetURL) {
                 nw_connection_cancel(client_conn);
-                nw_connection_release(client_conn);
+                // release handled by ARC
                 return;
             }
 
@@ -1131,8 +1121,7 @@ Content-Length: 0
 "];
             if (headersEnd.location != NSNotFound) {
                 NSString *headerSection = [reqStr substringToIndex:headersEnd.location];
-                NSArray *headerLines = [headerSection componentsSeparatedByString:@"
-"];
+                NSArray *headerLines = [headerSection componentsSeparatedByString:@"\n"];
                 for (NSUInteger i = 1; i < headerLines.count; i++) {
                     NSString *hl = headerLines[i];
                     NSRange colon = [hl rangeOfString:@": "];
@@ -1158,7 +1147,7 @@ Content-Length: 0
                         nw_connection_send(client_conn, (dispatch_data_t)d502,
                             NW_CONNECTION_DEFAULT_MESSAGE_CONTEXT, true, ^(nw_error_t e){
                             nw_connection_cancel(client_conn);
-                            nw_connection_release(client_conn);
+                            // release handled by ARC
                         });
                         return;
                     }
@@ -1195,7 +1184,7 @@ Content-Length: 0
                     nw_connection_send(client_conn, (dispatch_data_t)(NSData *)fullResp,
                         NW_CONNECTION_DEFAULT_MESSAGE_CONTEXT, true, ^(nw_error_t e){
                         nw_connection_cancel(client_conn);
-                        nw_connection_release(client_conn);
+                        // release handled by ARC
                     });
             }] resume];
         }
@@ -1354,105 +1343,265 @@ static void s7tv_detect_ad_in_playlist(NSString *playlist) {
 
 
 // ────────────────────────────────────────────────────────────
-// MARK: - Auto Collect Channel Points
+// MARK: - AVAssetResourceLoader (intercept HLS via AVFoundation)
 // ────────────────────────────────────────────────────────────
 
-@interface UIView (S7TVChannelPoints)
-- (void)s7tv_channelPoints_didMoveToWindow;
+@interface S7TVResourceLoaderDelegate : NSObject <AVAssetResourceLoaderDelegate>
++ (instancetype)shared;
 @end
 
-@implementation UIView (S7TVChannelPoints)
+@implementation S7TVResourceLoaderDelegate
 
-- (void)s7tv_channelPoints_didMoveToWindow {
-    [self s7tv_channelPoints_didMoveToWindow];
-
-    NSString *cn = NSStringFromClass([self class]);
-    if (![cn isEqualToString:@"Twitch.ChannelPointsChatButton"] &&
-        ![cn isEqualToString:@"_TtC6Twitch23ChannelPointsChatButton"]) return;
-
-    if (!S7TVBool(kTCLiveAutoCollectChannelPoints)) return;
-
-    // Observer showsClaim via KVO pour détecter quand le coffre apparaît
-    @try {
-        [self addObserver:(id)[NSNotificationCenter defaultCenter]
-               forKeyPath:@"showsClaim"
-                  options:NSKeyValueObservingOptionNew
-                  context:(__bridge void *)@"s7tv_autoCollect"];
-    } @catch (NSException *e) {}
-
-    // Check immédiat au cas où showsClaim est déjà YES
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        [self s7tv_tryAutoCollect];
-    });
-}
-
-- (void)s7tv_tryAutoCollect {
-    if (!S7TVBool(kTCLiveAutoCollectChannelPoints)) return;
-    @try {
-        NSNumber *showsClaim = [self valueForKey:@"showsClaim"];
-        if (showsClaim.boolValue) {
-            SEL claimSel = NSSelectorFromString(@"handleChannelPointsButtonTapped");
-            if ([self respondsToSelector:claimSel]) {
-                #pragma clang diagnostic push
-                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                [self performSelector:claimSel];
-                #pragma clang diagnostic pop
-                [[SevenTVManager sharedManager] log:@"✅ Channel points auto-collectés"];
-            }
-        }
-    } @catch (NSException *e) {
-        [[SevenTVManager sharedManager] log:@"⚠️ Auto collect erreur: %@", e.reason];
-    }
-}
-
-@end
-
-
-// KVO observer pour showsClaim
-@interface S7TVChannelPointsObserver : NSObject
-+ (instancetype)sharedObserver;
-@end
-
-@implementation S7TVChannelPointsObserver
-
-+ (instancetype)sharedObserver {
-    static S7TVChannelPointsObserver *inst;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{ inst = [[self alloc] init]; });
++ (instancetype)shared {
+    static S7TVResourceLoaderDelegate *inst;
+    static dispatch_once_t t;
+    dispatch_once(&t, ^{ inst = [[self alloc] init]; });
     return inst;
 }
 
-- (void)observeValueForKeyPath:(NSString *)keyPath
-                      ofObject:(id)object
-                        change:(NSDictionary *)change
-                       context:(void *)context {
-    if (context != (__bridge void *)@"s7tv_autoCollect") {
-        [super observeValueForKeyPath:keyPath ofObject:object change:change context:context];
-        return;
-    }
-    if (!S7TVBool(kTCLiveAutoCollectChannelPoints)) return;
-    NSNumber *newVal = change[NSKeyValueChangeNewKey];
-    if (!newVal.boolValue) return;
+- (BOOL)resourceLoader:(AVAssetResourceLoader *)resourceLoader
+    shouldWaitForLoadingOfRequestedResource:(AVAssetResourceLoadingRequest *)loadingRequest {
 
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if ([object isKindOfClass:[UIView class]]) {
-            [(UIView *)object s7tv_tryAutoCollect];
+    NSURL *url = loadingRequest.request.URL;
+    NSString *scheme = url.scheme;
+
+    // On intercepte seulement nos schémas custom s7tvhttp/s7tvhttps
+    if (![scheme isEqualToString:@"s7tvhttp"] && ![scheme isEqualToString:@"s7tvhttps"]) return NO;
+
+    // Reconstruire l'URL réelle
+    NSURLComponents *comps = [NSURLComponents componentsWithURL:url resolvingAgainstBaseURL:NO];
+    comps.scheme = [scheme isEqualToString:@"s7tvhttp"] ? @"http" : @"https";
+    NSURL *realURL = comps.URL;
+
+    // Passer par le proxy si configuré
+    NSString *proxyURLStr = [[NSUserDefaults standardUserDefaults] stringForKey:kTCStreamProxyURL];
+    NSURL *finalURL = realURL;
+    if (proxyURLStr.length && S7TVBool(kTCStreamProxyEnabled)) {
+        NSString *encoded = [realURL.absoluteString
+            stringByAddingPercentEncodingWithAllowedCharacters:
+            [NSCharacterSet URLQueryAllowedCharacterSet]];
+        NSString *proxied = [proxyURLStr stringByReplacingOccurrencesOfString:@"$url" withString:encoded];
+        finalURL = [NSURL URLWithString:proxied] ?: realURL;
+    }
+
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:finalURL];
+    req.timeoutInterval = 10.0;
+
+    NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration ephemeralSessionConfiguration];
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:cfg];
+
+    [[session dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+        if (err || !data) {
+            if (S7TVBool(kTCStreamProxyFallbackEnabled)) {
+                // Fallback direct
+                NSMutableURLRequest *directReq = [NSMutableURLRequest requestWithURL:realURL];
+                NSURLSession *directSession = [NSURLSession sessionWithConfiguration:
+                    [NSURLSessionConfiguration ephemeralSessionConfiguration]];
+                [[directSession dataTaskWithRequest:directReq
+                    completionHandler:^(NSData *d2, NSURLResponse *r2, NSError *e2) {
+                    if (d2 && !e2) {
+                        NSString *ct = ((NSHTTPURLResponse *)r2).allHeaderFields[@"Content-Type"] ?: @"application/x-mpegURL";
+                        [loadingRequest.dataRequest respondWithData:d2];
+                        [loadingRequest.contentInformationRequest setContentType:ct];
+                        [loadingRequest.contentInformationRequest setContentLength:d2.length];
+                        [loadingRequest finishLoading];
+                    } else {
+                        [loadingRequest finishLoadingWithError:e2];
+                    }
+                }] resume];
+            } else {
+                [loadingRequest finishLoadingWithError:err];
+            }
+            return;
         }
-    });
+
+        // Sanitize si M3U8
+        NSData *body = data;
+        NSString *ct = ((NSHTTPURLResponse *)resp).allHeaderFields[@"Content-Type"] ?: @"application/x-mpegURL";
+        if ([ct containsString:@"mpegurl"] || [realURL.path hasSuffix:@".m3u8"]) {
+            NSString *playlist = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+            if (playlist) {
+                s7tv_detect_ad_in_playlist(playlist);
+                NSString *sanitized = s7tv_sanitizeM3U8(playlist);
+                body = [sanitized dataUsingEncoding:NSUTF8StringEncoding];
+            }
+        }
+
+        [loadingRequest.dataRequest respondWithData:body];
+        [loadingRequest.contentInformationRequest setContentType:ct];
+        [loadingRequest.contentInformationRequest setContentLength:body.length];
+        [loadingRequest finishLoading];
+    }] resume];
+
+    return YES;
 }
 
 @end
 
-static void s7tv_swizzle_channel_points(void) {
-    // Remplacer l'observer NSNotificationCenter par le bon singleton
-    // On swizzle didMoveToWindow sur UIView (déjà fait) mais on doit
-    // enregistrer le bon observer KVO
-    // Le swizzle est fait via la catégorie UIView (S7TVChannelPoints)
-    // Il suffit d'enregistrer le sharedObserver pour activer le KVO
-    [S7TVChannelPointsObserver sharedObserver];
+// Hook AVURLAsset pour injecter le resource loader
+@interface AVURLAsset (S7TVProxy)
++ (instancetype)s7tv_assetWithURL:(NSURL *)URL options:(NSDictionary *)options;
+@end
 
-    [[SevenTVManager sharedManager] log:@"✅ Auto Collect Channel Points hook installé"];
+@implementation AVURLAsset (S7TVProxy)
+
++ (instancetype)s7tv_assetWithURL:(NSURL *)URL options:(NSDictionary *)options {
+    if (!S7TVBool(kTCStreamProxyUseResourceLoader)) {
+        return [self s7tv_assetWithURL:URL options:options];
+    }
+
+    // Remplacer http/https par s7tvhttp/s7tvhttps pour intercepter
+    NSString *scheme = URL.scheme.lowercaseString;
+    NSURL *hookedURL = URL;
+    if ([scheme isEqualToString:@"http"] || [scheme isEqualToString:@"https"]) {
+        NSURLComponents *comps = [NSURLComponents componentsWithURL:URL resolvingAgainstBaseURL:NO];
+        comps.scheme = [scheme isEqualToString:@"http"] ? @"s7tvhttp" : @"s7tvhttps";
+        hookedURL = comps.URL ?: URL;
+    }
+
+    AVURLAsset *asset = [self s7tv_assetWithURL:hookedURL options:options];
+    dispatch_queue_t q = dispatch_queue_create("app.7tv.resourceloader", DISPATCH_QUEUE_SERIAL);
+    [asset.resourceLoader setDelegate:[S7TVResourceLoaderDelegate shared] queue:q];
+    return asset;
+}
+
+@end
+
+static void s7tv_swizzle_avasset(void) {
+    s7tv_swizzle(object_getClass([AVURLAsset class]),
+                 object_getClass([AVURLAsset class]),
+                 @selector(assetWithURL:options:),
+                 @selector(s7tv_assetWithURL:options:));
+    [[SevenTVManager sharedManager] log:@"✅ AVAssetResourceLoader hook installé"];
+}
+
+
+// ────────────────────────────────────────────────────────────
+// MARK: - Proxy Token GraphQL Ops + Proxy Any .m3u8 Host
+// ────────────────────────────────────────────────────────────
+
+// Constantes GraphQL ops token
+static NSArray<NSString *> *s7tv_tokenOps(void) {
+    return @[@"StreamAccessToken", @"VodAccessToken", @"ClipAccessToken",
+             @"PlaybackAccessToken", @"PlaybackAccessToken_Template"];
+}
+
+static NSURL *s7tv_proxyURL(NSURL *originalURL) {
+    NSString *proxyURLStr = [[NSUserDefaults standardUserDefaults] stringForKey:kTCStreamProxyURL];
+    if (!proxyURLStr.length || !S7TVBool(kTCStreamProxyEnabled)) return nil;
+
+    NSString *encoded = [originalURL.absoluteString
+        stringByAddingPercentEncodingWithAllowedCharacters:
+        [NSCharacterSet URLQueryAllowedCharacterSet]];
+    NSString *proxied = [proxyURLStr stringByReplacingOccurrencesOfString:@"$url" withString:encoded];
+    return [NSURL URLWithString:proxied];
+}
+
+// Excluded URLs check
+static BOOL s7tv_isExcluded(NSURL *url) {
+    NSArray<NSString *> *excluded = [[NSUserDefaults standardUserDefaults]
+        arrayForKey:kTCExcludedURLList] ?: @[];
+    NSString *host = url.host.lowercaseString ?: @"";
+    NSString *absolute = url.absoluteString.lowercaseString;
+    for (NSString *rule in excluded) {
+        NSString *r = rule.lowercaseString;
+        if ([host containsString:r] || [absolute containsString:r]) return YES;
+    }
+    return NO;
+}
+
+@interface NSURLSession (S7TVProxy)
+- (NSURLSessionDataTask *)s7tv_proxy_dataTaskWithRequest:(NSURLRequest *)request
+    completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completionHandler;
+@end
+
+@implementation NSURLSession (S7TVProxy)
+
+- (NSURLSessionDataTask *)s7tv_proxy_dataTaskWithRequest:(NSURLRequest *)request
+    completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completionHandler {
+
+    NSURL *url = request.URL;
+
+    // Skip si exclu
+    if (s7tv_isExcluded(url)) {
+        return [self s7tv_proxy_dataTaskWithRequest:request completionHandler:completionHandler];
+    }
+
+    BOOL shouldProxy = NO;
+
+    // Proxy Token GraphQL Ops
+    if (S7TVBool(kTCStreamProxyGraphQLTokenOps) && S7TVBool(kTCStreamProxyEnabled)) {
+        NSString *body = [[NSString alloc] initWithData:request.HTTPBody encoding:NSUTF8StringEncoding] ?: @"";
+        for (NSString *op in s7tv_tokenOps()) {
+            if ([body containsString:op] || [url.absoluteString containsString:op]) {
+                shouldProxy = YES; break;
+            }
+        }
+    }
+
+    // Proxy Any .m3u8 Host
+    if (!shouldProxy && S7TVBool(kTCStreamProxyAnyM3U8Host) && S7TVBool(kTCStreamProxyEnabled)) {
+        NSString *path = url.path.lowercaseString;
+        if ([path hasSuffix:@".m3u8"] || [path containsString:@"m3u8"] ||
+            [url.host containsString:@"usher"] || [url.host containsString:@"ttvnw"]) {
+            shouldProxy = YES;
+        }
+    }
+
+    if (!shouldProxy) {
+        return [self s7tv_proxy_dataTaskWithRequest:request completionHandler:completionHandler];
+    }
+
+    NSURL *proxiedURL = s7tv_proxyURL(url);
+    if (!proxiedURL) {
+        return [self s7tv_proxy_dataTaskWithRequest:request completionHandler:completionHandler];
+    }
+
+    NSMutableURLRequest *proxiedReq = [request mutableCopy];
+    [proxiedReq setURL:proxiedURL];
+
+    if (!completionHandler) {
+        return [self s7tv_proxy_dataTaskWithRequest:proxiedReq completionHandler:nil];
+    }
+
+    void (^wrapped)(NSData *, NSURLResponse *, NSError *) =
+        ^(NSData *data, NSURLResponse *resp, NSError *err) {
+            // Fallback to direct si erreur
+            if (err && S7TVBool(kTCStreamProxyFallbackEnabled)) {
+                [[SevenTVManager sharedManager] log:@"⚠️ Proxy failed, fallback direct: %@", url.host];
+                NSURLSession *direct = [NSURLSession sessionWithConfiguration:
+                    [NSURLSessionConfiguration ephemeralSessionConfiguration]];
+                [[direct dataTaskWithRequest:request completionHandler:completionHandler] resume];
+                return;
+            }
+            // Sanitize M3U8
+            if (data && !err) {
+                NSString *path = url.path.lowercaseString;
+                if ([path hasSuffix:@".m3u8"] || [path containsString:@"m3u8"]) {
+                    NSString *pl = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+                    if (pl) {
+                        s7tv_detect_ad_in_playlist(pl);
+                        NSString *sanitized = s7tv_sanitizeM3U8(pl);
+                        data = [sanitized dataUsingEncoding:NSUTF8StringEncoding];
+                    }
+                }
+            }
+            if (completionHandler) completionHandler(data, resp, err);
+        };
+
+    return [self s7tv_proxy_dataTaskWithRequest:proxiedReq completionHandler:wrapped];
+}
+
+@end
+
+static void s7tv_swizzle_proxy_session(void) {
+    NSURLSession *probe = [NSURLSession sessionWithConfiguration:
+        [NSURLSessionConfiguration defaultSessionConfiguration]];
+    Class cls = object_getClass(probe);
+    s7tv_swizzle(cls, [NSURLSession class],
+        @selector(dataTaskWithRequest:completionHandler:),
+        @selector(s7tv_proxy_dataTaskWithRequest:completionHandler:));
+    [[SevenTVManager sharedManager] log:@"✅ Proxy GraphQL/m3u8 hook installé"];
 }
 
 __attribute__((constructor))
@@ -1487,8 +1636,11 @@ static void TwitchSevenTVInit(void) {
     // Blocked URLs + HLS Sanitizer
     s7tv_swizzle_adblock();
 
-    // Auto Collect Channel Points
-    s7tv_swizzle_channel_points();
+    // AVAssetResourceLoader
+    s7tv_swizzle_avasset();
+
+    // Proxy GraphQL Ops + Any .m3u8 Host
+    s7tv_swizzle_proxy_session();
 
     // Observer les changements Local Proxy
     s7tv_observe_proxy_prefs();
