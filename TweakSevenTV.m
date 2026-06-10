@@ -979,40 +979,116 @@ static void TwitchSevenTVInit(void) {
         [NSURLProtocol registerClass:[SevenTVURLProtocol class]];
         [[SevenTVManager sharedManager] log:@"✅ SevenTVManager prêt, URLProtocol enregistré"];
 
-        // ── Dump iVars + méthodes MessageStringView ──────────────────────
+        // ── Dump multi-classes chat ───────────────────────────────────────
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
-            Class msgView = NSClassFromString(@"Twitch.MessageStringView");
-            if (!msgView) {
-                [[SevenTVManager sharedManager] log:@"❌ MessageStringView introuvable"];
-                return;
+            SevenTVManager *mgr = [SevenTVManager sharedManager];
+
+            // Liste des classes à inspecter
+            NSArray *classNames = @[
+                @"Twitch.MessageStringView",
+                @"Twitch.ChatMessageTableViewCell",
+                @"Twitch.ChatTranscriptView",
+            ];
+
+            void (^dumpClass)(NSString *) = ^(NSString *className) {
+                Class cls = NSClassFromString(className);
+                if (!cls) {
+                    [mgr log:@"❌ Classe introuvable: %@", className];
+                    return;
+                }
+                [mgr log:@"════ DUMP: %@ ════", className];
+                [mgr log:@"🔗 Superclasse: %@", NSStringFromClass(class_getSuperclass(cls))];
+
+                // iVars
+                unsigned int ivarCount = 0;
+                Ivar *ivars = class_copyIvarList(cls, &ivarCount);
+                [mgr log:@"📦 %u iVars:", ivarCount];
+                for (unsigned int i = 0; i < ivarCount; i++) {
+                    const char *name = ivar_getName(ivars[i]);
+                    const char *type = ivar_getTypeEncoding(ivars[i]);
+                    [mgr log:@"📦   %s :: %s", name, type ? type : "?"];
+                }
+                free(ivars);
+
+                // Propriétés
+                unsigned int propCount = 0;
+                objc_property_t *props = class_copyPropertyList(cls, &propCount);
+                [mgr log:@"🔑 %u propriétés:", propCount];
+                for (unsigned int i = 0; i < propCount; i++) {
+                    const char *name = property_getName(props[i]);
+                    const char *attr = property_getAttributes(props[i]);
+                    [mgr log:@"🔑   %s :: %s", name, attr ? attr : "?"];
+                }
+                free(props);
+
+                // Méthodes
+                unsigned int methodCount = 0;
+                Method *methods = class_copyMethodList(cls, &methodCount);
+                [mgr log:@"📋 %u méthodes:", methodCount];
+                for (unsigned int i = 0; i < methodCount; i++) {
+                    const char *types = method_getTypeEncoding(methods[i]);
+                    [mgr log:@"📋   %@ :: %s",
+                     NSStringFromSelector(method_getName(methods[i])),
+                     types ? types : "?"];
+                }
+                free(methods);
+
+                [mgr log:@"════ FIN: %@ ════", className];
+            };
+
+            for (NSString *cn in classNames) {
+                dumpClass(cn);
             }
 
-            // ── iVars ──
-            unsigned int ivarCount = 0;
-            Ivar *ivars = class_copyIvarList(msgView, &ivarCount);
-            [[SevenTVManager sharedManager] log:@"📦 MessageStringView — %u iVars:", ivarCount];
-            for (unsigned int i = 0; i < ivarCount; i++) {
-                const char *name = ivar_getName(ivars[i]);
-                const char *type = ivar_getTypeEncoding(ivars[i]);
-                [[SevenTVManager sharedManager] log:@"📦   %s (%s)", name, type ? type : "?"];
-            }
-            free(ivars);
+            // Dump runtime d'une instance de MessageStringView si disponible
+            [mgr log:@"🔎 Recherche instance MessageStringView en live..."];
+            UIWindow *keyWin = nil;
+            for (UIScene *sc in [UIApplication sharedApplication].connectedScenes)
+                if ([sc isKindOfClass:[UIWindowScene class]])
+                    for (UIWindow *w in ((UIWindowScene *)sc).windows)
+                        if (w.isKeyWindow) { keyWin = w; break; }
 
-            // ── Propriétés ──
-            unsigned int propCount = 0;
-            objc_property_t *props = class_copyPropertyList(msgView, &propCount);
-            [[SevenTVManager sharedManager] log:@"🔑 MessageStringView — %u propriétés:", propCount];
-            for (unsigned int i = 0; i < propCount; i++) {
-                const char *name = property_getName(props[i]);
-                const char *attr = property_getAttributes(props[i]);
-                [[SevenTVManager sharedManager] log:@"🔑   %s (%s)", name, attr ? attr : "?"];
+            if (keyWin) {
+                NSMutableArray *queue = [NSMutableArray arrayWithObject:keyWin];
+                while (queue.count > 0) {
+                    UIView *v = queue.firstObject; [queue removeObjectAtIndex:0];
+                    [queue addObjectsFromArray:v.subviews];
+                    if ([NSStringFromClass([v class]) isEqualToString:@"Twitch.MessageStringView"]) {
+                        [mgr log:@"🔎 Instance trouvée! Dump KVC:"];
+                        // Dump messageStringLayer
+                        @try {
+                            id layer = [v valueForKey:@"messageStringLayer"];
+                            [mgr log:@"🔎   messageStringLayer: %@", NSStringFromClass([layer class])];
+                            if (layer) {
+                                // Dump sous-layers
+                                NSArray *sublayers = [layer valueForKey:@"sublayers"];
+                                [mgr log:@"🔎   sublayers count: %lu", (unsigned long)sublayers.count];
+                                for (id sub in sublayers) {
+                                    [mgr log:@"🔎     sublayer: %@", NSStringFromClass([sub class])];
+                                }
+                            }
+                        } @catch (NSException *e) {
+                            [mgr log:@"🔎   messageStringLayer KVC erreur: %@", e.reason];
+                        }
+                        // Dump networkImageRequester
+                        @try {
+                            id requester = [v valueForKey:@"networkImageRequester"];
+                            [mgr log:@"🔎   networkImageRequester: %@", NSStringFromClass([requester class])];
+                        } @catch (NSException *e) {
+                            [mgr log:@"🔎   networkImageRequester KVC erreur: %@", e.reason];
+                        }
+                        // Dump delegate
+                        @try {
+                            id delegate = [v valueForKey:@"delegate"];
+                            [mgr log:@"🔎   delegate: %@", NSStringFromClass([delegate class])];
+                        } @catch (NSException *e) {
+                            [mgr log:@"🔎   delegate KVC erreur: %@", e.reason];
+                        }
+                        break;
+                    }
+                }
             }
-            free(props);
-
-            // ── Méthodes de la superclasse aussi ──
-            Class superCls = class_getSuperclass(msgView);
-            [[SevenTVManager sharedManager] log:@"🔗 Superclasse: %@", NSStringFromClass(superCls)];
         });
         // ─────────────────────────────────────────────────────────────────
 
