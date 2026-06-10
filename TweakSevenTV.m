@@ -19,18 +19,17 @@
 #import "SevenTVLogo.h"
 #import "SevenTVSettingsController.h"
 #import "SevenTVAdBlock.h"
-
-// Helpers inline pour éviter les implicit function declaration warnings
-static inline BOOL _s7tv_bool(NSString *key) {
-    return [[NSUserDefaults standardUserDefaults] boolForKey:key];
-}
-#undef S7TVBool
-#define S7TVBool(k) _s7tv_bool(k)
 #import <Network/Network.h>
 #import <AVFoundation/AVFoundation.h>
 
 // Forward declarations
 @class S7TVChannelPointsObserver;
+
+// S7TVBool inline helper
+static inline BOOL _s7tv_bool(NSString *key) {
+    return [[NSUserDefaults standardUserDefaults] boolForKey:key];
+}
+#define S7TVBool(k) _s7tv_bool(k)
 
 
 
@@ -974,7 +973,8 @@ static BOOL s7tv_shouldBlockURL(NSURL *url) {
 // Sanitize une playlist HLS — supprime les segments pub
 static NSString *s7tv_sanitizeM3U8(NSString *playlist) {
     if (!S7TVBool(kTCStreamProxySanitizeM3U8)) return playlist;
-    NSMutableArray<NSString *> *lines = [[playlist componentsSeparatedByString:@"\n"] mutableCopy];
+    NSMutableArray<NSString *> *lines = [[playlist componentsSeparatedByString:@"
+"] mutableCopy];
     NSMutableArray<NSString *> *out   = [NSMutableArray array];
     BOOL skipNext = NO;
     for (NSString *line in lines) {
@@ -997,7 +997,8 @@ static NSString *s7tv_sanitizeM3U8(NSString *playlist) {
         skipNext = NO;
         [out addObject:line];
     }
-    return [out componentsJoinedByString:@"\n"];
+    return [out componentsJoinedByString:@"
+"];
 }
 
 // Hook NSURLSession — blocage URLs + sanitize HLS
@@ -1061,131 +1062,122 @@ static void s7tv_swizzle_adblock(void) {
 static nw_listener_t s7tv_local_proxy_listener = nil;
 static dispatch_queue_t s7tv_proxy_queue = nil;
 
-// Forward d'une connexion cliente vers le vrai serveur
 static void s7tv_forward_connection(nw_connection_t client_conn) {
     nw_connection_start(client_conn);
 
-    // Lire la requête HTTP du client
     nw_connection_receive(client_conn, 1, (uint32_t)65536,
         ^(dispatch_data_t content, nw_content_context_t context, bool is_complete, nw_error_t receive_error) {
             if (!content || receive_error) {
                 nw_connection_cancel(client_conn);
-                // release handled by ARC
                 return;
             }
 
-            // Extraire l'URL cible depuis l'en-tête HTTP (paramètre ?url=)
             NSData *reqData = (NSData *)content;
             NSString *reqStr = [[NSString alloc] initWithData:reqData encoding:NSUTF8StringEncoding];
-            NSString *targetURLStr = nil;
+            if (!reqStr) { nw_connection_cancel(client_conn); return; }
 
+            // Extraire url= du query string
+            NSString *targetURLStr = nil;
             NSRange urlRange = [reqStr rangeOfString:@"url="];
             if (urlRange.location != NSNotFound) {
                 NSString *after = [reqStr substringFromIndex:urlRange.location + 4];
-                NSRange endRange = [after rangeOfCharacterFromSet:
-                    [NSCharacterSet characterSetWithCharactersInString:@" 
-&"]];
-                NSString *encoded = endRange.location != NSNotFound
-                    ? [after substringToIndex:endRange.location] : after;
+                // Trouver fin de la valeur (espace, newline, &)
+                NSUInteger endPos = after.length;
+                for (NSUInteger i = 0; i < after.length; i++) {
+                    unichar c = [after characterAtIndex:i];
+                    if (c == ' ' || c == '\r' || c == '\n' || c == '&') {
+                        endPos = i; break;
+                    }
+                }
+                NSString *encoded = [after substringToIndex:endPos];
                 targetURLStr = [encoded stringByRemovingPercentEncoding];
             }
 
             if (!targetURLStr.length) {
-                // Pas de paramètre url= → 400
-                NSString *resp400 = @"HTTP/1.1 400 Bad Request
-Content-Length: 0
-
-";
-                NSData *resp400Data = [resp400 dataUsingEncoding:NSUTF8StringEncoding];
-                nw_connection_send(client_conn, (dispatch_data_t)resp400Data,
+                // 400 Bad Request
+                const char *resp400 = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n";
+                NSData *d400 = [NSData dataWithBytes:resp400 length:strlen(resp400)];
+                nw_connection_send(client_conn, (dispatch_data_t)d400,
                     NW_CONNECTION_DEFAULT_MESSAGE_CONTEXT, true, ^(nw_error_t e){
                     nw_connection_cancel(client_conn);
-                    // release handled by ARC
                 });
                 return;
             }
 
-            // Faire la vraie requête vers targetURL
             NSURL *targetURL = [NSURL URLWithString:targetURLStr];
-            if (!targetURL) {
-                nw_connection_cancel(client_conn);
-                // release handled by ARC
-                return;
-            }
+            if (!targetURL) { nw_connection_cancel(client_conn); return; }
 
+            // Copier les headers HTTP utiles
             NSMutableURLRequest *proxyReq = [NSMutableURLRequest requestWithURL:targetURL];
             proxyReq.timeoutInterval = 10.0;
-            // Copier les headers utiles (sans Host)
-            NSRange headersEnd = [reqStr rangeOfString:@"
 
-"];
-            if (headersEnd.location != NSNotFound) {
-                NSString *headerSection = [reqStr substringToIndex:headersEnd.location];
-                NSArray *headerLines = [headerSection componentsSeparatedByString:@"\n"];
-                for (NSUInteger i = 1; i < headerLines.count; i++) {
-                    NSString *hl = headerLines[i];
-                    NSRange colon = [hl rangeOfString:@": "];
+            // Trouver fin des headers (double CRLF)
+            NSData *doubleCRLF = [@"\r\n\r\n" dataUsingEncoding:NSUTF8StringEncoding];
+            NSRange headerEnd = [reqData rangeOfData:doubleCRLF options:0
+                range:NSMakeRange(0, reqData.length)];
+            if (headerEnd.location != NSNotFound) {
+                NSData *headerData = [reqData subdataWithRange:NSMakeRange(0, headerEnd.location)];
+                NSString *headerStr = [[NSString alloc] initWithData:headerData encoding:NSUTF8StringEncoding];
+                NSArray *lines = [headerStr componentsSeparatedByString:@"\r\n"];
+                for (NSUInteger i = 1; i < lines.count; i++) {
+                    NSString *line = lines[i];
+                    NSRange colon = [line rangeOfString:@": "];
                     if (colon.location == NSNotFound) continue;
-                    NSString *key = [hl substringToIndex:colon.location];
-                    NSString *val = [hl substringFromIndex:colon.location + 2];
+                    NSString *key = [line substringToIndex:colon.location];
+                    NSString *val = [line substringFromIndex:colon.location + 2];
                     if ([key.lowercaseString isEqualToString:@"host"]) continue;
                     [proxyReq setValue:val forHTTPHeaderField:key];
                 }
             }
 
-            NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration ephemeralSessionConfiguration];
-            cfg.timeoutIntervalForRequest = 10.0;
-            NSURLSession *session = [NSURLSession sessionWithConfiguration:cfg];
-            [[session dataTaskWithRequest:proxyReq
+            NSURLSessionConfiguration *proxyCfg = [NSURLSessionConfiguration ephemeralSessionConfiguration];
+            proxyCfg.timeoutIntervalForRequest = 10.0;
+            NSURLSession *proxySession = [NSURLSession sessionWithConfiguration:proxyCfg];
+
+            [[proxySession dataTaskWithRequest:proxyReq
                 completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-                    if (error || !data) {
-                        NSString *resp502 = @"HTTP/1.1 502 Bad Gateway
-Content-Length: 0
 
-";
-                        NSData *d502 = [resp502 dataUsingEncoding:NSUTF8StringEncoding];
-                        nw_connection_send(client_conn, (dispatch_data_t)d502,
-                            NW_CONNECTION_DEFAULT_MESSAGE_CONTEXT, true, ^(nw_error_t e){
-                            nw_connection_cancel(client_conn);
-                            // release handled by ARC
-                        });
-                        return;
-                    }
-
-                    // Sanitize si M3U8
-                    NSHTTPURLResponse *httpResp = (NSHTTPURLResponse *)response;
-                    NSString *contentType = httpResp.allHeaderFields[@"Content-Type"] ?: @"";
-                    NSData *body = data;
-                    if ([contentType containsString:@"mpegurl"] || [targetURLStr containsString:@"m3u8"]) {
-                        NSString *playlist = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-                        if (playlist) {
-                            NSString *sanitized = s7tv_sanitizeM3U8(playlist);
-                            body = [sanitized dataUsingEncoding:NSUTF8StringEncoding];
-                        }
-                    }
-
-                    // Construire la réponse HTTP
-                    NSMutableString *respHeaders = [NSMutableString string];
-                    [respHeaders appendFormat:@"HTTP/1.1 %ld OK
-", (long)httpResp.statusCode];
-                    [respHeaders appendFormat:@"Content-Length: %lu
-", (unsigned long)body.length];
-                    [respHeaders appendFormat:@"Content-Type: %@
-", contentType.length ? contentType : @"application/octet-stream"];
-                    [respHeaders appendString:@"Access-Control-Allow-Origin: *
-"];
-                    [respHeaders appendString:@"
-"];
-
-                    NSMutableData *fullResp = [NSMutableData dataWithData:
-                        [respHeaders dataUsingEncoding:NSUTF8StringEncoding]];
-                    [fullResp appendData:body];
-
-                    nw_connection_send(client_conn, (dispatch_data_t)(NSData *)fullResp,
+                if (error || !data) {
+                    const char *resp502 = "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n";
+                    NSData *d502 = [NSData dataWithBytes:resp502 length:strlen(resp502)];
+                    nw_connection_send(client_conn, (dispatch_data_t)d502,
                         NW_CONNECTION_DEFAULT_MESSAGE_CONTEXT, true, ^(nw_error_t e){
                         nw_connection_cancel(client_conn);
-                        // release handled by ARC
                     });
+                    return;
+                }
+
+                NSHTTPURLResponse *httpResp = (NSHTTPURLResponse *)response;
+                NSString *contentType = httpResp.allHeaderFields[@"Content-Type"] ?: @"application/octet-stream";
+
+                // Sanitize M3U8
+                NSData *body = data;
+                if ([contentType containsString:@"mpegurl"] || [targetURLStr containsString:@"m3u8"]) {
+                    NSString *playlist = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+                    if (playlist) {
+                        s7tv_detect_ad_in_playlist(playlist);
+                        NSString *sanitized = s7tv_sanitizeM3U8(playlist);
+                        body = [sanitized dataUsingEncoding:NSUTF8StringEncoding] ?: data;
+                    }
+                }
+
+                // Construire réponse HTTP proprement avec C strings
+                NSString *statusLine = [NSString stringWithFormat:@"HTTP/1.1 %ld OK\r\n", (long)httpResp.statusCode];
+                NSString *ctLine     = [NSString stringWithFormat:@"Content-Type: %@\r\n", contentType];
+                NSString *clLine     = [NSString stringWithFormat:@"Content-Length: %lu\r\n", (unsigned long)body.length];
+                NSString *corsLine   = @"Access-Control-Allow-Origin: *\r\n";
+                NSString *endLine    = @"\r\n";
+
+                NSMutableData *fullResp = [NSMutableData data];
+                for (NSString *h in @[statusLine, ctLine, clLine, corsLine, endLine]) {
+                    [fullResp appendData:[h dataUsingEncoding:NSUTF8StringEncoding]];
+                }
+                [fullResp appendData:body];
+
+                nw_connection_send(client_conn, (dispatch_data_t)(NSData *)fullResp,
+                    NW_CONNECTION_DEFAULT_MESSAGE_CONTEXT, true, ^(nw_error_t e){
+                    nw_connection_cancel(client_conn);
+                });
             }] resume];
         }
     );
@@ -1225,14 +1217,10 @@ static void s7tv_start_local_proxy(void) {
 
     nw_listener_set_state_changed_handler(s7tv_local_proxy_listener,
         ^(nw_listener_state_t state, nw_error_t error) {
-            if (state == nw_listener_state_ready) {
-                [[SevenTVManager sharedManager]
-                    log:@"✅ Local proxy démarré sur 127.0.0.1:%ld", (long)port];
-            } else if (state == nw_listener_state_failed) {
-                [[SevenTVManager sharedManager]
-                    log:@"❌ Local proxy erreur: %@",
-                    error ? [NSString stringWithFormat:@"%d", nw_error_get_error_code(error)] : @"inconnu"];
-            }
+            if (state == nw_listener_state_ready)
+                [[SevenTVManager sharedManager] log:@"✅ Local proxy démarré sur 127.0.0.1:%ld", (long)port];
+            else if (state == nw_listener_state_failed)
+                [[SevenTVManager sharedManager] log:@"❌ Local proxy erreur port %ld", (long)port];
         }
     );
 
@@ -1247,7 +1235,6 @@ static void s7tv_stop_local_proxy(void) {
     }
 }
 
-// Observer les changements de préférence Local Proxy
 static void s7tv_observe_proxy_prefs(void) {
     [[NSNotificationCenter defaultCenter]
         addObserverForName:NSUserDefaultsDidChangeNotification
@@ -1340,270 +1327,6 @@ static void s7tv_detect_ad_in_playlist(NSString *playlist) {
     if (adType) s7tv_show_ad_indicator(adType);
 }
 
-
-
-// ────────────────────────────────────────────────────────────
-// MARK: - AVAssetResourceLoader (intercept HLS via AVFoundation)
-// ────────────────────────────────────────────────────────────
-
-@interface S7TVResourceLoaderDelegate : NSObject <AVAssetResourceLoaderDelegate>
-+ (instancetype)shared;
-@end
-
-@implementation S7TVResourceLoaderDelegate
-
-+ (instancetype)shared {
-    static S7TVResourceLoaderDelegate *inst;
-    static dispatch_once_t t;
-    dispatch_once(&t, ^{ inst = [[self alloc] init]; });
-    return inst;
-}
-
-- (BOOL)resourceLoader:(AVAssetResourceLoader *)resourceLoader
-    shouldWaitForLoadingOfRequestedResource:(AVAssetResourceLoadingRequest *)loadingRequest {
-
-    NSURL *url = loadingRequest.request.URL;
-    NSString *scheme = url.scheme;
-
-    // On intercepte seulement nos schémas custom s7tvhttp/s7tvhttps
-    if (![scheme isEqualToString:@"s7tvhttp"] && ![scheme isEqualToString:@"s7tvhttps"]) return NO;
-
-    // Reconstruire l'URL réelle
-    NSURLComponents *comps = [NSURLComponents componentsWithURL:url resolvingAgainstBaseURL:NO];
-    comps.scheme = [scheme isEqualToString:@"s7tvhttp"] ? @"http" : @"https";
-    NSURL *realURL = comps.URL;
-
-    // Passer par le proxy si configuré
-    NSString *proxyURLStr = [[NSUserDefaults standardUserDefaults] stringForKey:kTCStreamProxyURL];
-    NSURL *finalURL = realURL;
-    if (proxyURLStr.length && S7TVBool(kTCStreamProxyEnabled)) {
-        NSString *encoded = [realURL.absoluteString
-            stringByAddingPercentEncodingWithAllowedCharacters:
-            [NSCharacterSet URLQueryAllowedCharacterSet]];
-        NSString *proxied = [proxyURLStr stringByReplacingOccurrencesOfString:@"$url" withString:encoded];
-        finalURL = [NSURL URLWithString:proxied] ?: realURL;
-    }
-
-    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:finalURL];
-    req.timeoutInterval = 10.0;
-
-    NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration ephemeralSessionConfiguration];
-    NSURLSession *session = [NSURLSession sessionWithConfiguration:cfg];
-
-    [[session dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
-        if (err || !data) {
-            if (S7TVBool(kTCStreamProxyFallbackEnabled)) {
-                // Fallback direct
-                NSMutableURLRequest *directReq = [NSMutableURLRequest requestWithURL:realURL];
-                NSURLSession *directSession = [NSURLSession sessionWithConfiguration:
-                    [NSURLSessionConfiguration ephemeralSessionConfiguration]];
-                [[directSession dataTaskWithRequest:directReq
-                    completionHandler:^(NSData *d2, NSURLResponse *r2, NSError *e2) {
-                    if (d2 && !e2) {
-                        NSString *ct = ((NSHTTPURLResponse *)r2).allHeaderFields[@"Content-Type"] ?: @"application/x-mpegURL";
-                        [loadingRequest.dataRequest respondWithData:d2];
-                        [loadingRequest.contentInformationRequest setContentType:ct];
-                        [loadingRequest.contentInformationRequest setContentLength:d2.length];
-                        [loadingRequest finishLoading];
-                    } else {
-                        [loadingRequest finishLoadingWithError:e2];
-                    }
-                }] resume];
-            } else {
-                [loadingRequest finishLoadingWithError:err];
-            }
-            return;
-        }
-
-        // Sanitize si M3U8
-        NSData *body = data;
-        NSString *ct = ((NSHTTPURLResponse *)resp).allHeaderFields[@"Content-Type"] ?: @"application/x-mpegURL";
-        if ([ct containsString:@"mpegurl"] || [realURL.path hasSuffix:@".m3u8"]) {
-            NSString *playlist = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-            if (playlist) {
-                s7tv_detect_ad_in_playlist(playlist);
-                NSString *sanitized = s7tv_sanitizeM3U8(playlist);
-                body = [sanitized dataUsingEncoding:NSUTF8StringEncoding];
-            }
-        }
-
-        [loadingRequest.dataRequest respondWithData:body];
-        [loadingRequest.contentInformationRequest setContentType:ct];
-        [loadingRequest.contentInformationRequest setContentLength:body.length];
-        [loadingRequest finishLoading];
-    }] resume];
-
-    return YES;
-}
-
-@end
-
-// Hook AVURLAsset pour injecter le resource loader
-@interface AVURLAsset (S7TVProxy)
-+ (instancetype)s7tv_assetWithURL:(NSURL *)URL options:(NSDictionary *)options;
-@end
-
-@implementation AVURLAsset (S7TVProxy)
-
-+ (instancetype)s7tv_assetWithURL:(NSURL *)URL options:(NSDictionary *)options {
-    if (!S7TVBool(kTCStreamProxyUseResourceLoader)) {
-        return [self s7tv_assetWithURL:URL options:options];
-    }
-
-    // Remplacer http/https par s7tvhttp/s7tvhttps pour intercepter
-    NSString *scheme = URL.scheme.lowercaseString;
-    NSURL *hookedURL = URL;
-    if ([scheme isEqualToString:@"http"] || [scheme isEqualToString:@"https"]) {
-        NSURLComponents *comps = [NSURLComponents componentsWithURL:URL resolvingAgainstBaseURL:NO];
-        comps.scheme = [scheme isEqualToString:@"http"] ? @"s7tvhttp" : @"s7tvhttps";
-        hookedURL = comps.URL ?: URL;
-    }
-
-    AVURLAsset *asset = [self s7tv_assetWithURL:hookedURL options:options];
-    dispatch_queue_t q = dispatch_queue_create("app.7tv.resourceloader", DISPATCH_QUEUE_SERIAL);
-    [asset.resourceLoader setDelegate:[S7TVResourceLoaderDelegate shared] queue:q];
-    return asset;
-}
-
-@end
-
-static void s7tv_swizzle_avasset(void) {
-    s7tv_swizzle(object_getClass([AVURLAsset class]),
-                 object_getClass([AVURLAsset class]),
-                 @selector(assetWithURL:options:),
-                 @selector(s7tv_assetWithURL:options:));
-    [[SevenTVManager sharedManager] log:@"✅ AVAssetResourceLoader hook installé"];
-}
-
-
-// ────────────────────────────────────────────────────────────
-// MARK: - Proxy Token GraphQL Ops + Proxy Any .m3u8 Host
-// ────────────────────────────────────────────────────────────
-
-// Constantes GraphQL ops token
-static NSArray<NSString *> *s7tv_tokenOps(void) {
-    return @[@"StreamAccessToken", @"VodAccessToken", @"ClipAccessToken",
-             @"PlaybackAccessToken", @"PlaybackAccessToken_Template"];
-}
-
-static NSURL *s7tv_proxyURL(NSURL *originalURL) {
-    NSString *proxyURLStr = [[NSUserDefaults standardUserDefaults] stringForKey:kTCStreamProxyURL];
-    if (!proxyURLStr.length || !S7TVBool(kTCStreamProxyEnabled)) return nil;
-
-    NSString *encoded = [originalURL.absoluteString
-        stringByAddingPercentEncodingWithAllowedCharacters:
-        [NSCharacterSet URLQueryAllowedCharacterSet]];
-    NSString *proxied = [proxyURLStr stringByReplacingOccurrencesOfString:@"$url" withString:encoded];
-    return [NSURL URLWithString:proxied];
-}
-
-// Excluded URLs check
-static BOOL s7tv_isExcluded(NSURL *url) {
-    NSArray<NSString *> *excluded = [[NSUserDefaults standardUserDefaults]
-        arrayForKey:kTCExcludedURLList] ?: @[];
-    NSString *host = url.host.lowercaseString ?: @"";
-    NSString *absolute = url.absoluteString.lowercaseString;
-    for (NSString *rule in excluded) {
-        NSString *r = rule.lowercaseString;
-        if ([host containsString:r] || [absolute containsString:r]) return YES;
-    }
-    return NO;
-}
-
-@interface NSURLSession (S7TVProxy)
-- (NSURLSessionDataTask *)s7tv_proxy_dataTaskWithRequest:(NSURLRequest *)request
-    completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completionHandler;
-@end
-
-@implementation NSURLSession (S7TVProxy)
-
-- (NSURLSessionDataTask *)s7tv_proxy_dataTaskWithRequest:(NSURLRequest *)request
-    completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completionHandler {
-
-    NSURL *url = request.URL;
-
-    // Skip si exclu
-    if (s7tv_isExcluded(url)) {
-        return [self s7tv_proxy_dataTaskWithRequest:request completionHandler:completionHandler];
-    }
-
-    BOOL shouldProxy = NO;
-
-    // Proxy Token GraphQL Ops
-    if (S7TVBool(kTCStreamProxyGraphQLTokenOps) && S7TVBool(kTCStreamProxyEnabled)) {
-        NSString *body = [[NSString alloc] initWithData:request.HTTPBody encoding:NSUTF8StringEncoding] ?: @"";
-        for (NSString *op in s7tv_tokenOps()) {
-            if ([body containsString:op] || [url.absoluteString containsString:op]) {
-                shouldProxy = YES; break;
-            }
-        }
-    }
-
-    // Proxy Any .m3u8 Host
-    if (!shouldProxy && S7TVBool(kTCStreamProxyAnyM3U8Host) && S7TVBool(kTCStreamProxyEnabled)) {
-        NSString *path = url.path.lowercaseString;
-        if ([path hasSuffix:@".m3u8"] || [path containsString:@"m3u8"] ||
-            [url.host containsString:@"usher"] || [url.host containsString:@"ttvnw"]) {
-            shouldProxy = YES;
-        }
-    }
-
-    if (!shouldProxy) {
-        return [self s7tv_proxy_dataTaskWithRequest:request completionHandler:completionHandler];
-    }
-
-    NSURL *proxiedURL = s7tv_proxyURL(url);
-    if (!proxiedURL) {
-        return [self s7tv_proxy_dataTaskWithRequest:request completionHandler:completionHandler];
-    }
-
-    NSMutableURLRequest *proxiedReq = [request mutableCopy];
-    [proxiedReq setURL:proxiedURL];
-
-    if (!completionHandler) {
-        return [self s7tv_proxy_dataTaskWithRequest:proxiedReq completionHandler:nil];
-    }
-
-    void (^wrapped)(NSData *, NSURLResponse *, NSError *) =
-        ^(NSData *data, NSURLResponse *resp, NSError *err) {
-            // Fallback to direct si erreur
-            if (err && S7TVBool(kTCStreamProxyFallbackEnabled)) {
-                [[SevenTVManager sharedManager] log:@"⚠️ Proxy failed, fallback direct: %@", url.host];
-                NSURLSession *direct = [NSURLSession sessionWithConfiguration:
-                    [NSURLSessionConfiguration ephemeralSessionConfiguration]];
-                [[direct dataTaskWithRequest:request completionHandler:completionHandler] resume];
-                return;
-            }
-            // Sanitize M3U8
-            if (data && !err) {
-                NSString *path = url.path.lowercaseString;
-                if ([path hasSuffix:@".m3u8"] || [path containsString:@"m3u8"]) {
-                    NSString *pl = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-                    if (pl) {
-                        s7tv_detect_ad_in_playlist(pl);
-                        NSString *sanitized = s7tv_sanitizeM3U8(pl);
-                        data = [sanitized dataUsingEncoding:NSUTF8StringEncoding];
-                    }
-                }
-            }
-            if (completionHandler) completionHandler(data, resp, err);
-        };
-
-    return [self s7tv_proxy_dataTaskWithRequest:proxiedReq completionHandler:wrapped];
-}
-
-@end
-
-static void s7tv_swizzle_proxy_session(void) {
-    NSURLSession *probe = [NSURLSession sessionWithConfiguration:
-        [NSURLSessionConfiguration defaultSessionConfiguration]];
-    Class cls = object_getClass(probe);
-    s7tv_swizzle(cls, [NSURLSession class],
-        @selector(dataTaskWithRequest:completionHandler:),
-        @selector(s7tv_proxy_dataTaskWithRequest:completionHandler:));
-    [[SevenTVManager sharedManager] log:@"✅ Proxy GraphQL/m3u8 hook installé"];
-}
-
 __attribute__((constructor))
 static void TwitchSevenTVInit(void) {
     SevenTVManager *mgr = [SevenTVManager sharedManager];
@@ -1635,12 +1358,6 @@ static void TwitchSevenTVInit(void) {
 
     // Blocked URLs + HLS Sanitizer
     s7tv_swizzle_adblock();
-
-    // AVAssetResourceLoader
-    s7tv_swizzle_avasset();
-
-    // Proxy GraphQL Ops + Any .m3u8 Host
-    s7tv_swizzle_proxy_session();
 
     // Observer les changements Local Proxy
     s7tv_observe_proxy_prefs();
