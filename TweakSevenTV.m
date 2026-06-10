@@ -85,19 +85,25 @@ static void s7tv_swizzle(Class targetClass,
 
     NSString *selfClass = NSStringFromClass([self class]);
 
-    // ── Force _areEmoteAnimationsEnabled sur ChatTranscriptView ─────────────
+    // ── Force _areEmoteAnimationsEnabled via offset mémoire direct ──────────
     if ([selfClass isEqualToString:@"Twitch.ChatTranscriptView"]) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
-            @try {
-                id current = [self valueForKey:@"_areEmoteAnimationsEnabled"];
-                [[SevenTVManager sharedManager] log:@"🎬 _areEmoteAnimationsEnabled avant: %@", current];
-                [self setValue:@YES forKey:@"_areEmoteAnimationsEnabled"];
-                id after = [self valueForKey:@"_areEmoteAnimationsEnabled"];
-                [[SevenTVManager sharedManager] log:@"🎬 _areEmoteAnimationsEnabled après: %@", after];
-            } @catch (NSException *e) {
-                [[SevenTVManager sharedManager] log:@"❌ KVC _areEmoteAnimationsEnabled erreur: %@", e.reason];
+            Class cls = NSClassFromString(@"Twitch.ChatTranscriptView");
+            Ivar ivar = class_getInstanceVariable(cls, "_areEmoteAnimationsEnabled");
+            if (!ivar) {
+                [[SevenTVManager sharedManager] log:@"❌ iVar _areEmoteAnimationsEnabled introuvable"];
+                return;
             }
+            ptrdiff_t offset = ivar_getOffset(ivar);
+            // Lire la valeur actuelle (BOOL = 1 byte)
+            BOOL *ptr = (BOOL *)((uint8_t *)(__bridge void *)self + offset);
+            BOOL before = *ptr;
+            // Forcer à YES
+            *ptr = YES;
+            BOOL after = *ptr;
+            [[SevenTVManager sharedManager] log:@"🎬 _areEmoteAnimationsEnabled: %d → %d (offset=%td)",
+             before, after, offset];
         });
     }
 
