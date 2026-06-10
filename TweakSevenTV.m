@@ -85,46 +85,19 @@ static void s7tv_swizzle(Class targetClass,
 
     NSString *selfClass = NSStringFromClass([self class]);
 
-    // ── Dump automatique hiérarchie chat ─────────────────────────────────────
-    static NSMutableSet *s_dumpedClasses = nil;
-    if (!s_dumpedClasses) s_dumpedClasses = [NSMutableSet set];
-    BOOL isChatRelated = ([selfClass containsString:@"Chat"] ||
-                          [selfClass containsString:@"Message"] ||
-                          [selfClass containsString:@"Cell"]) &&
-                         ([selfClass hasPrefix:@"Twitch."] || [selfClass hasPrefix:@"_Tt"]);
-    if (isChatRelated && ![s_dumpedClasses containsObject:selfClass]) {
-        [s_dumpedClasses addObject:selfClass];
-        UIView *chatView = self;
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+    // ── Force _areEmoteAnimationsEnabled sur ChatTranscriptView ─────────────
+    if ([selfClass isEqualToString:@"Twitch.ChatTranscriptView"]) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
-            SevenTVManager *mgr = [SevenTVManager sharedManager];
-            [mgr log:@"🔬 DUMP: %@", selfClass];
-            NSMutableArray *queue  = [NSMutableArray arrayWithObject:chatView];
-            NSMutableArray *depths = [NSMutableArray arrayWithObject:@0];
-            NSInteger count = 0;
-            while (queue.count > 0 && count < 200) {
-                UIView *v = queue.firstObject; [queue removeObjectAtIndex:0];
-                NSInteger d = ((NSNumber *)depths.firstObject).integerValue; [depths removeObjectAtIndex:0];
-                count++;
-                NSMutableString *indent = [NSMutableString string];
-                for (NSInteger i = 0; i < d; i++) [indent appendString:@"  "];
-                NSString *cn = NSStringFromClass([v class]);
-                NSString *extra = @"";
-                if ([v isKindOfClass:[UIImageView class]]) {
-                    UIImageView *iv = (UIImageView *)v;
-                    extra = [NSString stringWithFormat:@" IMG=(%.0fx%.0f) mode=%ld",
-                             iv.image.size.width, iv.image.size.height, (long)iv.contentMode];
-                } else if ([v isKindOfClass:[UILabel class]]) {
-                    NSString *t = ((UILabel *)v).text;
-                    if (t.length > 0 && t.length <= 30) extra = [NSString stringWithFormat:@" text='%@'", t];
-                } else if ([v isKindOfClass:[UITextView class]]) { extra = @" [UITextView]"; }
-                [mgr log:@"🔬 %@[%ld] %@ (%.0fx%.0f)%@", indent, (long)d, cn,
-                 v.bounds.size.width, v.bounds.size.height, extra];
-                for (UIView *sub in v.subviews.reverseObjectEnumerator) {
-                    [queue insertObject:sub atIndex:0]; [depths insertObject:@(d+1) atIndex:0];
-                }
+            @try {
+                id current = [self valueForKey:@"_areEmoteAnimationsEnabled"];
+                [[SevenTVManager sharedManager] log:@"🎬 _areEmoteAnimationsEnabled avant: %@", current];
+                [self setValue:@YES forKey:@"_areEmoteAnimationsEnabled"];
+                id after = [self valueForKey:@"_areEmoteAnimationsEnabled"];
+                [[SevenTVManager sharedManager] log:@"🎬 _areEmoteAnimationsEnabled après: %@", after];
+            } @catch (NSException *e) {
+                [[SevenTVManager sharedManager] log:@"❌ KVC _areEmoteAnimationsEnabled erreur: %@", e.reason];
             }
-            [mgr log:@"🔬 FIN DUMP %@ (%ld vues)", selfClass, (long)count];
         });
     }
 
