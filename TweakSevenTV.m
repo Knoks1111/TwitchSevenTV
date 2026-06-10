@@ -979,6 +979,25 @@ static void TwitchSevenTVInit(void) {
         [NSURLProtocol registerClass:[SevenTVURLProtocol class]];
         [[SevenTVManager sharedManager] log:@"✅ SevenTVManager prêt, URLProtocol enregistré"];
 
+        // ── Dump méthodes MessageStringView ──────────────────────────────
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            Class msgView = NSClassFromString(@"Twitch.MessageStringView");
+            if (!msgView) {
+                [[SevenTVManager sharedManager] log:@"❌ MessageStringView introuvable"];
+                return;
+            }
+            unsigned int count = 0;
+            Method *methods = class_copyMethodList(msgView, &count);
+            [[SevenTVManager sharedManager] log:@"📋 MessageStringView — %u méthodes:", count];
+            for (unsigned int i = 0; i < count; i++) {
+                [[SevenTVManager sharedManager] log:@"📋   %@",
+                 NSStringFromSelector(method_getName(methods[i]))];
+            }
+            free(methods);
+        });
+        // ─────────────────────────────────────────────────────────────────
+
         dispatch_after(
             dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
             dispatch_get_main_queue(), ^{
