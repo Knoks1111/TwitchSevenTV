@@ -109,6 +109,24 @@ static void s7tv_swizzle(Class targetClass,
         });
     }
 
+    // ── Auto Collect Channel Points ──────────────────────────────────────────
+    if ([selfClass isEqualToString:@"Twitch.ChannelPointsChatButton"] ||
+        [selfClass isEqualToString:@"_TtC6Twitch23ChannelPointsChatButton"]) {
+        if (S7TVBool(kTCLiveAutoCollectChannelPoints)) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                [self s7tv_tryAutoCollect];
+            });
+            @try {
+                [self addObserver:[S7TVChannelPointsObserver sharedObserver]
+                       forKeyPath:@"showsClaim"
+                          options:NSKeyValueObservingOptionNew
+                          context:(__bridge void * _Nullable)@"s7tv_autoCollect"];
+            } @catch (NSException *e) {}
+        }
+        return;
+    }
+
     // ── Hijack du bouton Bits → bouton 7TV ───────────────────────────────────
     if (![selfClass isEqualToString:@"Twitch.ChatInputView"]) return;
     UIView *chatInputView = self;
@@ -1333,6 +1351,110 @@ static void s7tv_detect_ad_in_playlist(NSString *playlist) {
     if (adType) s7tv_show_ad_indicator(adType);
 }
 
+
+
+// ────────────────────────────────────────────────────────────
+// MARK: - Auto Collect Channel Points
+// ────────────────────────────────────────────────────────────
+
+@interface UIView (S7TVChannelPoints)
+- (void)s7tv_channelPoints_didMoveToWindow;
+@end
+
+@implementation UIView (S7TVChannelPoints)
+
+- (void)s7tv_channelPoints_didMoveToWindow {
+    [self s7tv_channelPoints_didMoveToWindow];
+
+    NSString *cn = NSStringFromClass([self class]);
+    if (![cn isEqualToString:@"Twitch.ChannelPointsChatButton"] &&
+        ![cn isEqualToString:@"_TtC6Twitch23ChannelPointsChatButton"]) return;
+
+    if (!S7TVBool(kTCLiveAutoCollectChannelPoints)) return;
+
+    // Observer showsClaim via KVO pour détecter quand le coffre apparaît
+    @try {
+        [self addObserver:(id)[NSNotificationCenter defaultCenter]
+               forKeyPath:@"showsClaim"
+                  options:NSKeyValueObservingOptionNew
+                  context:(__bridge void *)@"s7tv_autoCollect"];
+    } @catch (NSException *e) {}
+
+    // Check immédiat au cas où showsClaim est déjà YES
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        [self s7tv_tryAutoCollect];
+    });
+}
+
+- (void)s7tv_tryAutoCollect {
+    if (!S7TVBool(kTCLiveAutoCollectChannelPoints)) return;
+    @try {
+        NSNumber *showsClaim = [self valueForKey:@"showsClaim"];
+        if (showsClaim.boolValue) {
+            SEL claimSel = NSSelectorFromString(@"handleChannelPointsButtonTapped");
+            if ([self respondsToSelector:claimSel]) {
+                #pragma clang diagnostic push
+                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                [self performSelector:claimSel];
+                #pragma clang diagnostic pop
+                [[SevenTVManager sharedManager] log:@"✅ Channel points auto-collectés"];
+            }
+        }
+    } @catch (NSException *e) {
+        [[SevenTVManager sharedManager] log:@"⚠️ Auto collect erreur: %@", e.reason];
+    }
+}
+
+@end
+
+
+// KVO observer pour showsClaim
+@interface S7TVChannelPointsObserver : NSObject
++ (instancetype)sharedObserver;
+@end
+
+@implementation S7TVChannelPointsObserver
+
++ (instancetype)sharedObserver {
+    static S7TVChannelPointsObserver *inst;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{ inst = [[self alloc] init]; });
+    return inst;
+}
+
+- (void)observeValueForKeyPath:(NSString *)keyPath
+                      ofObject:(id)object
+                        change:(NSDictionary *)change
+                       context:(void *)context {
+    if (context != (__bridge void *)@"s7tv_autoCollect") {
+        [super observeValueForKeyPath:keyPath ofObject:object change:change context:context];
+        return;
+    }
+    if (!S7TVBool(kTCLiveAutoCollectChannelPoints)) return;
+    NSNumber *newVal = change[NSKeyValueChangeNewKey];
+    if (!newVal.boolValue) return;
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if ([object isKindOfClass:[UIView class]]) {
+            [(UIView *)object s7tv_tryAutoCollect];
+        }
+    });
+}
+
+@end
+
+static void s7tv_swizzle_channel_points(void) {
+    // Remplacer l'observer NSNotificationCenter par le bon singleton
+    // On swizzle didMoveToWindow sur UIView (déjà fait) mais on doit
+    // enregistrer le bon observer KVO
+    // Le swizzle est fait via la catégorie UIView (S7TVChannelPoints)
+    // Il suffit d'enregistrer le sharedObserver pour activer le KVO
+    [S7TVChannelPointsObserver sharedObserver];
+
+    [[SevenTVManager sharedManager] log:@"✅ Auto Collect Channel Points hook installé"];
+}
+
 __attribute__((constructor))
 static void TwitchSevenTVInit(void) {
     SevenTVManager *mgr = [SevenTVManager sharedManager];
@@ -1364,6 +1486,9 @@ static void TwitchSevenTVInit(void) {
 
     // Blocked URLs + HLS Sanitizer
     s7tv_swizzle_adblock();
+
+    // Auto Collect Channel Points
+    s7tv_swizzle_channel_points();
 
     // Observer les changements Local Proxy
     s7tv_observe_proxy_prefs();
