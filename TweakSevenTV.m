@@ -18,6 +18,8 @@
 #import "SevenTVURLProtocol.h"
 #import "SevenTVLogo.h"
 #import "SevenTVSettingsController.h"
+#import "SevenTVAdBlock.h"
+#import <Network/Network.h>
 
 
 
@@ -318,8 +320,15 @@ static void s7tv_swizzle(Class targetClass,
     if ([request.URL.host isEqualToString:@"gql.twitch.tv"] && completionHandler) {
         void (^wrapped)(NSData *, NSURLResponse *, NSError *) =
             ^(NSData *data, NSURLResponse *response, NSError *error) {
-                if (data && !error)
+                if (data && !error) {
                     [[SevenTVManager sharedManager] extractAndLoadEmotesFromGQLResponse:data];
+                    // Détecter pub dans HLS
+                    NSString *path = request.URL.path.lowercaseString;
+                    if ([path hasSuffix:@".m3u8"] || [path containsString:@"m3u8"]) {
+                        NSString *pl = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+                        if (pl) s7tv_detect_ad_in_playlist(pl);
+                    }
+                }
                 completionHandler(data, response, error);
             };
         return [self s7tv_dataTaskWithRequest:request completionHandler:wrapped];
@@ -923,6 +932,407 @@ static void s7tv_swizzle_websocket(void) {
 // MARK: - Point d'entrée __attribute__((constructor))
 // ────────────────────────────────────────────────────────────
 
+
+
+// ────────────────────────────────────────────────────────────
+// MARK: - Blocked URLs + HLS Sanitizer hook
+// ────────────────────────────────────────────────────────────
+
+// Vérifie si une URL doit être bloquée
+static BOOL s7tv_shouldBlockURL(NSURL *url) {
+    if (!url) return NO;
+    if (!S7TVBool(kTCAdsDisabled)) return NO;
+    NSArray<NSString *> *blocked = [[NSUserDefaults standardUserDefaults] arrayForKey:kTCBlockedURLList] ?: @[];
+    NSString *absolute = url.absoluteString.lowercaseString;
+    NSString *host = url.host.lowercaseString ?: @"";
+    for (NSString *rule in blocked) {
+        NSString *r = rule.lowercaseString;
+        if ([r hasPrefix:@"re:"]) {
+            NSString *pattern = [r substringFromIndex:3];
+            NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:pattern
+                options:NSRegularExpressionCaseInsensitive error:nil];
+            if ([regex numberOfMatchesInString:absolute options:0
+                    range:NSMakeRange(0, absolute.length)] > 0) return YES;
+        } else {
+            if ([host containsString:r] || [absolute containsString:r]) return YES;
+        }
+    }
+    return NO;
+}
+
+// Sanitize une playlist HLS — supprime les segments pub
+static NSString *s7tv_sanitizeM3U8(NSString *playlist) {
+    if (!S7TVBool(kTCStreamProxySanitizeM3U8)) return playlist;
+    NSMutableArray<NSString *> *lines = [[playlist componentsSeparatedByString:@"
+"] mutableCopy];
+    NSMutableArray<NSString *> *out   = [NSMutableArray array];
+    BOOL skipNext = NO;
+    for (NSString *line in lines) {
+        NSString *trimmed = [line stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+        // Marqueurs pub connus
+        if ([trimmed containsString:@"#EXT-X-SCTE35"] ||
+            [trimmed containsString:@"#EXT-X-DATERANGE"] ||
+            [trimmed containsString:@"stitched-ad"] ||
+            [trimmed containsString:@"X-TV-TWITCH-AD"] ||
+            [trimmed containsString:@"ad_tag"] ||
+            [trimmed containsString:@"twitchsvc.net/ad"] ||
+            ([trimmed hasPrefix:@"#EXT-X-DISCONTINUITY"] && skipNext)) {
+            skipNext = YES;
+            continue;
+        }
+        if (skipNext && trimmed.length > 0 && ![trimmed hasPrefix:@"#"]) {
+            skipNext = NO; // segment URI après marqueur pub → skip
+            continue;
+        }
+        skipNext = NO;
+        [out addObject:line];
+    }
+    return [out componentsJoinedByString:@"
+"];
+}
+
+// Hook NSURLSession — blocage URLs + sanitize HLS
+@interface NSURLSession (S7TVAdBlock)
+- (NSURLSessionDataTask *)s7tv_adblock_dataTaskWithRequest:(NSURLRequest *)request
+    completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completionHandler;
+@end
+
+@implementation NSURLSession (S7TVAdBlock)
+
+- (NSURLSessionDataTask *)s7tv_adblock_dataTaskWithRequest:(NSURLRequest *)request
+    completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completionHandler {
+
+    // Bloquer les URLs de pub
+    if (s7tv_shouldBlockURL(request.URL)) {
+        if (completionHandler) {
+            NSError *blocked = [NSError errorWithDomain:NSURLErrorDomain
+                code:NSURLErrorCancelled userInfo:nil];
+            dispatch_async(dispatch_get_main_queue(), ^{ completionHandler(nil, nil, blocked); });
+        }
+        return [self s7tv_adblock_dataTaskWithRequest:request completionHandler:^(NSData *d, NSURLResponse *r, NSError *e){}];
+    }
+
+    // Sanitize HLS .m3u8
+    NSString *path = request.URL.path.lowercaseString;
+    BOOL isM3U8 = [path hasSuffix:@".m3u8"] || [path containsString:@"m3u8"];
+    if (isM3U8 && S7TVBool(kTCStreamProxySanitizeM3U8) && completionHandler) {
+        void (^wrapped)(NSData *, NSURLResponse *, NSError *) =
+            ^(NSData *data, NSURLResponse *resp, NSError *err) {
+                if (data && !err) {
+                    NSString *playlist = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+                    if (playlist) {
+                        NSString *sanitized = s7tv_sanitizeM3U8(playlist);
+                        data = [sanitized dataUsingEncoding:NSUTF8StringEncoding];
+                    }
+                }
+                completionHandler(data, resp, err);
+            };
+        return [self s7tv_adblock_dataTaskWithRequest:request completionHandler:wrapped];
+    }
+
+    return [self s7tv_adblock_dataTaskWithRequest:request completionHandler:completionHandler];
+}
+
+@end
+
+static void s7tv_swizzle_adblock(void) {
+    NSURLSession *probe = [NSURLSession sessionWithConfiguration:
+        [NSURLSessionConfiguration defaultSessionConfiguration]];
+    Class cls = object_getClass(probe);
+    s7tv_swizzle(cls, [NSURLSession class],
+        @selector(dataTaskWithRequest:completionHandler:),
+        @selector(s7tv_adblock_dataTaskWithRequest:completionHandler:));
+}
+
+
+// ────────────────────────────────────────────────────────────
+// MARK: - Local Proxy TCP (nw_listener sur 127.0.0.1:9595)
+// ────────────────────────────────────────────────────────────
+
+static nw_listener_t s7tv_local_proxy_listener = nil;
+static dispatch_queue_t s7tv_proxy_queue = nil;
+
+// Forward d'une connexion cliente vers le vrai serveur
+static void s7tv_forward_connection(nw_connection_t client_conn) {
+    nw_connection_retain(client_conn);
+    nw_connection_start(client_conn);
+
+    // Lire la requête HTTP du client
+    nw_connection_receive(client_conn, 1, 65536,
+        ^(dispatch_data_t content, nw_content_context_t context, bool is_complete, nw_error_t receive_error) {
+            if (!content || receive_error) {
+                nw_connection_cancel(client_conn);
+                nw_connection_release(client_conn);
+                return;
+            }
+
+            // Extraire l'URL cible depuis l'en-tête HTTP (paramètre ?url=)
+            NSData *reqData = (NSData *)content;
+            NSString *reqStr = [[NSString alloc] initWithData:reqData encoding:NSUTF8StringEncoding];
+            NSString *targetURLStr = nil;
+
+            NSRange urlRange = [reqStr rangeOfString:@"url="];
+            if (urlRange.location != NSNotFound) {
+                NSString *after = [reqStr substringFromIndex:urlRange.location + 4];
+                NSRange endRange = [after rangeOfCharacterFromSet:
+                    [NSCharacterSet characterSetWithCharactersInString:@" 
+&"]];
+                NSString *encoded = endRange.location != NSNotFound
+                    ? [after substringToIndex:endRange.location] : after;
+                targetURLStr = [encoded stringByRemovingPercentEncoding];
+            }
+
+            if (!targetURLStr.length) {
+                // Pas de paramètre url= → 400
+                NSString *resp400 = @"HTTP/1.1 400 Bad Request
+Content-Length: 0
+
+";
+                NSData *resp400Data = [resp400 dataUsingEncoding:NSUTF8StringEncoding];
+                nw_connection_send(client_conn, (dispatch_data_t)resp400Data,
+                    NW_CONNECTION_DEFAULT_MESSAGE_CONTEXT, true, ^(nw_error_t e){
+                    nw_connection_cancel(client_conn);
+                    nw_connection_release(client_conn);
+                });
+                return;
+            }
+
+            // Faire la vraie requête vers targetURL
+            NSURL *targetURL = [NSURL URLWithString:targetURLStr];
+            if (!targetURL) {
+                nw_connection_cancel(client_conn);
+                nw_connection_release(client_conn);
+                return;
+            }
+
+            NSMutableURLRequest *proxyReq = [NSMutableURLRequest requestWithURL:targetURL];
+            proxyReq.timeoutInterval = 10.0;
+            // Copier les headers utiles (sans Host)
+            NSRange headersEnd = [reqStr rangeOfString:@"
+
+"];
+            if (headersEnd.location != NSNotFound) {
+                NSString *headerSection = [reqStr substringToIndex:headersEnd.location];
+                NSArray *headerLines = [headerSection componentsSeparatedByString:@"
+"];
+                for (NSUInteger i = 1; i < headerLines.count; i++) {
+                    NSString *hl = headerLines[i];
+                    NSRange colon = [hl rangeOfString:@": "];
+                    if (colon.location == NSNotFound) continue;
+                    NSString *key = [hl substringToIndex:colon.location];
+                    NSString *val = [hl substringFromIndex:colon.location + 2];
+                    if ([key.lowercaseString isEqualToString:@"host"]) continue;
+                    [proxyReq setValue:val forHTTPHeaderField:key];
+                }
+            }
+
+            NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration ephemeralSessionConfiguration];
+            cfg.timeoutIntervalForRequest = 10.0;
+            NSURLSession *session = [NSURLSession sessionWithConfiguration:cfg];
+            [[session dataTaskWithRequest:proxyReq
+                completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+                    if (error || !data) {
+                        NSString *resp502 = @"HTTP/1.1 502 Bad Gateway
+Content-Length: 0
+
+";
+                        NSData *d502 = [resp502 dataUsingEncoding:NSUTF8StringEncoding];
+                        nw_connection_send(client_conn, (dispatch_data_t)d502,
+                            NW_CONNECTION_DEFAULT_MESSAGE_CONTEXT, true, ^(nw_error_t e){
+                            nw_connection_cancel(client_conn);
+                            nw_connection_release(client_conn);
+                        });
+                        return;
+                    }
+
+                    // Sanitize si M3U8
+                    NSHTTPURLResponse *httpResp = (NSHTTPURLResponse *)response;
+                    NSString *contentType = httpResp.allHeaderFields[@"Content-Type"] ?: @"";
+                    NSData *body = data;
+                    if ([contentType containsString:@"mpegurl"] || [targetURLStr containsString:@"m3u8"]) {
+                        NSString *playlist = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+                        if (playlist) {
+                            NSString *sanitized = s7tv_sanitizeM3U8(playlist);
+                            body = [sanitized dataUsingEncoding:NSUTF8StringEncoding];
+                        }
+                    }
+
+                    // Construire la réponse HTTP
+                    NSMutableString *respHeaders = [NSMutableString string];
+                    [respHeaders appendFormat:@"HTTP/1.1 %ld OK
+", (long)httpResp.statusCode];
+                    [respHeaders appendFormat:@"Content-Length: %lu
+", (unsigned long)body.length];
+                    [respHeaders appendFormat:@"Content-Type: %@
+", contentType.length ? contentType : @"application/octet-stream"];
+                    [respHeaders appendString:@"Access-Control-Allow-Origin: *
+"];
+                    [respHeaders appendString:@"
+"];
+
+                    NSMutableData *fullResp = [NSMutableData dataWithData:
+                        [respHeaders dataUsingEncoding:NSUTF8StringEncoding]];
+                    [fullResp appendData:body];
+
+                    nw_connection_send(client_conn, (dispatch_data_t)(NSData *)fullResp,
+                        NW_CONNECTION_DEFAULT_MESSAGE_CONTEXT, true, ^(nw_error_t e){
+                        nw_connection_cancel(client_conn);
+                        nw_connection_release(client_conn);
+                    });
+            }] resume];
+        }
+    );
+}
+
+static void s7tv_start_local_proxy(void) {
+    if (!S7TVBool(kTCStreamProxyLocalEnabled)) return;
+
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    NSInteger port = [ud integerForKey:kTCStreamProxyLocalPort];
+    if (port <= 0) port = 9595;
+
+    if (s7tv_local_proxy_listener) {
+        nw_listener_cancel(s7tv_local_proxy_listener);
+        s7tv_local_proxy_listener = nil;
+    }
+
+    if (!s7tv_proxy_queue)
+        s7tv_proxy_queue = dispatch_queue_create("app.7tv.localproxy", DISPATCH_QUEUE_SERIAL);
+
+    nw_parameters_t params = nw_parameters_create_secure_tcp(
+        NW_PARAMETERS_DISABLE_PROTOCOL,
+        NW_PARAMETERS_DEFAULT_CONFIGURATION
+    );
+    nw_endpoint_t endpoint = nw_endpoint_create_host("127.0.0.1",
+        [[NSString stringWithFormat:@"%ld", (long)port] UTF8String]);
+    nw_parameters_set_local_endpoint(params, endpoint);
+
+    s7tv_local_proxy_listener = nw_listener_create(params);
+    nw_listener_set_queue(s7tv_local_proxy_listener, s7tv_proxy_queue);
+
+    nw_listener_set_new_connection_handler(s7tv_local_proxy_listener,
+        ^(nw_connection_t connection) {
+            s7tv_forward_connection(connection);
+        }
+    );
+
+    nw_listener_set_state_changed_handler(s7tv_local_proxy_listener,
+        ^(nw_listener_state_t state, nw_error_t error) {
+            if (state == nw_listener_state_ready) {
+                [[SevenTVManager sharedManager]
+                    log:@"✅ Local proxy démarré sur 127.0.0.1:%ld", (long)port];
+            } else if (state == nw_listener_state_failed) {
+                [[SevenTVManager sharedManager]
+                    log:@"❌ Local proxy erreur: %@",
+                    error ? [NSString stringWithFormat:@"%d", nw_error_get_error_code(error)] : @"inconnu"];
+            }
+        }
+    );
+
+    nw_listener_start(s7tv_local_proxy_listener);
+}
+
+static void s7tv_stop_local_proxy(void) {
+    if (s7tv_local_proxy_listener) {
+        nw_listener_cancel(s7tv_local_proxy_listener);
+        s7tv_local_proxy_listener = nil;
+        [[SevenTVManager sharedManager] log:@"🛑 Local proxy arrêté"];
+    }
+}
+
+// Observer les changements de préférence Local Proxy
+static void s7tv_observe_proxy_prefs(void) {
+    [[NSNotificationCenter defaultCenter]
+        addObserverForName:NSUserDefaultsDidChangeNotification
+                    object:nil
+                     queue:[NSOperationQueue mainQueue]
+                usingBlock:^(NSNotification *note) {
+        static BOOL lastState = NO;
+        BOOL current = S7TVBool(kTCStreamProxyLocalEnabled);
+        if (current != lastState) {
+            lastState = current;
+            if (current) s7tv_start_local_proxy();
+            else s7tv_stop_local_proxy();
+        }
+    }];
+}
+
+
+// ────────────────────────────────────────────────────────────
+// MARK: - Ad Bypassed Indicator (overlay sur le player)
+// ────────────────────────────────────────────────────────────
+
+static UILabel *s7tv_indicator_label = nil;
+static NSTimer *s7tv_indicator_timer = nil;
+
+static void s7tv_show_ad_indicator(NSString *adType) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!S7TVBool(kTCAdsBypassIndicatorEnabled)) return;
+
+        // Trouver la key window
+        UIWindow *keyWin = nil;
+        for (UIScene *sc in [UIApplication sharedApplication].connectedScenes)
+            if ([sc isKindOfClass:[UIWindowScene class]])
+                for (UIWindow *w in ((UIWindowScene *)sc).windows)
+                    if (w.isKeyWindow) { keyWin = w; break; }
+        if (!keyWin) return;
+
+        if (!s7tv_indicator_label) {
+            s7tv_indicator_label = [[UILabel alloc] init];
+            s7tv_indicator_label.backgroundColor =
+                [UIColor colorWithRed:0.08 green:0.08 blue:0.10 alpha:0.88];
+            s7tv_indicator_label.textColor =
+                [UIColor colorWithRed:0.20 green:0.78 blue:0.35 alpha:1.0];
+            s7tv_indicator_label.font = [UIFont systemFontOfSize:11 weight:UIFontWeightSemibold];
+            s7tv_indicator_label.layer.cornerRadius = 8;
+            s7tv_indicator_label.clipsToBounds = YES;
+            s7tv_indicator_label.textAlignment = NSTextAlignmentCenter;
+            s7tv_indicator_label.translatesAutoresizingMaskIntoConstraints = NO;
+        }
+
+        // Texte
+        BOOL showTag = S7TVBool(kTCAdsBypassIndicatorTagEnabled);
+        NSString *text = showTag && adType.length
+            ? [NSString stringWithFormat:@"  ✓ Ad Bypassed · %@  ", adType]
+            : @"  ✓ Ad Bypassed  ";
+        s7tv_indicator_label.text = text;
+        s7tv_indicator_label.alpha = 1.0;
+
+        if (!s7tv_indicator_label.superview) {
+            [keyWin addSubview:s7tv_indicator_label];
+            [NSLayoutConstraint activateConstraints:@[
+                [s7tv_indicator_label.topAnchor
+                    constraintEqualToAnchor:keyWin.safeAreaLayoutGuide.topAnchor constant:12],
+                [s7tv_indicator_label.centerXAnchor
+                    constraintEqualToAnchor:keyWin.centerXAnchor],
+                [s7tv_indicator_label.heightAnchor constraintEqualToConstant:28],
+            ]];
+        }
+        [keyWin bringSubviewToFront:s7tv_indicator_label];
+
+        // Auto-hide après 4s
+        [s7tv_indicator_timer invalidate];
+        s7tv_indicator_timer = [NSTimer scheduledTimerWithTimeInterval:4.0
+            target:[NSBlockOperation blockOperationWithBlock:^{
+                [UIView animateWithDuration:0.4 animations:^{
+                    s7tv_indicator_label.alpha = 0.0;
+                }];
+            }]
+            selector:@selector(main) userInfo:nil repeats:NO];
+    });
+}
+
+// Détecter les segments pub dans les réponses HLS et déclencher l'indicator
+static void s7tv_detect_ad_in_playlist(NSString *playlist) {
+    if (!playlist.length) return;
+    NSString *adType = nil;
+    if ([playlist containsString:@"stitched-ad"] || [playlist containsString:@"X-TV-TWITCH-AD"])
+        adType = @"Stitched";
+    else if ([playlist containsString:@"#EXT-X-SCTE35"] || [playlist containsString:@"ad_tag"])
+        adType = @"Commercial";
+    if (adType) s7tv_show_ad_indicator(adType);
+}
+
 __attribute__((constructor))
 static void TwitchSevenTVInit(void) {
     SevenTVManager *mgr = [SevenTVManager sharedManager];
@@ -952,11 +1362,20 @@ static void TwitchSevenTVInit(void) {
     // Section 7TV dans les paramètres Twitch
     s7tv_swizzle_account_menu();
 
+    // Blocked URLs + HLS Sanitizer
+    s7tv_swizzle_adblock();
+
+    // Observer les changements Local Proxy
+    s7tv_observe_proxy_prefs();
+
     // Setup sur le main thread
     dispatch_async(dispatch_get_main_queue(), ^{
         [[SevenTVManager sharedManager] setup];
         [NSURLProtocol registerClass:[SevenTVURLProtocol class]];
         [[SevenTVManager sharedManager] log:@"✅ SevenTVManager prêt, URLProtocol enregistré"];
+
+        // Démarrer le local proxy si activé
+        s7tv_start_local_proxy();
 
         // ── Dump multi-classes chat ───────────────────────────────────────
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
