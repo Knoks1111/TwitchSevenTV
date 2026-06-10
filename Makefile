@@ -10,6 +10,9 @@ include $(THEOS)/makefiles/common.mk
 # ── Nom du dylib ──
 LIBRARY_NAME = TwitchSevenTV
 
+# ── Headers ──
+# SevenTVAdBlock.h  (nouveau — clés NSUserDefaults AdBlock/Proxy)
+
 # ── Fichiers source ──
 TwitchSevenTV_FILES = \
     TweakSevenTV.m \
@@ -31,7 +34,7 @@ TwitchSevenTV_LDFLAGS = \
     -Wl,-w
 
 # ── Frameworks Apple ──
-TwitchSevenTV_FRAMEWORKS = UIKit Foundation QuartzCore
+TwitchSevenTV_FRAMEWORKS = UIKit Foundation QuartzCore Network
 
 include $(THEOS_MAKE_PATH)/library.mk
 

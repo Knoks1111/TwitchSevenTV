@@ -238,9 +238,6 @@ static void S7TVStyleTableView(UITableView *tv) {
     tv.separatorInset    = UIEdgeInsetsMake(0, 52, 0, 0);
 }
 
-
-// ─────────────────────────────────────────────────────────────────────────────
-
 static UIColor *S7TVGreen(void)  { return [UIColor colorWithRed:0.20 green:0.78 blue:0.35 alpha:1.0]; }
 static UIColor *S7TVOrange(void) { return [UIColor colorWithRed:1.00 green:0.58 blue:0.00 alpha:1.0]; }
 static UIColor *S7TVRed(void)    { return [UIColor systemRedColor]; }
@@ -253,6 +250,7 @@ static void S7TVSetBool(NSString *key, BOOL val) {
     [[NSUserDefaults standardUserDefaults] setBool:val forKey:key];
     [[NSUserDefaults standardUserDefaults] synchronize];
 }
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // MARK: - SevenTVSettingsController  (Hub principal)
@@ -270,6 +268,7 @@ typedef NS_ENUM(NSInteger, S7TVHomeSection) {
 @implementation SevenTVSettingsController
 
 - (instancetype)init {
+    // InsetGrouped = angles arrondis natifs iOS, identique aux paramètres Twitch
     self = [super initWithStyle:UITableViewStyleInsetGrouped];
     return self;
 }
@@ -281,27 +280,32 @@ typedef NS_ENUM(NSInteger, S7TVHomeSection) {
 }
 
 - (void)buildNavBar {
-    NSData *d = [[NSData alloc] initWithBase64EncodedString:kS7TVLogoBase64
-                                                    options:NSDataBase64DecodingIgnoreUnknownCharacters];
+    // Titre nav bar : logo 7TV + "7TV"
+    NSData *d = [[NSData alloc]
+        initWithBase64EncodedString:kS7TVLogoBase64
+                            options:NSDataBase64DecodingIgnoreUnknownCharacters];
     UIImage *logo = d ? [UIImage imageWithData:d scale:2.0] : nil;
+
     if (logo) {
         UIView *tv = [[UIView alloc] init];
         UIImageView *iv = [[UIImageView alloc] initWithImage:logo];
         iv.contentMode = UIViewContentModeScaleAspectFit;
         iv.translatesAutoresizingMaskIntoConstraints = NO;
+
         UILabel *lbl = [[UILabel alloc] init];
         lbl.text = @"7TV";
         lbl.font = [UIFont systemFontOfSize:17 weight:UIFontWeightBold];
         lbl.textColor = S7TVAccent();
         lbl.translatesAutoresizingMaskIntoConstraints = NO;
+
         [tv addSubview:iv]; [tv addSubview:lbl];
         [NSLayoutConstraint activateConstraints:@[
-            [iv.leadingAnchor   constraintEqualToAnchor:tv.leadingAnchor],
-            [iv.centerYAnchor   constraintEqualToAnchor:tv.centerYAnchor],
-            [iv.widthAnchor     constraintEqualToConstant:28],
-            [iv.heightAnchor    constraintEqualToConstant:20],
-            [lbl.leadingAnchor  constraintEqualToAnchor:iv.trailingAnchor constant:6],
-            [lbl.centerYAnchor  constraintEqualToAnchor:tv.centerYAnchor],
+            [iv.leadingAnchor  constraintEqualToAnchor:tv.leadingAnchor],
+            [iv.centerYAnchor  constraintEqualToAnchor:tv.centerYAnchor],
+            [iv.widthAnchor    constraintEqualToConstant:28],
+            [iv.heightAnchor   constraintEqualToConstant:20],
+            [lbl.leadingAnchor constraintEqualToAnchor:iv.trailingAnchor constant:6],
+            [lbl.centerYAnchor constraintEqualToAnchor:tv.centerYAnchor],
             [lbl.trailingAnchor constraintEqualToAnchor:tv.trailingAnchor],
         ]];
         CGFloat w = 28 + 6 + [@"7TV" sizeWithAttributes:@{
@@ -312,6 +316,7 @@ typedef NS_ENUM(NSInteger, S7TVHomeSection) {
     } else {
         self.title = @"7TV Settings";
     }
+
     if (self.openedAsModal) {
         UIBarButtonItem *close = [[UIBarButtonItem alloc]
             initWithBarButtonSystemItem:UIBarButtonSystemItemClose
@@ -326,6 +331,8 @@ typedef NS_ENUM(NSInteger, S7TVHomeSection) {
             postNotificationName:@"S7TVMenuDidDismiss" object:nil];
     }];
 }
+
+// ── TableView ──
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tv { return 6; }
 
@@ -361,9 +368,14 @@ typedef NS_ENUM(NSInteger, S7TVHomeSection) {
     }
 }
 
-- (CGFloat)tableView:(UITableView *)tv heightForFooterInSection:(NSInteger)s { return 8; }
+- (CGFloat)tableView:(UITableView *)tv heightForFooterInSection:(NSInteger)s {
+    return 8;
+}
+
 - (UIView *)tableView:(UITableView *)tv viewForFooterInSection:(NSInteger)s {
-    UIView *v = [[UIView alloc] init]; v.backgroundColor = [UIColor clearColor]; return v;
+    UIView *v = [[UIView alloc] init];
+    v.backgroundColor = [UIColor clearColor];
+    return v;
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
@@ -372,11 +384,13 @@ typedef NS_ENUM(NSInteger, S7TVHomeSection) {
     if (ip.section == S7TVHomeSectionReload) {
         UITableViewCell *cell = [[UITableViewCell alloc]
             initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
-        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        cell.accessoryType   = UITableViewCellAccessoryDisclosureIndicator;
         cell.backgroundColor = S7TVCellBg();
         cell.selectedBackgroundView = [[UIView alloc] init];
-        cell.selectedBackgroundView.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.06];
-        UIImageView *icon = S7TVIcon(@"arrow.clockwise", [UIColor colorWithWhite:0.75 alpha:1.0]);
+        cell.selectedBackgroundView.backgroundColor =
+            [UIColor colorWithWhite:1.0 alpha:0.06];
+        UIImageView *icon = S7TVIcon(@"arrow.clockwise",
+                                      [UIColor colorWithWhite:0.75 alpha:1.0]);
         [cell.contentView addSubview:icon];
         UILabel *lbl = [[UILabel alloc] init];
         lbl.text = @"Recharger les emotes";
@@ -412,8 +426,7 @@ typedef NS_ENUM(NSInteger, S7TVHomeSection) {
     // Section Stream Proxy
     if (ip.section == S7TVHomeSectionProxy) {
         BOOL proxyOn = S7TVBool(kTCStreamProxyEnabled);
-        return S7TVNavCell(@"Stream Proxy",
-                           proxyOn ? @"Activé" : @"Désactivé",
+        return S7TVNavCell(@"Stream Proxy", proxyOn ? @"Activé" : @"Désactivé",
                            @"network", S7TVAccent());
     }
 
@@ -426,22 +439,20 @@ typedef NS_ENUM(NSInteger, S7TVHomeSection) {
     // Section Disable Ads
     if (ip.section == S7TVHomeSectionAds) {
         BOOL adsOff = S7TVBool(kTCAdsDisabled);
-        return S7TVNavCell(@"Disable Ads",
-                           adsOff ? @"Activé" : @"Désactivé",
+        return S7TVNavCell(@"Disable Ads", adsOff ? @"Activé" : @"Désactivé",
                            @"hand.raised.slash.fill", [UIColor colorWithWhite:0.75 alpha:1.0]);
     }
 
-    // Section Filtering : Blocked / Excluded URLs
+    // Section Filtering : Blocked URLs / Excluded URLs
     if (ip.section == S7TVHomeSectionURLs) {
         NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
         if (ip.row == 0) {
-            NSArray *list = [ud arrayForKey:kTCBlockedURLList] ?: @[];
-            NSString *sub = [NSString stringWithFormat:@"%lu règles", (unsigned long)list.count];
-            return S7TVNavCell(@"Blocked URLs", sub, @"minus.circle.fill",
-                               [UIColor systemRedColor]);
+            NSArray *blocked = [ud arrayForKey:kTCBlockedURLList] ?: @[];
+            NSString *sub = [NSString stringWithFormat:@"%lu règles", (unsigned long)blocked.count];
+            return S7TVNavCell(@"Blocked URLs", sub, @"minus.circle.fill", S7TVRed());
         } else {
-            NSArray *list = [ud arrayForKey:kTCExcludedURLList] ?: @[];
-            NSString *sub = [NSString stringWithFormat:@"%lu entrées", (unsigned long)list.count];
+            NSArray *excluded = [ud arrayForKey:kTCExcludedURLList] ?: @[];
+            NSString *sub = [NSString stringWithFormat:@"%lu entrées", (unsigned long)excluded.count];
             return S7TVNavCell(@"Excluded URLs", sub, @"eye.slash.fill",
                                [UIColor colorWithWhite:0.75 alpha:1.0]);
         }
@@ -481,16 +492,18 @@ typedef NS_ENUM(NSInteger, S7TVHomeSection) {
     [mgr loadGlobalEmotes];
     if (mgr.currentChannelTwitchID)
         [mgr loadEmotesForChannelTwitchID:mgr.currentChannelTwitchID];
+
     UIAlertController *alert = [UIAlertController
         alertControllerWithTitle:@"Rechargement lancé"
-        message:@"Les emotes seront disponibles dans quelques secondes."
-        preferredStyle:UIAlertControllerStyleAlert];
+                         message:@"Les emotes seront disponibles dans quelques secondes."
+                  preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"OK"
         style:UIAlertActionStyleDefault handler:nil]];
     [self presentViewController:alert animated:YES completion:nil];
 }
 
 @end
+
 
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -560,17 +573,14 @@ typedef NS_ENUM(NSInteger, S7TVProxySection) {
     }
 }
 
-- (CGFloat)tableView:(UITableView *)tv heightForFooterInSection:(NSInteger)s {
-    return (s == S7TVProxySectionStatus || s == S7TVProxySectionAddress || s == S7TVProxySectionLocal)
-        ? UITableViewAutomaticDimension : 8;
-}
+- (CGFloat)tableView:(UITableView *)tv heightForFooterInSection:(NSInteger)s { return s == S7TVProxySectionStatus || s == S7TVProxySectionAddress || s == S7TVProxySectionLocal ? UITableViewAutomaticDimension : 8; }
 
 - (UIView *)tableView:(UITableView *)tv viewForFooterInSection:(NSInteger)s {
     NSString *footer = nil;
     if (s == S7TVProxySectionStatus)
         footer = @"Green: connected. Orange: connecting. Red: timeout. IP shows what the app currently sees.";
     else if (s == S7TVProxySectionAddress)
-        footer = @"Enter any HTTPS URL or host:port. Use $url for best compatibility across live, VOD, and clips.";
+        footer = @"Enter any HTTPS URL or host:port. Use $url for best compatibility across live, VOD, and clips. For loopback, enable Local Proxy below.";
     else if (s == S7TVProxySectionLocal)
         footer = @"Run a lightweight local proxy inside the app (loopback). Enable Stream Proxy to route through it.";
     if (!footer) { UIView *v = [[UIView alloc] init]; v.backgroundColor = [UIColor clearColor]; return v; }
@@ -578,7 +588,8 @@ typedef NS_ENUM(NSInteger, S7TVProxySection) {
     UILabel *lbl = [[UILabel alloc] init];
     lbl.text = footer;
     lbl.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
-    lbl.textColor = S7TVGray(); lbl.numberOfLines = 0;
+    lbl.textColor = S7TVGray();
+    lbl.numberOfLines = 0;
     lbl.translatesAutoresizingMaskIntoConstraints = NO;
     [container addSubview:lbl];
     [NSLayoutConstraint activateConstraints:@[
@@ -610,9 +621,9 @@ typedef NS_ENUM(NSInteger, S7TVProxySection) {
         BOOL localEnabled = S7TVBool(kTCStreamProxyLocalEnabled);
         NSString *proxyURL = [ud stringForKey:kTCStreamProxyURL] ?: @"";
         UIColor *dotColor; NSString *statusText;
-        if (!enabled)                               { dotColor = S7TVGray();   statusText = @"Status: Disabled"; }
-        else if (!proxyURL.length && !localEnabled) { dotColor = S7TVRed();   statusText = @"Status: Missing Proxy"; }
-        else                                        { dotColor = S7TVGreen(); statusText = @"Status: Connected"; }
+        if (!enabled)                              { dotColor = S7TVGray();   statusText = @"Status: Disabled"; }
+        else if (!proxyURL.length && !localEnabled){ dotColor = S7TVRed();   statusText = @"Status: Missing Proxy"; }
+        else                                       { dotColor = S7TVGreen(); statusText = @"Status: Connected"; }
         dot.backgroundColor = dotColor;
         UILabel *statusLbl = [[UILabel alloc] init];
         statusLbl.text = statusText;
@@ -622,10 +633,10 @@ typedef NS_ENUM(NSInteger, S7TVProxySection) {
         [cell.contentView addSubview:dot];
         [cell.contentView addSubview:statusLbl];
         [NSLayoutConstraint activateConstraints:@[
-            [dot.leadingAnchor       constraintEqualToAnchor:cell.contentView.leadingAnchor constant:20],
-            [dot.centerYAnchor       constraintEqualToAnchor:cell.contentView.centerYAnchor],
-            [dot.widthAnchor         constraintEqualToConstant:10],
-            [dot.heightAnchor        constraintEqualToConstant:10],
+            [dot.leadingAnchor  constraintEqualToAnchor:cell.contentView.leadingAnchor constant:20],
+            [dot.centerYAnchor  constraintEqualToAnchor:cell.contentView.centerYAnchor],
+            [dot.widthAnchor    constraintEqualToConstant:10],
+            [dot.heightAnchor   constraintEqualToConstant:10],
             [statusLbl.leadingAnchor constraintEqualToAnchor:dot.trailingAnchor constant:12],
             [statusLbl.centerYAnchor constraintEqualToAnchor:cell.contentView.centerYAnchor],
         ]];
@@ -749,7 +760,8 @@ typedef NS_ENUM(NSInteger, S7TVProxySection) {
         [cell.contentView addSubview:portLbl];
         UIStepper *stepper = [[UIStepper alloc] init];
         stepper.minimumValue = 1024; stepper.maximumValue = 65535;
-        stepper.stepValue = 1; stepper.value = port; stepper.tag = 9595;
+        stepper.stepValue = 1; stepper.value = port;
+        stepper.tag = 9595;
         [stepper addTarget:self action:@selector(localPortChanged:) forControlEvents:UIControlEventValueChanged];
         stepper.translatesAutoresizingMaskIntoConstraints = NO;
         [cell.contentView addSubview:stepper];
@@ -814,13 +826,10 @@ typedef NS_ENUM(NSInteger, S7TVProxySection) {
     if (timeout <= 0) timeout = 5.0;
     NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration ephemeralSessionConfiguration];
     cfg.timeoutIntervalForRequest = timeout;
-    [[[NSURLSession sessionWithConfiguration:cfg]
-        dataTaskWithURL:[NSURL URLWithString:urlStr]
+    [[[[NSURLSession sessionWithConfiguration:cfg] dataTaskWithURL:[NSURL URLWithString:urlStr]
         completionHandler:^(NSData *d, NSURLResponse *r, NSError *err) {
         dispatch_async(dispatch_get_main_queue(), ^{
-            NSString *result = err
-                ? [NSString stringWithFormat:@"Error: %@", err.localizedDescription]
-                : @"OK ✓";
+            NSString *result = err ? [NSString stringWithFormat:@"Error: %@", err.localizedDescription] : @"OK ✓";
             UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Test Server"
                 message:result preferredStyle:UIAlertControllerStyleAlert];
             [a addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
@@ -892,8 +901,8 @@ typedef NS_ENUM(NSInteger, S7TVProxySection) {
 }
 
 - (void)reload {
-    self.savedProxies = [NSMutableArray arrayWithArray:
-        [[NSUserDefaults standardUserDefaults] arrayForKey:kTCStreamProxySavedList] ?: @[]];
+    NSArray *saved = [[NSUserDefaults standardUserDefaults] arrayForKey:kTCStreamProxySavedList];
+    self.savedProxies = [NSMutableArray arrayWithArray:saved ?: @[]];
     [self.tableView reloadData];
 }
 
@@ -902,13 +911,9 @@ typedef NS_ENUM(NSInteger, S7TVProxySection) {
     return self.savedProxies.count == 0 ? 1 : (NSInteger)self.savedProxies.count;
 }
 - (CGFloat)tableView:(UITableView *)tv heightForHeaderInSection:(NSInteger)s { return 44; }
-- (UIView *)tableView:(UITableView *)tv viewForHeaderInSection:(NSInteger)s {
-    return S7TVSectionHeader(@"Tap to use · Swipe to delete", NO);
-}
+- (UIView *)tableView:(UITableView *)tv viewForHeaderInSection:(NSInteger)s { return S7TVSectionHeader(@"Tap to use · Swipe to delete", NO); }
 - (CGFloat)tableView:(UITableView *)tv heightForFooterInSection:(NSInteger)s { return 8; }
-- (UIView *)tableView:(UITableView *)tv viewForFooterInSection:(NSInteger)s {
-    UIView *v = [[UIView alloc] init]; v.backgroundColor = [UIColor clearColor]; return v;
-}
+- (UIView *)tableView:(UITableView *)tv viewForFooterInSection:(NSInteger)s { UIView *v = [[UIView alloc] init]; v.backgroundColor = [UIColor clearColor]; return v; }
 
 - (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
     if (self.savedProxies.count == 0) {
@@ -921,8 +926,7 @@ typedef NS_ENUM(NSInteger, S7TVProxySection) {
         cell.textLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightRegular];
         return cell;
     }
-    return S7TVNavCell(self.savedProxies[ip.row], nil, @"bookmark.fill",
-                       [UIColor colorWithWhite:0.75 alpha:1.0]);
+    return S7TVNavCell(self.savedProxies[ip.row], nil, @"bookmark.fill", [UIColor colorWithWhite:0.75 alpha:1.0]);
 }
 
 - (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
@@ -985,16 +989,16 @@ typedef NS_ENUM(NSInteger, S7TVProxySection) {
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tv { return 1; }
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s { return 3; }
 - (CGFloat)tableView:(UITableView *)tv heightForHeaderInSection:(NSInteger)s { return 44; }
-- (UIView *)tableView:(UITableView *)tv viewForHeaderInSection:(NSInteger)s {
-    return S7TVSectionHeader(@"Live Stream Control", NO);
-}
+- (UIView *)tableView:(UITableView *)tv viewForHeaderInSection:(NSInteger)s { return S7TVSectionHeader(@"Live Stream Control", NO); }
 - (CGFloat)tableView:(UITableView *)tv heightForFooterInSection:(NSInteger)s { return UITableViewAutomaticDimension; }
+
 - (UIView *)tableView:(UITableView *)tv viewForFooterInSection:(NSInteger)s {
     UIView *container = [[UIView alloc] init];
     UILabel *lbl = [[UILabel alloc] init];
     lbl.text = @"Auto Collect Channel Points automatically claims the live channel-points chest when it appears in chat. The Ad Bypassed Indicator displays a small alert in the corner when an ad segment is actively skipped by the proxy. Enabling Show Ad Type Tag appends the ad classification (e.g. Commercial or Stitched) directly inside the indicator pill.";
     lbl.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
-    lbl.textColor = S7TVGray(); lbl.numberOfLines = 0;
+    lbl.textColor = S7TVGray();
+    lbl.numberOfLines = 0;
     lbl.translatesAutoresizingMaskIntoConstraints = NO;
     [container addSubview:lbl];
     [NSLayoutConstraint activateConstraints:@[
@@ -1021,9 +1025,7 @@ typedef NS_ENUM(NSInteger, S7TVProxySection) {
     }
 }
 
-- (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
-    [tv deselectRowAtIndexPath:ip animated:YES];
-}
+- (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip { [tv deselectRowAtIndexPath:ip animated:YES]; }
 - (void)toggleAutoCollect:(UISwitch *)sw     { S7TVSetBool(kTCLiveAutoCollectChannelPoints, sw.isOn); }
 - (void)toggleBypassIndicator:(UISwitch *)sw { S7TVSetBool(kTCAdsBypassIndicatorEnabled, sw.isOn); }
 - (void)toggleAdTypeTag:(UISwitch *)sw       { S7TVSetBool(kTCAdsBypassIndicatorTagEnabled, sw.isOn); }
@@ -1048,16 +1050,16 @@ typedef NS_ENUM(NSInteger, S7TVProxySection) {
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tv { return 1; }
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s { return 1; }
 - (CGFloat)tableView:(UITableView *)tv heightForHeaderInSection:(NSInteger)s { return 44; }
-- (UIView *)tableView:(UITableView *)tv viewForHeaderInSection:(NSInteger)s {
-    return S7TVSectionHeader(@"Disable Ads", NO);
-}
+- (UIView *)tableView:(UITableView *)tv viewForHeaderInSection:(NSInteger)s { return S7TVSectionHeader(@"Disable Ads", NO); }
 - (CGFloat)tableView:(UITableView *)tv heightForFooterInSection:(NSInteger)s { return UITableViewAutomaticDimension; }
+
 - (UIView *)tableView:(UITableView *)tv viewForFooterInSection:(NSInteger)s {
     UIView *container = [[UIView alloc] init];
     UILabel *lbl = [[UILabel alloc] init];
     lbl.text = @"Disable Ads on/off. Disabling ads applies immediately to active Twitch windows.";
     lbl.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
-    lbl.textColor = S7TVGray(); lbl.numberOfLines = 0;
+    lbl.textColor = S7TVGray();
+    lbl.numberOfLines = 0;
     lbl.translatesAutoresizingMaskIntoConstraints = NO;
     [container addSubview:lbl];
     [NSLayoutConstraint activateConstraints:@[
@@ -1102,8 +1104,7 @@ typedef NS_ENUM(NSInteger, S7TVProxySection) {
 }
 
 - (void)reload {
-    self.entries = [NSMutableArray arrayWithArray:
-        [[NSUserDefaults standardUserDefaults] arrayForKey:kTCBlockedURLList] ?: @[]];
+    self.entries = [NSMutableArray arrayWithArray:[[NSUserDefaults standardUserDefaults] arrayForKey:kTCBlockedURLList] ?: @[]];
     [self.tableView reloadData];
 }
 
@@ -1141,8 +1142,7 @@ typedef NS_ENUM(NSInteger, S7TVProxySection) {
         UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
         cell.selectionStyle = UITableViewCellSelectionStyleNone;
         cell.backgroundColor = S7TVCellBg();
-        cell.textLabel.text = @"No blocked URLs";
-        cell.textLabel.textColor = S7TVGray();
+        cell.textLabel.text = @"No blocked URLs"; cell.textLabel.textColor = S7TVGray();
         cell.textLabel.textAlignment = NSTextAlignmentCenter;
         cell.textLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightRegular];
         return cell;
@@ -1150,7 +1150,7 @@ typedef NS_ENUM(NSInteger, S7TVProxySection) {
     UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
     cell.selectionStyle = UITableViewCellSelectionStyleNone;
     cell.backgroundColor = S7TVCellBg();
-    UIImageView *icon = S7TVIcon(@"minus.circle.fill", [UIColor systemRedColor]);
+    UIImageView *icon = S7TVIcon(@"minus.circle.fill", S7TVRed());
     [cell.contentView addSubview:icon];
     UILabel *lbl = [[UILabel alloc] init];
     lbl.text = self.entries[ip.row];
@@ -1225,8 +1225,7 @@ typedef NS_ENUM(NSInteger, S7TVProxySection) {
 }
 
 - (void)reload {
-    self.entries = [NSMutableArray arrayWithArray:
-        [[NSUserDefaults standardUserDefaults] arrayForKey:kTCExcludedURLList] ?: @[]];
+    self.entries = [NSMutableArray arrayWithArray:[[NSUserDefaults standardUserDefaults] arrayForKey:kTCExcludedURLList] ?: @[]];
     [self.tableView reloadData];
 }
 
@@ -1264,8 +1263,7 @@ typedef NS_ENUM(NSInteger, S7TVProxySection) {
         UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
         cell.selectionStyle = UITableViewCellSelectionStyleNone;
         cell.backgroundColor = S7TVCellBg();
-        cell.textLabel.text = @"No excluded URLs";
-        cell.textLabel.textColor = S7TVGray();
+        cell.textLabel.text = @"No excluded URLs"; cell.textLabel.textColor = S7TVGray();
         cell.textLabel.textAlignment = NSTextAlignmentCenter;
         cell.textLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightRegular];
         return cell;
@@ -1325,6 +1323,7 @@ typedef NS_ENUM(NSInteger, S7TVProxySection) {
 
 @end
 
+// ─────────────────────────────────────────────────────────────────────────────
 // MARK: - SevenTVEmotesPageController
 // ─────────────────────────────────────────────────────────────────────────────
 
