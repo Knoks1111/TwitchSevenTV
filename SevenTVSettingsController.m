@@ -826,7 +826,8 @@ typedef NS_ENUM(NSInteger, S7TVProxySection) {
     if (timeout <= 0) timeout = 5.0;
     NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration ephemeralSessionConfiguration];
     cfg.timeoutIntervalForRequest = timeout;
-    [[[[NSURLSession sessionWithConfiguration:cfg] dataTaskWithURL:[NSURL URLWithString:urlStr]
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:cfg];
+    [[session dataTaskWithURL:[NSURL URLWithString:urlStr]
         completionHandler:^(NSData *d, NSURLResponse *r, NSError *err) {
         dispatch_async(dispatch_get_main_queue(), ^{
             NSString *result = err ? [NSString stringWithFormat:@"Error: %@", err.localizedDescription] : @"OK ✓";
