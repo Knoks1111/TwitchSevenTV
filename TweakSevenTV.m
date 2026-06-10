@@ -979,7 +979,7 @@ static void TwitchSevenTVInit(void) {
         [NSURLProtocol registerClass:[SevenTVURLProtocol class]];
         [[SevenTVManager sharedManager] log:@"✅ SevenTVManager prêt, URLProtocol enregistré"];
 
-        // ── Dump méthodes MessageStringView ──────────────────────────────
+        // ── Dump iVars + méthodes MessageStringView ──────────────────────
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             Class msgView = NSClassFromString(@"Twitch.MessageStringView");
@@ -987,14 +987,32 @@ static void TwitchSevenTVInit(void) {
                 [[SevenTVManager sharedManager] log:@"❌ MessageStringView introuvable"];
                 return;
             }
-            unsigned int count = 0;
-            Method *methods = class_copyMethodList(msgView, &count);
-            [[SevenTVManager sharedManager] log:@"📋 MessageStringView — %u méthodes:", count];
-            for (unsigned int i = 0; i < count; i++) {
-                [[SevenTVManager sharedManager] log:@"📋   %@",
-                 NSStringFromSelector(method_getName(methods[i]))];
+
+            // ── iVars ──
+            unsigned int ivarCount = 0;
+            Ivar *ivars = class_copyIvarList(msgView, &ivarCount);
+            [[SevenTVManager sharedManager] log:@"📦 MessageStringView — %u iVars:", ivarCount];
+            for (unsigned int i = 0; i < ivarCount; i++) {
+                const char *name = ivar_getName(ivars[i]);
+                const char *type = ivar_getTypeEncoding(ivars[i]);
+                [[SevenTVManager sharedManager] log:@"📦   %s (%s)", name, type ? type : "?"];
             }
-            free(methods);
+            free(ivars);
+
+            // ── Propriétés ──
+            unsigned int propCount = 0;
+            objc_property_t *props = class_copyPropertyList(msgView, &propCount);
+            [[SevenTVManager sharedManager] log:@"🔑 MessageStringView — %u propriétés:", propCount];
+            for (unsigned int i = 0; i < propCount; i++) {
+                const char *name = property_getName(props[i]);
+                const char *attr = property_getAttributes(props[i]);
+                [[SevenTVManager sharedManager] log:@"🔑   %s (%s)", name, attr ? attr : "?"];
+            }
+            free(props);
+
+            // ── Méthodes de la superclasse aussi ──
+            Class superCls = class_getSuperclass(msgView);
+            [[SevenTVManager sharedManager] log:@"🔗 Superclasse: %@", NSStringFromClass(superCls)];
         });
         // ─────────────────────────────────────────────────────────────────
 
