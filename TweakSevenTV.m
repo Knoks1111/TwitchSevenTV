@@ -1148,58 +1148,55 @@ static void TwitchSevenTVInit(void) {
                                 if (arr.count == 0) return; // pas d'emote dans cette cellule
                                 s_dumped = YES; // on a trouvé une cellule avec emotes
                                 for (id imgLayer in arr) {
+                                    CALayer *caImgLayer = (CALayer *)imgLayer;
+                                    Class imgLayerClass = [imgLayer class];
+
                                     [mgr log:@"📐   imageLayer: %@ bounds=(%.1fx%.1f) frame=(%.1f,%.1f,%.1f,%.1f)",
-                                     NSStringFromClass([imgLayer class]),
-                                     ((CALayer *)imgLayer).bounds.size.width,
-                                     ((CALayer *)imgLayer).bounds.size.height,
-                                     ((CALayer *)imgLayer).frame.origin.x,
-                                     ((CALayer *)imgLayer).frame.origin.y,
-                                     ((CALayer *)imgLayer).frame.size.width,
-                                     ((CALayer *)imgLayer).frame.size.height];
-                                    // Dump iVars de chaque imageLayer
+                                     NSStringFromClass(imgLayerClass),
+                                     caImgLayer.bounds.size.width, caImgLayer.bounds.size.height,
+                                     caImgLayer.frame.origin.x, caImgLayer.frame.origin.y,
+                                     caImgLayer.frame.size.width, caImgLayer.frame.size.height];
+
+                                    // Dump iVars
                                     unsigned int ic = 0;
-                                    Ivar *iv = class_copyIvarList([imgLayer class], &ic);
+                                    Ivar *iv = class_copyIvarList(imgLayerClass, &ic);
                                     for (unsigned int i = 0; i < ic; i++) {
                                         [mgr log:@"📐     iVar: %s", ivar_getName(iv[i])];
                                     }
                                     free(iv);
-                                }
 
-                                // Dump méthodes de ImageAttachmentLayer
-                                unsigned int mc = 0;
-                                Method *methods = class_copyMethodList([imgLayer class], &mc);
-                                if (mc > 0) {
-                                    [mgr log:@"📐     méthodes de %@:", NSStringFromClass([imgLayer class])];
+                                    // Dump méthodes
+                                    unsigned int mc = 0;
+                                    Method *methods = class_copyMethodList(imgLayerClass, &mc);
+                                    [mgr log:@"📐     méthodes (%u):", mc];
                                     for (unsigned int i = 0; i < mc; i++) {
                                         [mgr log:@"📐       %@", NSStringFromSelector(method_getName(methods[i]))];
                                     }
-                                }
-                                free(methods);
+                                    free(methods);
 
-                                // Dump contenu de l'iVar 'content'
-                                Ivar contentIvar = class_getInstanceVariable([imgLayer class], "content");
-                                if (contentIvar) {
-                                    ptrdiff_t contentOffset = ivar_getOffset(contentIvar);
-                                    void **contentPtr = (void **)((uint8_t *)(__bridge void *)imgLayer + contentOffset);
-                                    id contentVal = (__bridge id)*contentPtr;
-                                    [mgr log:@"📐     content classe: %@", NSStringFromClass([contentVal class])];
-                                    if (contentVal) {
-                                        // Dump iVars du content
-                                        unsigned int cic = 0;
-                                        Ivar *civ = class_copyIvarList([contentVal class], &cic);
-                                        [mgr log:@"📐     content iVars (%u):", cic];
-                                        for (unsigned int i = 0; i < cic; i++) {
-                                            [mgr log:@"📐       %s", ivar_getName(civ[i])];
+                                    // Dump contenu iVar 'content'
+                                    Ivar contentIvar = class_getInstanceVariable(imgLayerClass, "content");
+                                    if (contentIvar) {
+                                        ptrdiff_t contentOffset = ivar_getOffset(contentIvar);
+                                        void **contentPtr = (void **)((uint8_t *)(__bridge void *)imgLayer + contentOffset);
+                                        id contentVal = (__bridge id)*contentPtr;
+                                        [mgr log:@"📐     content classe: %@", NSStringFromClass([contentVal class])];
+                                        if (contentVal) {
+                                            unsigned int cic = 0;
+                                            Ivar *civ = class_copyIvarList([contentVal class], &cic);
+                                            [mgr log:@"📐     content iVars (%u):", cic];
+                                            for (unsigned int i = 0; i < cic; i++) {
+                                                [mgr log:@"📐       %s", ivar_getName(civ[i])];
+                                            }
+                                            free(civ);
+                                            unsigned int cmc = 0;
+                                            Method *cmethods = class_copyMethodList([contentVal class], &cmc);
+                                            [mgr log:@"📐     content méthodes (%u):", cmc];
+                                            for (unsigned int i = 0; i < cmc; i++) {
+                                                [mgr log:@"📐       %@", NSStringFromSelector(method_getName(cmethods[i]))];
+                                            }
+                                            free(cmethods);
                                         }
-                                        free(civ);
-                                        // Méthodes du content
-                                        unsigned int cmc = 0;
-                                        Method *cmethods = class_copyMethodList([contentVal class], &cmc);
-                                        [mgr log:@"📐     content méthodes (%u):", cmc];
-                                        for (unsigned int i = 0; i < cmc; i++) {
-                                            [mgr log:@"📐       %@", NSStringFromSelector(method_getName(cmethods[i]))];
-                                        }
-                                        free(cmethods);
                                     }
                                 }
                             }
