@@ -1026,14 +1026,12 @@ static void TwitchSevenTVInit(void) {
                 ((void (*)(id, SEL, UITableView *, UITableViewCell *, NSIndexPath *))origIMP)
                     (self_tv, origSel, tableView, cell, indexPath);
 
-                // On ne dumpe qu'une seule fois pour pas spammer les logs
-                static BOOL s_dumped = NO;
-                if (s_dumped) return;
-
                 // Vérifier que c'est bien une ChatMessageTableViewCell
                 if (![NSStringFromClass([cell class]) isEqualToString:@"Twitch.ChatMessageTableViewCell"]) return;
 
-                s_dumped = YES;
+                // Ne dumper que si on a pas encore trouvé une cellule avec emotes
+                static BOOL s_dumped = NO;
+                if (s_dumped) return;
                 SevenTVManager *mgr = [SevenTVManager sharedManager];
                 [mgr log:@"📐 ═══ DUMP willDisplayCell ═══"];
 
@@ -1147,6 +1145,8 @@ static void TwitchSevenTVInit(void) {
                             if ([imgLayers isKindOfClass:[NSArray class]]) {
                                 NSArray *arr = (NSArray *)imgLayers;
                                 [mgr log:@"📐 orderedImageLayers count: %lu", (unsigned long)arr.count];
+                                if (arr.count == 0) return; // pas d'emote dans cette cellule
+                                s_dumped = YES; // on a trouvé une cellule avec emotes
                                 for (id imgLayer in arr) {
                                     [mgr log:@"📐   imageLayer: %@ bounds=(%.1fx%.1f) frame=(%.1f,%.1f,%.1f,%.1f)",
                                      NSStringFromClass([imgLayer class]),
