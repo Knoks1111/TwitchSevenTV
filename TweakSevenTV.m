@@ -972,7 +972,8 @@ static BOOL s7tv_shouldBlockURL(NSURL *url) {
 }
 
 // Sanitize une playlist HLS — supprime les segments pub
-static NSString *s7tv_sanitizeM3U8(NSString *playlist) {
+static NSString *s7tv_sanitizeM3U8(NSString *playlist, BOOL *didBypass) {
+    if (didBypass) *didBypass = NO;
     if (!S7TVBool(kTCStreamProxySanitizeM3U8)) return playlist;
     NSMutableArray<NSString *> *lines = [[playlist componentsSeparatedByString:@"\n"] mutableCopy];
     NSMutableArray<NSString *> *out   = [NSMutableArray array];
@@ -996,6 +997,9 @@ static NSString *s7tv_sanitizeM3U8(NSString *playlist) {
         }
         skipNext = NO;
         [out addObject:line];
+    }
+    if (out.count < lines.count) {
+        if (didBypass) *didBypass = YES;
     }
     return [out componentsJoinedByString:@"\n"];
 }
@@ -1030,7 +1034,9 @@ static NSString *s7tv_sanitizeM3U8(NSString *playlist) {
                 if (data && !err) {
                     NSString *playlist = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
                     if (playlist) {
-                        NSString *sanitized = s7tv_sanitizeM3U8(playlist);
+                        BOOL didBypassA = NO;
+                        NSString *sanitized = s7tv_sanitizeM3U8(playlist, &didBypassA);
+                        if (didBypassA) s7tv_show_ad_indicator([[NSUserDefaults standardUserDefaults] stringForKey:@"s7tv_last_ad_type"]);
                         data = [sanitized dataUsingEncoding:NSUTF8StringEncoding];
                     }
                 }
@@ -1172,7 +1178,9 @@ static void s7tv_forward_connection(nw_connection_t client_conn) {
                         encoding:NSUTF8StringEncoding];
                     if (pl) {
                         s7tv_detect_ad_in_playlist(pl);
-                        NSString *san = s7tv_sanitizeM3U8(pl);
+                        BOOL didBypassB = NO;
+                        NSString *san = s7tv_sanitizeM3U8(pl, &didBypassB);
+                        if (didBypassB) s7tv_show_ad_indicator([[NSUserDefaults standardUserDefaults] stringForKey:@"s7tv_last_ad_type"]);
                         body = [san dataUsingEncoding:NSUTF8StringEncoding] ?: data;
                     }
                 }
