@@ -1164,6 +1164,44 @@ static void TwitchSevenTVInit(void) {
                                     }
                                     free(iv);
                                 }
+
+                                // Dump méthodes de ImageAttachmentLayer
+                                unsigned int mc = 0;
+                                Method *methods = class_copyMethodList([imgLayer class], &mc);
+                                if (mc > 0) {
+                                    [mgr log:@"📐     méthodes de %@:", NSStringFromClass([imgLayer class])];
+                                    for (unsigned int i = 0; i < mc; i++) {
+                                        [mgr log:@"📐       %@", NSStringFromSelector(method_getName(methods[i]))];
+                                    }
+                                }
+                                free(methods);
+
+                                // Dump contenu de l'iVar 'content'
+                                Ivar contentIvar = class_getInstanceVariable([imgLayer class], "content");
+                                if (contentIvar) {
+                                    ptrdiff_t contentOffset = ivar_getOffset(contentIvar);
+                                    void **contentPtr = (void **)((uint8_t *)(__bridge void *)imgLayer + contentOffset);
+                                    id contentVal = (__bridge id)*contentPtr;
+                                    [mgr log:@"📐     content classe: %@", NSStringFromClass([contentVal class])];
+                                    if (contentVal) {
+                                        // Dump iVars du content
+                                        unsigned int cic = 0;
+                                        Ivar *civ = class_copyIvarList([contentVal class], &cic);
+                                        [mgr log:@"📐     content iVars (%u):", cic];
+                                        for (unsigned int i = 0; i < cic; i++) {
+                                            [mgr log:@"📐       %s", ivar_getName(civ[i])];
+                                        }
+                                        free(civ);
+                                        // Méthodes du content
+                                        unsigned int cmc = 0;
+                                        Method *cmethods = class_copyMethodList([contentVal class], &cmc);
+                                        [mgr log:@"📐     content méthodes (%u):", cmc];
+                                        for (unsigned int i = 0; i < cmc; i++) {
+                                            [mgr log:@"📐       %@", NSStringFromSelector(method_getName(cmethods[i]))];
+                                        }
+                                        free(cmethods);
+                                    }
+                                }
                             }
                         }
 
