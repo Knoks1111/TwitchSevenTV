@@ -974,116 +974,165 @@ static void TwitchSevenTVInit(void) {
 
         // Démarrer le local proxy si activé
 
-        // ── Dump multi-classes chat ───────────────────────────────────────
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
+        // ── Hook willDisplayCell sur ChatTranscriptView ──────────────────
+        // On swizzle tableView:willDisplayCell:forRowAtIndexPath: pour lire
+        // messageStringLayer et networkImageRequester en live sur chaque cellule.
+        // But : comprendre comment la taille des emotes est stockée.
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
-            SevenTVManager *mgr = [SevenTVManager sharedManager];
-
-            // Liste des classes à inspecter
-            NSArray *classNames = @[
-                @"Twitch.MessageStringView",
-                @"Twitch.ChatMessageTableViewCell",
-                @"Twitch.ChatTranscriptView",
-            ];
-
-            void (^dumpClass)(NSString *) = ^(NSString *className) {
-                Class cls = NSClassFromString(className);
-                if (!cls) {
-                    [mgr log:@"❌ Classe introuvable: %@", className];
-                    return;
-                }
-                [mgr log:@"════ DUMP: %@ ════", className];
-                [mgr log:@"🔗 Superclasse: %@", NSStringFromClass(class_getSuperclass(cls))];
-
-                // iVars
-                unsigned int ivarCount = 0;
-                Ivar *ivars = class_copyIvarList(cls, &ivarCount);
-                [mgr log:@"📦 %u iVars:", ivarCount];
-                for (unsigned int i = 0; i < ivarCount; i++) {
-                    const char *name = ivar_getName(ivars[i]);
-                    const char *type = ivar_getTypeEncoding(ivars[i]);
-                    [mgr log:@"📦   %s :: %s", name, type ? type : "?"];
-                }
-                free(ivars);
-
-                // Propriétés
-                unsigned int propCount = 0;
-                objc_property_t *props = class_copyPropertyList(cls, &propCount);
-                [mgr log:@"🔑 %u propriétés:", propCount];
-                for (unsigned int i = 0; i < propCount; i++) {
-                    const char *name = property_getName(props[i]);
-                    const char *attr = property_getAttributes(props[i]);
-                    [mgr log:@"🔑   %s :: %s", name, attr ? attr : "?"];
-                }
-                free(props);
-
-                // Méthodes
-                unsigned int methodCount = 0;
-                Method *methods = class_copyMethodList(cls, &methodCount);
-                [mgr log:@"📋 %u méthodes:", methodCount];
-                for (unsigned int i = 0; i < methodCount; i++) {
-                    const char *types = method_getTypeEncoding(methods[i]);
-                    [mgr log:@"📋   %@ :: %s",
-                     NSStringFromSelector(method_getName(methods[i])),
-                     types ? types : "?"];
-                }
-                free(methods);
-
-                [mgr log:@"════ FIN: %@ ════", className];
-            };
-
-            for (NSString *cn in classNames) {
-                dumpClass(cn);
+            Class transcriptClass = NSClassFromString(@"Twitch.ChatTranscriptView");
+            if (!transcriptClass) {
+                [[SevenTVManager sharedManager] log:@"❌ ChatTranscriptView introuvable"];
+                return;
             }
 
-            // Dump runtime d'une instance de MessageStringView si disponible
-            [mgr log:@"🔎 Recherche instance MessageStringView en live..."];
-            UIWindow *keyWin = nil;
-            for (UIScene *sc in [UIApplication sharedApplication].connectedScenes)
-                if ([sc isKindOfClass:[UIWindowScene class]])
-                    for (UIWindow *w in ((UIWindowScene *)sc).windows)
-                        if (w.isKeyWindow) { keyWin = w; break; }
+            SEL origSel = @selector(tableView:willDisplayCell:forRowAtIndexPath:);
+            Method origMethod = class_getInstanceMethod(transcriptClass, origSel);
+            if (!origMethod) {
+                [[SevenTVManager sharedManager] log:@"❌ willDisplayCell introuvable"];
+                return;
+            }
 
-            if (keyWin) {
-                NSMutableArray *queue = [NSMutableArray arrayWithObject:keyWin];
-                while (queue.count > 0) {
-                    UIView *v = queue.firstObject; [queue removeObjectAtIndex:0];
-                    [queue addObjectsFromArray:v.subviews];
-                    if ([NSStringFromClass([v class]) isEqualToString:@"Twitch.MessageStringView"]) {
-                        [mgr log:@"🔎 Instance trouvée! Dump KVC:"];
-                        // Dump messageStringLayer
-                        @try {
-                            id layer = [v valueForKey:@"messageStringLayer"];
-                            [mgr log:@"🔎   messageStringLayer: %@", NSStringFromClass([layer class])];
-                            if (layer) {
-                                // Dump sous-layers
-                                NSArray *sublayers = [layer valueForKey:@"sublayers"];
-                                [mgr log:@"🔎   sublayers count: %lu", (unsigned long)sublayers.count];
-                                for (id sub in sublayers) {
-                                    [mgr log:@"🔎     sublayer: %@", NSStringFromClass([sub class])];
+            // iVar offset pour récupérer la MessageStringView depuis la cellule
+            Class cellClass = NSClassFromString(@"Twitch.ChatMessageTableViewCell");
+            Ivar msgViewIvar = class_getInstanceVariable(cellClass, "$__lazy_storage_$__messageStringView");
+            ptrdiff_t msgViewOffset = msgViewIvar ? ivar_getOffset(msgViewIvar) : -1;
+
+            // iVar offset pour messageStringLayer depuis MessageStringView
+            Class msgStringViewClass = NSClassFromString(@"Twitch.MessageStringView");
+            Ivar layerIvar = class_getInstanceVariable(msgStringViewClass, "messageStringLayer");
+            ptrdiff_t layerOffset = layerIvar ? ivar_getOffset(layerIvar) : -1;
+
+            // iVar offset pour networkImageRequester
+            Ivar requesterIvar = class_getInstanceVariable(msgStringViewClass, "networkImageRequester");
+            ptrdiff_t requesterOffset = requesterIvar ? ivar_getOffset(requesterIvar) : -1;
+
+            [[SevenTVManager sharedManager] log:@"📐 Offsets — msgView:%td layer:%td requester:%td",
+             msgViewOffset, layerOffset, requesterOffset];
+
+            // Remplacer willDisplayCell par notre version
+            static BOOL s_willDisplayCellHooked = NO;
+            if (s_willDisplayCellHooked) return;
+            s_willDisplayCellHooked = YES;
+
+            IMP origIMP = method_getImplementation(origMethod);
+
+            // Block qui sera appelé à chaque affichage de cellule
+            IMP newIMP = imp_implementationWithBlock(^(id self_tv,
+                                                       UITableView *tableView,
+                                                       UITableViewCell *cell,
+                                                       NSIndexPath *indexPath) {
+                // Appel original
+                ((void (*)(id, SEL, UITableView *, UITableViewCell *, NSIndexPath *))origIMP)
+                    (self_tv, origSel, tableView, cell, indexPath);
+
+                // On ne dumpe qu'une seule fois pour pas spammer les logs
+                static BOOL s_dumped = NO;
+                if (s_dumped) return;
+
+                // Vérifier que c'est bien une ChatMessageTableViewCell
+                if (![NSStringFromClass([cell class]) isEqualToString:@"Twitch.ChatMessageTableViewCell"]) return;
+
+                s_dumped = YES;
+                SevenTVManager *mgr = [SevenTVManager sharedManager];
+                [mgr log:@"📐 ═══ DUMP willDisplayCell ═══"];
+
+                // Récupérer MessageStringView via offset
+                id msgStringView = nil;
+                if (msgViewOffset >= 0) {
+                    void **ptr = (void **)((uint8_t *)(__bridge void *)cell + msgViewOffset);
+                    msgStringView = (__bridge id)*ptr;
+                    [mgr log:@"📐 MessageStringView: %@", NSStringFromClass([msgStringView class])];
+                }
+
+                // Récupérer messageStringLayer via offset
+                if (msgStringView && layerOffset >= 0) {
+                    void **ptr = (void **)((uint8_t *)(__bridge void *)msgStringView + layerOffset);
+                    id layer = (__bridge id)*ptr;
+                    [mgr log:@"📐 messageStringLayer classe: %@", NSStringFromClass([layer class])];
+
+                    if (layer) {
+                        // Dump des sublayers
+                        NSArray *sublayers = ((CALayer *)layer).sublayers;
+                        [mgr log:@"📐 sublayers count: %lu", (unsigned long)sublayers.count];
+                        for (CALayer *sub in sublayers) {
+                            [mgr log:@"📐   sublayer: %@ bounds=(%.0fx%.0f) frame=(%.0f,%.0f,%.0f,%.0f)",
+                             NSStringFromClass([sub class]),
+                             sub.bounds.size.width, sub.bounds.size.height,
+                             sub.frame.origin.x, sub.frame.origin.y,
+                             sub.frame.size.width, sub.frame.size.height];
+
+                            // Dump des sous-sous-layers
+                            for (CALayer *sub2 in sub.sublayers) {
+                                [mgr log:@"📐     sub-sublayer: %@ bounds=(%.0fx%.0f)",
+                                 NSStringFromClass([sub2 class]),
+                                 sub2.bounds.size.width, sub2.bounds.size.height];
+                            }
+
+                            // Dump iVars du sublayer
+                            unsigned int ivarCount = 0;
+                            Ivar *ivars = class_copyIvarList([sub class], &ivarCount);
+                            if (ivarCount > 0 && ivarCount < 30) {
+                                [mgr log:@"📐     iVars du sublayer:"];
+                                for (unsigned int i = 0; i < ivarCount; i++) {
+                                    [mgr log:@"📐       %s", ivar_getName(ivars[i])];
                                 }
                             }
-                        } @catch (NSException *e) {
-                            [mgr log:@"🔎   messageStringLayer KVC erreur: %@", e.reason];
+                            free(ivars);
                         }
-                        // Dump networkImageRequester
-                        @try {
-                            id requester = [v valueForKey:@"networkImageRequester"];
-                            [mgr log:@"🔎   networkImageRequester: %@", NSStringFromClass([requester class])];
-                        } @catch (NSException *e) {
-                            [mgr log:@"🔎   networkImageRequester KVC erreur: %@", e.reason];
+
+                        // Dump iVars du layer principal
+                        unsigned int ivarCount = 0;
+                        Ivar *ivars = class_copyIvarList([layer class], &ivarCount);
+                        [mgr log:@"📐 messageStringLayer iVars (%u):", ivarCount];
+                        for (unsigned int i = 0; i < ivarCount; i++) {
+                            [mgr log:@"📐   %s", ivar_getName(ivars[i])];
                         }
-                        // Dump delegate
-                        @try {
-                            id delegate = [v valueForKey:@"delegate"];
-                            [mgr log:@"🔎   delegate: %@", NSStringFromClass([delegate class])];
-                        } @catch (NSException *e) {
-                            [mgr log:@"🔎   delegate KVC erreur: %@", e.reason];
+                        free(ivars);
+
+                        // Méthodes du layer
+                        unsigned int methodCount = 0;
+                        Method *methods = class_copyMethodList([layer class], &methodCount);
+                        [mgr log:@"📐 messageStringLayer méthodes (%u):", methodCount];
+                        for (unsigned int i = 0; i < methodCount; i++) {
+                            [mgr log:@"📐   %@", NSStringFromSelector(method_getName(methods[i]))];
                         }
-                        break;
+                        free(methods);
                     }
                 }
-            }
+
+                // Récupérer networkImageRequester via offset
+                if (msgStringView && requesterOffset >= 0) {
+                    void **ptr = (void **)((uint8_t *)(__bridge void *)msgStringView + requesterOffset);
+                    id requester = (__bridge id)*ptr;
+                    [mgr log:@"📐 networkImageRequester classe: %@", NSStringFromClass([requester class])];
+
+                    if (requester) {
+                        // Dump iVars du requester
+                        unsigned int ivarCount = 0;
+                        Ivar *ivars = class_copyIvarList([requester class], &ivarCount);
+                        [mgr log:@"📐 requester iVars (%u):", ivarCount];
+                        for (unsigned int i = 0; i < ivarCount; i++) {
+                            [mgr log:@"📐   %s", ivar_getName(ivars[i])];
+                        }
+                        free(ivars);
+
+                        // Méthodes du requester
+                        unsigned int methodCount = 0;
+                        Method *methods = class_copyMethodList([requester class], &methodCount);
+                        [mgr log:@"📐 requester méthodes (%u):", methodCount];
+                        for (unsigned int i = 0; i < methodCount; i++) {
+                            [mgr log:@"📐   %@", NSStringFromSelector(method_getName(methods[i]))];
+                        }
+                        free(methods);
+                    }
+                }
+
+                [mgr log:@"📐 ═══ FIN DUMP willDisplayCell ═══"];
+            });
+
+            method_setImplementation(origMethod, newIMP);
+            [[SevenTVManager sharedManager] log:@"✅ willDisplayCell hooké sur ChatTranscriptView"];
         });
         // ─────────────────────────────────────────────────────────────────
 
