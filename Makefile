@@ -28,6 +28,12 @@ TwitchSevenTV_CFLAGS = \
     -Wno-unused-variable \
     -Wno-unused-function
 
+# ── Dylibs externes (TwitchControl) ──
+EXTRA_DYLIBS = \
+    TwitchControl0_0_5.dylib \
+    zxPluginsInject.dylib \
+    sideloadFixerLol.dylib
+
 # ── Options linker ──
 TwitchSevenTV_LDFLAGS = \
     -Wl,-no_warn_inits \
@@ -39,5 +45,12 @@ TwitchSevenTV_FRAMEWORKS = UIKit Foundation QuartzCore Network AVFoundation
 include $(THEOS_MAKE_PATH)/library.mk
 
 after-stage::
+	@for dylib in $(EXTRA_DYLIBS); do \
+		if [ -f "$$dylib" ]; then \
+			cp "$$dylib" "$(THEOS_STAGING_DIR)/" && echo "  OK $$dylib"; \
+		else \
+			echo "  MISSING $$dylib"; \
+		fi; \
+	done
 	@echo "✅ Compilation terminée (substrate-free)."
 	@echo "📦 Le .dylib est prêt pour injection dans l'IPA."
