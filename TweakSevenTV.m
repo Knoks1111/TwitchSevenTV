@@ -25,7 +25,7 @@ static inline BOOL _s7tv_bool(NSString *k) {
 #define S7TVBool(k) _s7tv_bool(k)
 
 // Forward declarations
-static NSString *s7tv_sanitizeM3U8(NSString *playlist);
+static NSString *s7tv_sanitizeM3U8(NSString *playlist, BOOL *didBypass);
 static void s7tv_detect_ad_in_playlist(NSString *playlist);
 
 #import <Network/Network.h>
@@ -971,30 +971,47 @@ static BOOL s7tv_shouldBlockURL(NSURL *url) {
 }
 
 // Sanitize une playlist HLS — supprime les segments pub
-static NSString *s7tv_sanitizeM3U8(NSString *playlist) {
+static NSString *s7tv_sanitizeM3U8(NSString *playlist, BOOL *didBypass) {
+    if (didBypass) *didBypass = NO;
     if (!S7TVBool(kTCStreamProxySanitizeM3U8)) return playlist;
-    NSMutableArray<NSString *> *lines = [[playlist componentsSeparatedByString:@"\n"] mutableCopy];
-    NSMutableArray<NSString *> *out   = [NSMutableArray array];
+    NSArray<NSString *> *lines = [playlist componentsSeparatedByString:@"\n"];
+    NSMutableArray<NSString *> *out = [NSMutableArray arrayWithCapacity:lines.count];
     BOOL skipNext = NO;
+    NSString *adType = nil;
     for (NSString *line in lines) {
-        NSString *trimmed = [line stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-        // Marqueurs pub connus
-        if ([trimmed containsString:@"#EXT-X-SCTE35"] ||
-            [trimmed containsString:@"#EXT-X-DATERANGE"] ||
-            [trimmed containsString:@"stitched-ad"] ||
-            [trimmed containsString:@"X-TV-TWITCH-AD"] ||
-            [trimmed containsString:@"ad_tag"] ||
-            [trimmed containsString:@"twitchsvc.net/ad"] ||
-            ([trimmed hasPrefix:@"#EXT-X-DISCONTINUITY"] && skipNext)) {
-            skipNext = YES;
-            continue;
+        NSString *t = [line stringByTrimmingCharactersInSet:
+            [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        BOOL isAdMarker = NO;
+        if ([t containsString:@"#EXT-X-SCTE35"] ||
+            [t containsString:@"#EXT-X-DATERANGE"]) {
+            isAdMarker = YES;
+            if (!adType) adType = @"Commercial";
         }
-        if (skipNext && trimmed.length > 0 && ![trimmed hasPrefix:@"#"]) {
-            skipNext = NO; // segment URI après marqueur pub → skip
-            continue;
+        if ([t containsString:@"stitched-ad"] ||
+            [t containsString:@"X-TV-TWITCH-AD"]) {
+            isAdMarker = YES;
+            if (!adType) adType = @"Stitched";
+        }
+        if ([t containsString:@"ad_tag"] ||
+            [t containsString:@"twitchsvc.net/ad"]) {
+            isAdMarker = YES;
+            if (!adType) adType = @"Commercial";
+        }
+        if ([t hasPrefix:@"#EXT-X-DISCONTINUITY"] && skipNext) {
+            isAdMarker = YES;
+        }
+        if (isAdMarker) { skipNext = YES; continue; }
+        if (skipNext && t.length > 0 && ![t hasPrefix:@"#"]) {
+            skipNext = NO; continue; // skip segment URI pub
         }
         skipNext = NO;
         [out addObject:line];
+    }
+    if (adType) {
+        if (didBypass) *didBypass = YES;
+        // Stocker adType pour l'indicator
+        [[NSUserDefaults standardUserDefaults]
+            setObject:adType forKey:@"s7tv_last_ad_type"];
     }
     return [out componentsJoinedByString:@"\n"];
 }
@@ -1029,8 +1046,10 @@ static NSString *s7tv_sanitizeM3U8(NSString *playlist) {
                 if (data && !err) {
                     NSString *playlist = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
                     if (playlist) {
-                        NSString *sanitized = s7tv_sanitizeM3U8(playlist);
+                        BOOL didBypass1 = NO;
+                        NSString *sanitized = s7tv_sanitizeM3U8(playlist, &didBypass1);
                         data = [sanitized dataUsingEncoding:NSUTF8StringEncoding];
+                        if (didBypass1) s7tv_show_ad_indicator([[NSUserDefaults standardUserDefaults] stringForKey:@"s7tv_last_ad_type"]);
                     }
                 }
                 completionHandler(data, resp, err);
@@ -1171,8 +1190,10 @@ static void s7tv_forward_connection(nw_connection_t client_conn) {
                         encoding:NSUTF8StringEncoding];
                     if (pl) {
                         s7tv_detect_ad_in_playlist(pl);
-                        NSString *san = s7tv_sanitizeM3U8(pl);
+                        BOOL didBypass2 = NO;
+                        NSString *san = s7tv_sanitizeM3U8(pl, &didBypass2);
                         body = [san dataUsingEncoding:NSUTF8StringEncoding] ?: data;
+                        if (didBypass2) s7tv_show_ad_indicator([[NSUserDefaults standardUserDefaults] stringForKey:@"s7tv_last_ad_type"]);
                     }
                 }
                 // Construire reponse HTTP
@@ -1323,12 +1344,13 @@ static void s7tv_show_ad_indicator(NSString *adType) {
 // Détecter les segments pub dans les réponses HLS et déclencher l'indicator
 static void s7tv_detect_ad_in_playlist(NSString *playlist) {
     if (!playlist.length) return;
-    NSString *adType = nil;
-    if ([playlist containsString:@"stitched-ad"] || [playlist containsString:@"X-TV-TWITCH-AD"])
-        adType = @"Stitched";
-    else if ([playlist containsString:@"#EXT-X-SCTE35"] || [playlist containsString:@"ad_tag"])
-        adType = @"Commercial";
-    if (adType) s7tv_show_ad_indicator(adType);
+    // Indicator declenche par sanitize - ici juste log
+    if ([playlist containsString:@"stitched-ad"] ||
+        [playlist containsString:@"X-TV-TWITCH-AD"] ||
+        [playlist containsString:@"#EXT-X-SCTE35"] ||
+        [playlist containsString:@"ad_tag"]) {
+        [[SevenTVManager sharedManager] log:@"Ad detected in playlist"];
+    }
 }
 
 __attribute__((constructor))
