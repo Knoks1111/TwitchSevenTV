@@ -1033,19 +1033,26 @@ static void TwitchSevenTVInit(void) {
                 static BOOL s_dumped = NO;
                 if (s_dumped) return;
 
+                // Capturer les valeurs nécessaires sur le main thread
+                // puis faire le dump sur un background thread pour éviter le crash
+                UITableViewCell *capturedCell = cell;
+                ptrdiff_t capturedMsgViewOffset = msgViewOffset;
+                ptrdiff_t capturedLayerOffset = layerOffset;
+
+                dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
                 @try {
                     SevenTVManager *mgr = [SevenTVManager sharedManager];
 
                     // ── Récupérer MessageStringView via offset ──
                     if (msgViewOffset < 0) return;
-                    void **msgViewRaw = (void **)((uint8_t *)(__bridge void *)cell + msgViewOffset);
+                    void **msgViewRaw = (void **)((uint8_t *)(__bridge void *)capturedCell + capturedMsgViewOffset);
                     if (!*msgViewRaw) return;
                     id msgStringView = (__bridge id)*msgViewRaw;
                     if (!msgStringView) return;
 
                     // ── Récupérer messageStringLayer via offset ──
                     if (layerOffset < 0) return;
-                    void **layerRaw = (void **)((uint8_t *)(__bridge void *)msgStringView + layerOffset);
+                    void **layerRaw = (void **)((uint8_t *)(__bridge void *)msgStringView + capturedLayerOffset);
                     if (!*layerRaw) return;
                     id layer = (__bridge id)*layerRaw;
                     if (!layer) return;
@@ -1144,6 +1151,7 @@ static void TwitchSevenTVInit(void) {
                 } @catch (NSException *e) {
                     [[SevenTVManager sharedManager] log:@"❌ crash willDisplayCell: %@", e.reason];
                 }
+                }); // end dispatch_async
             });
 
             method_setImplementation(origMethod, newIMP);
