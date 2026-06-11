@@ -1017,130 +1017,108 @@ static void TwitchSevenTVInit(void) {
 
             IMP origIMP = method_getImplementation(origMethod);
 
-            // Block qui sera appelé à chaque affichage de cellule
             IMP newIMP = imp_implementationWithBlock(^(id self_tv,
                                                        UITableView *tableView,
                                                        UITableViewCell *cell,
                                                        NSIndexPath *indexPath) {
-                // Appel original
+                // Appel original EN PREMIER — toujours
                 ((void (*)(id, SEL, UITableView *, UITableViewCell *, NSIndexPath *))origIMP)
                     (self_tv, origSel, tableView, cell, indexPath);
 
-                // Vérifier que c'est bien une ChatMessageTableViewCell
-                if (![NSStringFromClass([cell class]) isEqualToString:@"Twitch.ChatMessageTableViewCell"]) return;
-
-                // Ne dumper qu'une seule fois sur une cellule avec emotes
-                static BOOL s_dumped = NO;
-                if (s_dumped) return;
-
-                // Capturer les valeurs nécessaires sur le main thread
-                // puis faire le dump sur un background thread pour éviter le crash
-                UITableViewCell *capturedCell = cell;
-                ptrdiff_t capturedMsgViewOffset = msgViewOffset;
-                ptrdiff_t capturedLayerOffset = layerOffset;
-
-                dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
                 @try {
+                    if (![NSStringFromClass([cell class]) isEqualToString:@"Twitch.ChatMessageTableViewCell"]) return;
+                    static BOOL s_dumped = NO;
+                    if (s_dumped) return;
+
                     SevenTVManager *mgr = [SevenTVManager sharedManager];
 
-                    // ── Récupérer MessageStringView via offset ──
+                    // Récupérer MessageStringView
                     if (msgViewOffset < 0) return;
-                    void **msgViewRaw = (void **)((uint8_t *)(__bridge void *)capturedCell + capturedMsgViewOffset);
-                    if (!*msgViewRaw) return;
-                    id msgStringView = (__bridge id)*msgViewRaw;
-                    if (!msgStringView) return;
+                    uintptr_t cellAddr = (uintptr_t)(__bridge void *)cell;
+                    void *msgViewPtr = *(void **)(cellAddr + msgViewOffset);
+                    if (!msgViewPtr) return;
+                    id msgStringView = (__bridge id)(msgViewPtr);
 
-                    // ── Récupérer messageStringLayer via offset ──
+                    // Récupérer messageStringLayer
                     if (layerOffset < 0) return;
-                    void **layerRaw = (void **)((uint8_t *)(__bridge void *)msgStringView + capturedLayerOffset);
-                    if (!*layerRaw) return;
-                    id layer = (__bridge id)*layerRaw;
-                    if (!layer) return;
+                    uintptr_t msAddr = (uintptr_t)(__bridge void *)msgStringView;
+                    void *layerPtr = *(void **)(msAddr + layerOffset);
+                    if (!layerPtr) return;
+                    id layer = (__bridge id)(layerPtr);
 
-                    // ── Récupérer orderedImageLayers ──
-                    Class msgLayerClass = [layer class];
+                    // Récupérer orderedImageLayers
+                    Class msgLayerClass = object_getClass(layer);
                     Ivar imgLayersIvar = class_getInstanceVariable(msgLayerClass, "orderedImageLayers");
                     if (!imgLayersIvar) return;
 
-                    ptrdiff_t imgLayersOffset = ivar_getOffset(imgLayersIvar);
-                    void **imgLayersRaw = (void **)((uint8_t *)(__bridge void *)layer + imgLayersOffset);
-                    if (!*imgLayersRaw) return;
-                    id imgLayersObj = (__bridge id)*imgLayersRaw;
+                    uintptr_t layerAddr = (uintptr_t)layerPtr;
+                    void *imgLayersPtr = *(void **)(layerAddr + ivar_getOffset(imgLayersIvar));
+                    if (!imgLayersPtr) return;
+                    id imgLayersObj = (__bridge id)(imgLayersPtr);
                     if (![imgLayersObj isKindOfClass:[NSArray class]]) return;
 
                     NSArray *arr = (NSArray *)imgLayersObj;
-                    if (arr.count == 0) return; // pas d'emote, on attend
+                    if (arr.count == 0) return;
 
-                    // On a trouvé une cellule avec emotes — on dumpe une seule fois
                     s_dumped = YES;
-                    [mgr log:@"📐 ═══ DUMP willDisplayCell (emotes=%lu) ═══", (unsigned long)arr.count];
+                    [mgr log:@"📐 ═══ DUMP (emotes=%lu) ═══", (unsigned long)arr.count];
 
                     for (id imgLayer in arr) {
                         if (!imgLayer) continue;
-                        CALayer *caLayer = (CALayer *)imgLayer;
-                        Class cls = [imgLayer class];
-
-                        [mgr log:@"📐 imageLayer: %@ bounds=(%.1fx%.1f) frame=(%.1f,%.1f,%.1f,%.1f)",
-                         NSStringFromClass(cls),
-                         caLayer.bounds.size.width, caLayer.bounds.size.height,
-                         caLayer.frame.origin.x, caLayer.frame.origin.y,
-                         caLayer.frame.size.width, caLayer.frame.size.height];
+                        Class cls = object_getClass(imgLayer);
+                        [mgr log:@"📐 imageLayer: %@", NSStringFromClass(cls)];
 
                         // Méthodes
                         unsigned int mc = 0;
                         Method *methods = class_copyMethodList(cls, &mc);
-                        [mgr log:@"📐   méthodes (%u):", mc];
                         for (unsigned int i = 0; i < mc; i++) {
-                            [mgr log:@"📐     %@", NSStringFromSelector(method_getName(methods[i]))];
+                            [mgr log:@"📐   méthode: %@", NSStringFromSelector(method_getName(methods[i]))];
                         }
                         free(methods);
 
-                        // iVar 'content'
-                        Ivar contentIvar = class_getInstanceVariable(cls, "content");
-                        if (contentIvar) {
-                            ptrdiff_t cOffset = ivar_getOffset(contentIvar);
-                            void **cRaw = (void **)((uint8_t *)(__bridge void *)imgLayer + cOffset);
-                            if (*cRaw) {
-                                id contentVal = (__bridge id)*cRaw;
-                                [mgr log:@"📐   content: %@", NSStringFromClass([contentVal class])];
-                                // iVars du content
+                        // iVar content
+                        Ivar cIvar = class_getInstanceVariable(cls, "content");
+                        if (cIvar) {
+                            uintptr_t ilAddr = (uintptr_t)(__bridge void *)imgLayer;
+                            void *cPtr = *(void **)(ilAddr + ivar_getOffset(cIvar));
+                            if (cPtr) {
+                                id cVal = (__bridge id)(cPtr);
+                                Class cCls = object_getClass(cVal);
+                                [mgr log:@"📐   content: %@", NSStringFromClass(cCls)];
                                 unsigned int cic = 0;
-                                Ivar *civ = class_copyIvarList([contentVal class], &cic);
+                                Ivar *civ = class_copyIvarList(cCls, &cic);
                                 for (unsigned int i = 0; i < cic; i++) {
                                     [mgr log:@"📐     iVar: %s", ivar_getName(civ[i])];
                                 }
                                 free(civ);
-                                // Méthodes du content
                                 unsigned int cmc = 0;
-                                Method *cmeth = class_copyMethodList([contentVal class], &cmc);
-                                [mgr log:@"📐   content méthodes (%u):", cmc];
+                                Method *cmeth = class_copyMethodList(cCls, &cmc);
                                 for (unsigned int i = 0; i < cmc; i++) {
-                                    [mgr log:@"📐     %@", NSStringFromSelector(method_getName(cmeth[i]))];
+                                    [mgr log:@"📐     méthode: %@", NSStringFromSelector(method_getName(cmeth[i]))];
                                 }
                                 free(cmeth);
                             }
                         }
                     }
 
-                    // ── messageString ──
-                    Ivar msgStrIvar = class_getInstanceVariable(msgLayerClass, "messageString");
-                    if (msgStrIvar) {
-                        ptrdiff_t msOffset = ivar_getOffset(msgStrIvar);
-                        void **msRaw = (void **)((uint8_t *)(__bridge void *)layer + msOffset);
-                        if (*msRaw) {
-                            id msgStr = (__bridge id)*msRaw;
-                            [mgr log:@"📐 messageString: %@", NSStringFromClass([msgStr class])];
+                    // messageString
+                    Ivar msIvar = class_getInstanceVariable(msgLayerClass, "messageString");
+                    if (msIvar) {
+                        void *msPtr = *(void **)(layerAddr + ivar_getOffset(msIvar));
+                        if (msPtr) {
+                            id ms = (__bridge id)(msPtr);
+                            Class msCls = object_getClass(ms);
+                            [mgr log:@"📐 messageString: %@", NSStringFromClass(msCls)];
                             unsigned int mic = 0;
-                            Ivar *miv = class_copyIvarList([msgStr class], &mic);
+                            Ivar *miv = class_copyIvarList(msCls, &mic);
                             for (unsigned int i = 0; i < mic; i++) {
                                 [mgr log:@"📐   iVar: %s", ivar_getName(miv[i])];
                             }
                             free(miv);
                             unsigned int mmc = 0;
-                            Method *mmeth = class_copyMethodList([msgStr class], &mmc);
-                            [mgr log:@"📐 méthodes (%u):", mmc];
+                            Method *mmeth = class_copyMethodList(msCls, &mmc);
                             for (unsigned int i = 0; i < mmc; i++) {
-                                [mgr log:@"📐   %@", NSStringFromSelector(method_getName(mmeth[i]))];
+                                [mgr log:@"📐   méthode: %@", NSStringFromSelector(method_getName(mmeth[i]))];
                             }
                             free(mmeth);
                         }
@@ -1149,9 +1127,8 @@ static void TwitchSevenTVInit(void) {
                     [mgr log:@"📐 ═══ FIN DUMP ═══"];
 
                 } @catch (NSException *e) {
-                    [[SevenTVManager sharedManager] log:@"❌ crash willDisplayCell: %@", e.reason];
+                    [[SevenTVManager sharedManager] log:@"❌ willDisplayCell crash: %@", e.reason];
                 }
-                }); // end dispatch_async
             });
 
             method_setImplementation(origMethod, newIMP);
