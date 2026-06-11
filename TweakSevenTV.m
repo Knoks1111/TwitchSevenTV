@@ -1029,207 +1029,121 @@ static void TwitchSevenTVInit(void) {
                 // Vérifier que c'est bien une ChatMessageTableViewCell
                 if (![NSStringFromClass([cell class]) isEqualToString:@"Twitch.ChatMessageTableViewCell"]) return;
 
-                // Ne dumper que si on a pas encore trouvé une cellule avec emotes
+                // Ne dumper qu'une seule fois sur une cellule avec emotes
                 static BOOL s_dumped = NO;
                 if (s_dumped) return;
-                SevenTVManager *mgr = [SevenTVManager sharedManager];
-                [mgr log:@"📐 ═══ DUMP willDisplayCell ═══"];
 
-                // Récupérer MessageStringView via offset
-                id msgStringView = nil;
-                if (msgViewOffset >= 0) {
-                    void **ptr = (void **)((uint8_t *)(__bridge void *)cell + msgViewOffset);
-                    msgStringView = (__bridge id)*ptr;
-                    [mgr log:@"📐 MessageStringView: %@", NSStringFromClass([msgStringView class])];
-                }
+                @try {
+                    SevenTVManager *mgr = [SevenTVManager sharedManager];
 
-                // Récupérer messageStringLayer via offset
-                if (msgStringView && layerOffset >= 0) {
-                    void **ptr = (void **)((uint8_t *)(__bridge void *)msgStringView + layerOffset);
-                    id layer = (__bridge id)*ptr;
-                    [mgr log:@"📐 messageStringLayer classe: %@", NSStringFromClass([layer class])];
+                    // ── Récupérer MessageStringView via offset ──
+                    if (msgViewOffset < 0) return;
+                    void **msgViewRaw = (void **)((uint8_t *)(__bridge void *)cell + msgViewOffset);
+                    if (!*msgViewRaw) return;
+                    id msgStringView = (__bridge id)*msgViewRaw;
+                    if (!msgStringView) return;
 
-                    if (layer) {
-                        // Dump des sublayers
-                        NSArray *sublayers = ((CALayer *)layer).sublayers;
-                        [mgr log:@"📐 sublayers count: %lu", (unsigned long)sublayers.count];
-                        for (CALayer *sub in sublayers) {
-                            [mgr log:@"📐   sublayer: %@ bounds=(%.0fx%.0f) frame=(%.0f,%.0f,%.0f,%.0f)",
-                             NSStringFromClass([sub class]),
-                             sub.bounds.size.width, sub.bounds.size.height,
-                             sub.frame.origin.x, sub.frame.origin.y,
-                             sub.frame.size.width, sub.frame.size.height];
+                    // ── Récupérer messageStringLayer via offset ──
+                    if (layerOffset < 0) return;
+                    void **layerRaw = (void **)((uint8_t *)(__bridge void *)msgStringView + layerOffset);
+                    if (!*layerRaw) return;
+                    id layer = (__bridge id)*layerRaw;
+                    if (!layer) return;
 
-                            // Dump des sous-sous-layers
-                            for (CALayer *sub2 in sub.sublayers) {
-                                [mgr log:@"📐     sub-sublayer: %@ bounds=(%.0fx%.0f)",
-                                 NSStringFromClass([sub2 class]),
-                                 sub2.bounds.size.width, sub2.bounds.size.height];
-                            }
+                    // ── Récupérer orderedImageLayers ──
+                    Class msgLayerClass = [layer class];
+                    Ivar imgLayersIvar = class_getInstanceVariable(msgLayerClass, "orderedImageLayers");
+                    if (!imgLayersIvar) return;
 
-                            // Dump iVars du sublayer
-                            unsigned int ivarCount = 0;
-                            Ivar *ivars = class_copyIvarList([sub class], &ivarCount);
-                            if (ivarCount > 0 && ivarCount < 30) {
-                                [mgr log:@"📐     iVars du sublayer:"];
-                                for (unsigned int i = 0; i < ivarCount; i++) {
-                                    [mgr log:@"📐       %s", ivar_getName(ivars[i])];
-                                }
-                            }
-                            free(ivars);
-                        }
+                    ptrdiff_t imgLayersOffset = ivar_getOffset(imgLayersIvar);
+                    void **imgLayersRaw = (void **)((uint8_t *)(__bridge void *)layer + imgLayersOffset);
+                    if (!*imgLayersRaw) return;
+                    id imgLayersObj = (__bridge id)*imgLayersRaw;
+                    if (![imgLayersObj isKindOfClass:[NSArray class]]) return;
 
-                        // Dump iVars du layer principal
-                        unsigned int ivarCount = 0;
-                        Ivar *ivars = class_copyIvarList([layer class], &ivarCount);
-                        [mgr log:@"📐 messageStringLayer iVars (%u):", ivarCount];
-                        for (unsigned int i = 0; i < ivarCount; i++) {
-                            [mgr log:@"📐   %s", ivar_getName(ivars[i])];
-                        }
-                        free(ivars);
+                    NSArray *arr = (NSArray *)imgLayersObj;
+                    if (arr.count == 0) return; // pas d'emote, on attend
 
-                        // Méthodes du layer
-                        unsigned int methodCount = 0;
-                        Method *methods = class_copyMethodList([layer class], &methodCount);
-                        [mgr log:@"📐 messageStringLayer méthodes (%u):", methodCount];
-                        for (unsigned int i = 0; i < methodCount; i++) {
-                            [mgr log:@"📐   %@", NSStringFromSelector(method_getName(methods[i]))];
+                    // On a trouvé une cellule avec emotes — on dumpe une seule fois
+                    s_dumped = YES;
+                    [mgr log:@"📐 ═══ DUMP willDisplayCell (emotes=%lu) ═══", (unsigned long)arr.count];
+
+                    for (id imgLayer in arr) {
+                        if (!imgLayer) continue;
+                        CALayer *caLayer = (CALayer *)imgLayer;
+                        Class cls = [imgLayer class];
+
+                        [mgr log:@"📐 imageLayer: %@ bounds=(%.1fx%.1f) frame=(%.1f,%.1f,%.1f,%.1f)",
+                         NSStringFromClass(cls),
+                         caLayer.bounds.size.width, caLayer.bounds.size.height,
+                         caLayer.frame.origin.x, caLayer.frame.origin.y,
+                         caLayer.frame.size.width, caLayer.frame.size.height];
+
+                        // Méthodes
+                        unsigned int mc = 0;
+                        Method *methods = class_copyMethodList(cls, &mc);
+                        [mgr log:@"📐   méthodes (%u):", mc];
+                        for (unsigned int i = 0; i < mc; i++) {
+                            [mgr log:@"📐     %@", NSStringFromSelector(method_getName(methods[i]))];
                         }
                         free(methods);
-                    }
-                }
 
-                // Récupérer networkImageRequester via offset
-                if (msgStringView && requesterOffset >= 0) {
-                    void **ptr = (void **)((uint8_t *)(__bridge void *)msgStringView + requesterOffset);
-                    id requester = (__bridge id)*ptr;
-                    [mgr log:@"📐 networkImageRequester classe: %@", NSStringFromClass([requester class])];
-
-                    if (requester) {
-                        // Dump iVars du requester
-                        unsigned int ivarCount = 0;
-                        Ivar *ivars = class_copyIvarList([requester class], &ivarCount);
-                        [mgr log:@"📐 requester iVars (%u):", ivarCount];
-                        for (unsigned int i = 0; i < ivarCount; i++) {
-                            [mgr log:@"📐   %s", ivar_getName(ivars[i])];
-                        }
-                        free(ivars);
-
-                        // Méthodes du requester
-                        unsigned int methodCount = 0;
-                        Method *methods = class_copyMethodList([requester class], &methodCount);
-                        [mgr log:@"📐 requester méthodes (%u):", methodCount];
-                        for (unsigned int i = 0; i < methodCount; i++) {
-                            [mgr log:@"📐   %@", NSStringFromSelector(method_getName(methods[i]))];
-                        }
-                        free(methods);
-                    }
-                }
-
-                // Dump orderedImageLayers en live
-                if (msgStringView && layerOffset >= 0) {
-                    void **ptr = (void **)((uint8_t *)(__bridge void *)msgStringView + layerOffset);
-                    id layer = (__bridge id)*ptr;
-                    if (layer) {
-                        // Récupérer orderedImageLayers via iVar offset
-                        Class msgLayerClass = [layer class];
-                        Ivar imgLayersIvar = class_getInstanceVariable(msgLayerClass, "orderedImageLayers");
-                        Ivar imgContentsIvar = class_getInstanceVariable(msgLayerClass, "orderedImageLayerContents");
-                        Ivar msgStringIvar = class_getInstanceVariable(msgLayerClass, "messageString");
-
-                        if (imgLayersIvar) {
-                            ptrdiff_t imgLayersOffset = ivar_getOffset(imgLayersIvar);
-                            void **imgLayersPtr = (void **)((uint8_t *)(__bridge void *)layer + imgLayersOffset);
-                            id imgLayers = (__bridge id)*imgLayersPtr;
-                            [mgr log:@"📐 orderedImageLayers type: %@", NSStringFromClass([imgLayers class])];
-                            if ([imgLayers isKindOfClass:[NSArray class]]) {
-                                NSArray *arr = (NSArray *)imgLayers;
-                                [mgr log:@"📐 orderedImageLayers count: %lu", (unsigned long)arr.count];
-                                if (arr.count == 0) return; // pas d'emote dans cette cellule
-                                s_dumped = YES; // on a trouvé une cellule avec emotes
-                                for (id imgLayer in arr) {
-                                    CALayer *caImgLayer = (CALayer *)imgLayer;
-                                    Class imgLayerClass = [imgLayer class];
-
-                                    [mgr log:@"📐   imageLayer: %@ bounds=(%.1fx%.1f) frame=(%.1f,%.1f,%.1f,%.1f)",
-                                     NSStringFromClass(imgLayerClass),
-                                     caImgLayer.bounds.size.width, caImgLayer.bounds.size.height,
-                                     caImgLayer.frame.origin.x, caImgLayer.frame.origin.y,
-                                     caImgLayer.frame.size.width, caImgLayer.frame.size.height];
-
-                                    // Dump iVars
-                                    unsigned int ic = 0;
-                                    Ivar *iv = class_copyIvarList(imgLayerClass, &ic);
-                                    for (unsigned int i = 0; i < ic; i++) {
-                                        [mgr log:@"📐     iVar: %s", ivar_getName(iv[i])];
-                                    }
-                                    free(iv);
-
-                                    // Dump méthodes
-                                    unsigned int mc = 0;
-                                    Method *methods = class_copyMethodList(imgLayerClass, &mc);
-                                    [mgr log:@"📐     méthodes (%u):", mc];
-                                    for (unsigned int i = 0; i < mc; i++) {
-                                        [mgr log:@"📐       %@", NSStringFromSelector(method_getName(methods[i]))];
-                                    }
-                                    free(methods);
-
-                                    // Dump contenu iVar 'content'
-                                    Ivar contentIvar = class_getInstanceVariable(imgLayerClass, "content");
-                                    if (contentIvar) {
-                                        ptrdiff_t contentOffset = ivar_getOffset(contentIvar);
-                                        void **contentPtr = (void **)((uint8_t *)(__bridge void *)imgLayer + contentOffset);
-                                        id contentVal = (__bridge id)*contentPtr;
-                                        [mgr log:@"📐     content classe: %@", NSStringFromClass([contentVal class])];
-                                        if (contentVal) {
-                                            unsigned int cic = 0;
-                                            Ivar *civ = class_copyIvarList([contentVal class], &cic);
-                                            [mgr log:@"📐     content iVars (%u):", cic];
-                                            for (unsigned int i = 0; i < cic; i++) {
-                                                [mgr log:@"📐       %s", ivar_getName(civ[i])];
-                                            }
-                                            free(civ);
-                                            unsigned int cmc = 0;
-                                            Method *cmethods = class_copyMethodList([contentVal class], &cmc);
-                                            [mgr log:@"📐     content méthodes (%u):", cmc];
-                                            for (unsigned int i = 0; i < cmc; i++) {
-                                                [mgr log:@"📐       %@", NSStringFromSelector(method_getName(cmethods[i]))];
-                                            }
-                                            free(cmethods);
-                                        }
-                                    }
+                        // iVar 'content'
+                        Ivar contentIvar = class_getInstanceVariable(cls, "content");
+                        if (contentIvar) {
+                            ptrdiff_t cOffset = ivar_getOffset(contentIvar);
+                            void **cRaw = (void **)((uint8_t *)(__bridge void *)imgLayer + cOffset);
+                            if (*cRaw) {
+                                id contentVal = (__bridge id)*cRaw;
+                                [mgr log:@"📐   content: %@", NSStringFromClass([contentVal class])];
+                                // iVars du content
+                                unsigned int cic = 0;
+                                Ivar *civ = class_copyIvarList([contentVal class], &cic);
+                                for (unsigned int i = 0; i < cic; i++) {
+                                    [mgr log:@"📐     iVar: %s", ivar_getName(civ[i])];
                                 }
-                            }
-                        }
-
-                        if (msgStringIvar) {
-                            ptrdiff_t msgStrOffset = ivar_getOffset(msgStringIvar);
-                            void **msgStrPtr = (void **)((uint8_t *)(__bridge void *)layer + msgStrOffset);
-                            id msgStr = (__bridge id)*msgStrPtr;
-                            [mgr log:@"📐 messageString type: %@", NSStringFromClass([msgStr class])];
-                            if (msgStr) {
-                                // Dump iVars de messageString
-                                unsigned int ic = 0;
-                                Ivar *iv = class_copyIvarList([msgStr class], &ic);
-                                [mgr log:@"📐 messageString iVars (%u):", ic];
-                                for (unsigned int i = 0; i < ic; i++) {
-                                    [mgr log:@"📐   %s", ivar_getName(iv[i])];
+                                free(civ);
+                                // Méthodes du content
+                                unsigned int cmc = 0;
+                                Method *cmeth = class_copyMethodList([contentVal class], &cmc);
+                                [mgr log:@"📐   content méthodes (%u):", cmc];
+                                for (unsigned int i = 0; i < cmc; i++) {
+                                    [mgr log:@"📐     %@", NSStringFromSelector(method_getName(cmeth[i]))];
                                 }
-                                free(iv);
-                                // Méthodes
-                                unsigned int mc = 0;
-                                Method *methods = class_copyMethodList([msgStr class], &mc);
-                                [mgr log:@"📐 messageString méthodes (%u):", mc];
-                                for (unsigned int i = 0; i < mc; i++) {
-                                    [mgr log:@"📐   %@", NSStringFromSelector(method_getName(methods[i]))];
-                                }
-                                free(methods);
+                                free(cmeth);
                             }
                         }
                     }
-                }
 
-                [mgr log:@"📐 ═══ FIN DUMP willDisplayCell ═══"];
+                    // ── messageString ──
+                    Ivar msgStrIvar = class_getInstanceVariable(msgLayerClass, "messageString");
+                    if (msgStrIvar) {
+                        ptrdiff_t msOffset = ivar_getOffset(msgStrIvar);
+                        void **msRaw = (void **)((uint8_t *)(__bridge void *)layer + msOffset);
+                        if (*msRaw) {
+                            id msgStr = (__bridge id)*msRaw;
+                            [mgr log:@"📐 messageString: %@", NSStringFromClass([msgStr class])];
+                            unsigned int mic = 0;
+                            Ivar *miv = class_copyIvarList([msgStr class], &mic);
+                            for (unsigned int i = 0; i < mic; i++) {
+                                [mgr log:@"📐   iVar: %s", ivar_getName(miv[i])];
+                            }
+                            free(miv);
+                            unsigned int mmc = 0;
+                            Method *mmeth = class_copyMethodList([msgStr class], &mmc);
+                            [mgr log:@"📐 méthodes (%u):", mmc];
+                            for (unsigned int i = 0; i < mmc; i++) {
+                                [mgr log:@"📐   %@", NSStringFromSelector(method_getName(mmeth[i]))];
+                            }
+                            free(mmeth);
+                        }
+                    }
+
+                    [mgr log:@"📐 ═══ FIN DUMP ═══"];
+
+                } @catch (NSException *e) {
+                    [[SevenTVManager sharedManager] log:@"❌ crash willDisplayCell: %@", e.reason];
+                }
             });
 
             method_setImplementation(origMethod, newIMP);
