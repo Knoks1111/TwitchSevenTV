@@ -1056,31 +1056,28 @@ static void TwitchSevenTVInit(void) {
                     NSArray *arr = (NSArray *)imgLayersObj;
                     if (arr.count == 0) return;
 
-                    // Vérifier si ce message contient des emotes 7TV
-                    // via imageAttachmentsByCharacterIndex dans messageString
-                    __block BOOL has7TV = NO;
+                    // Logger le contenu de imageAttachmentsByCharacterIndex pour debug
+                    static BOOL s_logged = NO;
                     Ivar msgStringIvar = class_getInstanceVariable(msgLayerClass, "messageString");
-                    if (msgStringIvar) {
+                    if (msgStringIvar && !s_logged) {
                         void *msPtr = *(void **)(layerAddr + ivar_getOffset(msgStringIvar));
                         if (msPtr) {
                             id ms = (__bridge id)(msPtr);
                             @try {
                                 id attachMap = [ms valueForKey:@"imageAttachmentsByCharacterIndex"];
+                                [[SevenTVManager sharedManager] log:@"📐 attachMap type: %@", NSStringFromClass([attachMap class])];
                                 if ([attachMap isKindOfClass:[NSDictionary class]]) {
                                     [(NSDictionary *)attachMap enumerateKeysAndObjectsUsingBlock:^(id k, id obj, BOOL *stop) {
-                                        @try {
-                                            NSString *d = [obj description];
-                                            if ([d containsString:@"7tv_"] || [d containsString:@"cdn.7tv"]) {
-                                                has7TV = YES; *stop = YES;
-                                            }
-                                        } @catch (...) {}
+                                        [[SevenTVManager sharedManager] log:@"📐 attach[%@] = %@ desc=%@",
+                                         k, NSStringFromClass([obj class]), [obj description]];
                                     }];
                                 }
-                            } @catch (...) {}
+                                s_logged = YES;
+                            } @catch (NSException *e) {
+                                [[SevenTVManager sharedManager] log:@"❌ attachMap crash: %@", e.reason];
+                            }
                         }
                     }
-
-                    if (!has7TV) return;
 
                     NSArray *capturedArr = [arr copy];
                     dispatch_async(dispatch_get_main_queue(), ^{
