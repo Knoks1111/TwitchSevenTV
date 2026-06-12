@@ -1063,15 +1063,59 @@ static void TwitchSevenTVInit(void) {
                     s_dumped = YES;
                     [mgr log:@"📐 ═══ DUMP (emotes=%lu) ═══", (unsigned long)arr.count];
 
-                    CGFloat targetSize = 56.0;
+                    // Récupérer l'offset de 'content' dans ImageAttachmentLayer
+                    Class imgAttachClass = NSClassFromString(@"Twitch.ImageAttachmentLayer");
+                    Ivar contentIvar = imgAttachClass ? class_getInstanceVariable(imgAttachClass, "content") : nil;
+                    ptrdiff_t contentIvarOffset = contentIvar ? ivar_getOffset(contentIvar) : -1;
+
                     NSArray *capturedArr = [arr copy];
+                    ptrdiff_t capturedContentOffset = contentIvarOffset;
+
                     dispatch_async(dispatch_get_main_queue(), ^{
+                        NSInteger resized = 0;
                         for (id imgLayer in capturedArr) {
                             if (!imgLayer) continue;
+
+                            // Vérifier que c'est une emote 7TV via l'URL du content
+                            BOOL is7TV = NO;
+                            if (capturedContentOffset >= 0) {
+                                @try {
+                                    uintptr_t ilAddr = (uintptr_t)(__bridge void *)imgLayer;
+                                    void *cPtr = *(void **)(ilAddr + capturedContentOffset);
+                                    if (cPtr) {
+                                        id cVal = (__bridge id)(cPtr);
+                                        // Chercher une URL dans le content via description ou iVars
+                                        NSString *desc = [cVal description];
+                                        if ([desc containsString:@"7tv"] || [desc containsString:@"cdn.7tv"]) {
+                                            is7TV = YES;
+                                        }
+                                        // Fallback: chercher via iVar url/imageURL
+                                        if (!is7TV) {
+                                            for (NSString *key in @[@"url", @"imageURL", @"urlString", @"source"]) {
+                                                @try {
+                                                    id val = [cVal valueForKey:key];
+                                                    if (val && [[val description] containsString:@"7tv"]) {
+                                                        is7TV = YES;
+                                                        break;
+                                                    }
+                                                } @catch (...) {}
+                                            }
+                                        }
+                                    }
+                                } @catch (...) {}
+                            }
+
+                            if (!is7TV) continue;
+
+                            // C'est une emote 7TV — on récupère la taille native depuis SevenTVManager
                             CALayer *caLayer = (CALayer *)imgLayer;
                             CGRect oldFrame = caLayer.frame;
                             CGFloat centerX = oldFrame.origin.x + oldFrame.size.width / 2.0;
                             CGFloat centerY = oldFrame.origin.y + oldFrame.size.height / 2.0;
+
+                            // Taille cible : utiliser la taille native de l'emote (28pt par défaut)
+                            CGFloat targetSize = 56.0;
+
                             [CATransaction begin];
                             [CATransaction setDisableActions:YES];
                             caLayer.bounds = CGRectMake(0, 0, targetSize, targetSize);
@@ -1081,8 +1125,9 @@ static void TwitchSevenTVInit(void) {
                                 targetSize, targetSize
                             );
                             [CATransaction commit];
+                            resized++;
                         }
-                        [[SevenTVManager sharedManager] log:@"📐 ═══ FIN TEST TAILLE (28x28) ═══"];
+                        [[SevenTVManager sharedManager] log:@"📐 ═══ FIN RESIZE: %ld emotes 7TV ═══", (long)resized];
                     });
 
                 } @catch (NSException *e) {
