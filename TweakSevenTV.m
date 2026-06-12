@@ -974,75 +974,45 @@ static void TwitchSevenTVInit(void) {
 
         // Démarrer le local proxy si activé
 
-        // ── Hook willDisplayCell sur ChatTranscriptView ──────────────────
-        // On swizzle tableView:willDisplayCell:forRowAtIndexPath: pour lire
-        // messageStringLayer et networkImageRequester en live sur chaque cellule.
-        // But : comprendre comment la taille des emotes est stockée.
+        // ── Hook layoutSubviews sur MessageStringView ────────────────────
+        // layoutSubviews est appelé APRÈS que Twitch a positionné tous les layers
+        // C'est l'endroit idéal pour modifier la taille des emotes
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
-            Class transcriptClass = NSClassFromString(@"Twitch.ChatTranscriptView");
-            if (!transcriptClass) {
-                [[SevenTVManager sharedManager] log:@"❌ ChatTranscriptView introuvable"];
-                return;
-            }
-
-            SEL origSel = @selector(tableView:willDisplayCell:forRowAtIndexPath:);
-            Method origMethod = class_getInstanceMethod(transcriptClass, origSel);
-            if (!origMethod) {
-                [[SevenTVManager sharedManager] log:@"❌ willDisplayCell introuvable"];
-                return;
-            }
-
-            // iVar offset pour récupérer la MessageStringView depuis la cellule
-            Class cellClass = NSClassFromString(@"Twitch.ChatMessageTableViewCell");
-            Ivar msgViewIvar = class_getInstanceVariable(cellClass, "$__lazy_storage_$__messageStringView");
-            ptrdiff_t msgViewOffset = msgViewIvar ? ivar_getOffset(msgViewIvar) : -1;
-
-            // iVar offset pour messageStringLayer depuis MessageStringView
             Class msgStringViewClass = NSClassFromString(@"Twitch.MessageStringView");
+            if (!msgStringViewClass) {
+                [[SevenTVManager sharedManager] log:@"❌ MessageStringView introuvable"];
+                return;
+            }
+
+            SEL layoutSel = @selector(layoutSubviews);
+            Method origMethod = class_getInstanceMethod(msgStringViewClass, layoutSel);
+            if (!origMethod) {
+                [[SevenTVManager sharedManager] log:@"❌ layoutSubviews introuvable"];
+                return;
+            }
+
+            // Récupérer offsets iVars de MessageStringView
             Ivar layerIvar = class_getInstanceVariable(msgStringViewClass, "messageStringLayer");
-            ptrdiff_t layerOffset = layerIvar ? ivar_getOffset(layerIvar) : -1;
-
-            // iVar offset pour networkImageRequester
-            Ivar requesterIvar = class_getInstanceVariable(msgStringViewClass, "networkImageRequester");
-            ptrdiff_t requesterOffset = requesterIvar ? ivar_getOffset(requesterIvar) : -1;
-
-            [[SevenTVManager sharedManager] log:@"📐 Offsets — msgView:%td layer:%td requester:%td",
-             msgViewOffset, layerOffset, requesterOffset];
-
-            // Remplacer willDisplayCell par notre version
-            static BOOL s_willDisplayCellHooked = NO;
-            if (s_willDisplayCellHooked) return;
-            s_willDisplayCellHooked = YES;
+            if (!layerIvar) {
+                [[SevenTVManager sharedManager] log:@"❌ messageStringLayer iVar introuvable"];
+                return;
+            }
+            ptrdiff_t layerOffset = ivar_getOffset(layerIvar);
 
             IMP origIMP = method_getImplementation(origMethod);
 
-            IMP newIMP = imp_implementationWithBlock(^(id self_tv,
-                                                       UITableView *tableView,
-                                                       UITableViewCell *cell,
-                                                       NSIndexPath *indexPath) {
-                // Appel original EN PREMIER — toujours
-                ((void (*)(id, SEL, UITableView *, UITableViewCell *, NSIndexPath *))origIMP)
-                    (self_tv, origSel, tableView, cell, indexPath);
+            IMP newIMP = imp_implementationWithBlock(^(UIView *selfView) {
+                // Appel original EN PREMIER
+                ((void (*)(id, SEL))origIMP)(selfView, layoutSel);
 
+                // Après le layout, modifier les emotes 7TV
                 @try {
-                    if (![NSStringFromClass([cell class]) isEqualToString:@"Twitch.ChatMessageTableViewCell"]) return;
-
-                    // Récupérer MessageStringView
-                    if (msgViewOffset < 0) return;
-                    uintptr_t cellAddr = (uintptr_t)(__bridge void *)cell;
-                    void *msgViewPtr = *(void **)(cellAddr + msgViewOffset);
-                    if (!msgViewPtr) return;
-                    id msgStringView = (__bridge id)(msgViewPtr);
-
-                    // Récupérer messageStringLayer
-                    if (layerOffset < 0) return;
-                    uintptr_t msAddr = (uintptr_t)(__bridge void *)msgStringView;
-                    void *layerPtr = *(void **)(msAddr + layerOffset);
+                    uintptr_t viewAddr = (uintptr_t)(__bridge void *)selfView;
+                    void *layerPtr = *(void **)(viewAddr + layerOffset);
                     if (!layerPtr) return;
                     id layer = (__bridge id)(layerPtr);
 
-                    // Récupérer orderedImageLayers
                     Class msgLayerClass = object_getClass(layer);
                     Ivar imgLayersIvar = class_getInstanceVariable(msgLayerClass, "orderedImageLayers");
                     if (!imgLayersIvar) return;
@@ -1056,48 +1026,64 @@ static void TwitchSevenTVInit(void) {
                     NSArray *arr = (NSArray *)imgLayersObj;
                     if (arr.count == 0) return;
 
-                    // Filtrer: on ne resize que les layers qui sont dans le flux de texte
-                    // Les badges ont frame.origin.x très petit (< 30pt)
-                    // Les emotes dans le texte ont frame.origin.x > 30pt
-                    // C'est la façon la plus fiable sans accéder à des iVars Swift dangereux
+                    // Récupérer les positions des emotes 7TV depuis SevenTVManager
+                    // On identifie une emote 7TV par son sublayer StaticImageAttachmentLayer
+                    // qui contient une image dont l'URL contient "cdn.7tv.app"
+                    CGFloat targetSize = 56.0;
 
-                    NSArray *capturedArr = [arr copy];
-                    // Délai court pour laisser Twitch finir son layout avant qu'on modifie les layers
-                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)),
-                    dispatch_get_main_queue(), ^{
-                        CGFloat targetSize = 56.0; // taille cible des emotes 7TV
-                        for (id imgLayer in capturedArr) {
-                            if (!imgLayer) continue;
-                            @try {
-                                CALayer *caLayer = (CALayer *)imgLayer;
-                                CGRect f = caLayer.frame;
-                                if (f.size.width <= 0 || f.size.height <= 0) continue;
+                    [CATransaction begin];
+                    [CATransaction setDisableActions:YES];
+                    for (id imgLayer in arr) {
+                        if (!imgLayer) continue;
+                        CALayer *caLayer = (CALayer *)imgLayer;
+                        CGRect f = caLayer.frame;
+                        if (f.size.width <= 0 || f.size.height <= 0) continue;
 
-                                // Exclure les badges : ils sont positionnés au début de la ligne
-                                // Les emotes 7TV dans le texte ont origin.x > 30pt
-                                // Les badges ont origin.x très petit (< 30pt)
-                                if (f.origin.x < 30.0) continue;
-
-                                [CATransaction begin];
-                                [CATransaction setDisableActions:YES];
-                                caLayer.bounds = CGRectMake(0, 0, targetSize, targetSize);
-                                caLayer.frame = CGRectMake(
-                                    f.origin.x,
-                                    f.origin.y + (f.size.height - targetSize) / 2.0,
-                                    targetSize, targetSize
-                                );
-                                [CATransaction commit];
-                            } @catch (...) {}
+                        // Identifier les emotes 7TV via leurs sublayers
+                        // StaticImageAttachmentLayer charge l'image depuis cdn.7tv.app
+                        BOOL is7TV = NO;
+                        for (CALayer *sub in caLayer.sublayers) {
+                            if (!sub) continue;
+                            NSString *subClass = NSStringFromClass(object_getClass(sub));
+                            // Les emotes 7TV passent par SevenTVURLProtocol
+                            // qui intercepte les URLs "7tv_EMOTEID"
+                            // Le sublayer StaticImageAttachmentLayer a une image dont
+                            // on peut vérifier si elle vient du cache 7TV
+                            if ([subClass containsString:@"ImageAttachment"]) {
+                                // Vérifier via le networkImageRequester du sublayer
+                                Class subCls = object_getClass(sub);
+                                Ivar reqIvar = class_getInstanceVariable(subCls, "networkImageRequester");
+                                if (reqIvar) {
+                                    // Si ce layer a un requester, c'est une emote (pas un badge)
+                                    // Les badges n'ont pas de networkImageRequester dans leur sublayer
+                                    uintptr_t subAddr = (uintptr_t)(__bridge void *)sub;
+                                    void *reqPtr = *(void **)(subAddr + ivar_getOffset(reqIvar));
+                                    if (reqPtr) {
+                                        is7TV = YES;
+                                        break;
+                                    }
+                                }
+                            }
                         }
-                    }); // end dispatch_after
+
+                        if (!is7TV) continue;
+
+                        caLayer.bounds = CGRectMake(0, 0, targetSize, targetSize);
+                        caLayer.frame = CGRectMake(
+                            f.origin.x,
+                            f.origin.y + (f.size.height - targetSize) / 2.0,
+                            targetSize, targetSize
+                        );
+                    }
+                    [CATransaction commit];
 
                 } @catch (NSException *e) {
-                    [[SevenTVManager sharedManager] log:@"❌ willDisplayCell crash: %@", e.reason];
+                    // Silencieux pour ne pas spammer les logs
                 }
             });
 
             method_setImplementation(origMethod, newIMP);
-            [[SevenTVManager sharedManager] log:@"✅ willDisplayCell hooké sur ChatTranscriptView"];
+            [[SevenTVManager sharedManager] log:@"✅ layoutSubviews hooké sur MessageStringView"];
         });
         // ─────────────────────────────────────────────────────────────────
 
