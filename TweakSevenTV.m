@@ -1056,56 +1056,26 @@ static void TwitchSevenTVInit(void) {
                     NSArray *arr = (NSArray *)imgLayersObj;
                     if (arr.count == 0) return;
 
-                    // Vérifier si ce message contient des emotes 7TV
-                    // via imageAttachmentsByCharacterIndex (iVar offset direct — pas KVC)
-                    __block BOOL has7TV = NO;
-                    Ivar msgStringIvar = class_getInstanceVariable(msgLayerClass, "messageString");
-                    if (msgStringIvar) {
-                        void *msPtr = *(void **)(layerAddr + ivar_getOffset(msgStringIvar));
-                        if (msPtr) {
-                            id ms = (__bridge id)(msPtr);
-                            Class msCls = object_getClass(ms);
-                            Ivar attachIvar = class_getInstanceVariable(msCls, "imageAttachmentsByCharacterIndex");
-                            if (attachIvar) {
-                                uintptr_t msAddr2 = (uintptr_t)msPtr;
-                                void *attachPtr = *(void **)(msAddr2 + ivar_getOffset(attachIvar));
-                                if (attachPtr) {
-                                    id attachMap = (__bridge id)(attachPtr);
-                                    if ([attachMap isKindOfClass:[NSDictionary class]]) {
-                                        [(NSDictionary *)attachMap enumerateKeysAndObjectsUsingBlock:^(id k, id obj, BOOL *stop) {
-                                            @try {
-                                                NSString *d = [obj description];
-                                                if ([d containsString:@"7tv_"] || [d containsString:@"cdn.7tv"]) {
-                                                    has7TV = YES; *stop = YES;
-                                                }
-                                            } @catch (...) {}
-                                        }];
-                                        // Debug: logger le premier attach pour voir la structure
-                                        static BOOL s_logged = NO;
-                                        if (!s_logged && ((NSDictionary *)attachMap).count > 0) {
-                                            s_logged = YES;
-                                            id firstKey = ((NSDictionary *)attachMap).allKeys.firstObject;
-                                            id firstVal = ((NSDictionary *)attachMap)[firstKey];
-                                            [[SevenTVManager sharedManager] log:@"📐 attach[%@]=%@ desc=%@",
-                                             firstKey, NSStringFromClass([firstVal class]), [firstVal description]];
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    if (!has7TV) return;
+                    // Filtrer: on ne resize que les layers qui sont dans le flux de texte
+                    // Les badges ont frame.origin.x très petit (< 30pt)
+                    // Les emotes dans le texte ont frame.origin.x > 30pt
+                    // C'est la façon la plus fiable sans accéder à des iVars Swift dangereux
 
                     NSArray *capturedArr = [arr copy];
                     dispatch_async(dispatch_get_main_queue(), ^{
-                        CGFloat targetSize = 56.0;
+                        CGFloat targetSize = 28.0; // taille cible des emotes 7TV
                         for (id imgLayer in capturedArr) {
                             if (!imgLayer) continue;
                             @try {
                                 CALayer *caLayer = (CALayer *)imgLayer;
                                 CGRect f = caLayer.frame;
                                 if (f.size.width <= 0 || f.size.height <= 0) continue;
+
+                                // Exclure les badges : ils sont positionnés au début de la ligne
+                                // Les emotes 7TV dans le texte ont origin.x > 30pt
+                                // Les badges ont origin.x très petit (< 30pt)
+                                if (f.origin.x < 30.0) continue;
+
                                 [CATransaction begin];
                                 [CATransaction setDisableActions:YES];
                                 caLayer.bounds = CGRectMake(0, 0, targetSize, targetSize);
