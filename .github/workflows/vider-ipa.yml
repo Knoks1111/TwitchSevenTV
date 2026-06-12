@@ -1,10 +1,10 @@
-name: 🌪️ reset dylibs & Rebuild IPA
+name: 🌪️ Extraire dylibs & reset & Rebuild IPA
 
 on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Tag de la release contenant l'IPA (ex: ipa-base)"
+        description: "Tag de la release contenant l'IPA"
         required: true
         default: "ipa-base"
       ipa_filename:
@@ -46,7 +46,6 @@ jobs:
 
       # ─── 3. Détecter le binaire principal ────────────────────────────────
       - name: 🔍 Détecter le binaire et les dylibs injectées
-        id: detect
         run: |
           APP_DIR=$(ls -d IPA_extracted/Payload/*.app | head -1)
           APP_NAME=$(basename "$APP_DIR" .app)
@@ -63,7 +62,34 @@ jobs:
           echo "📋 Toutes les dylibs chargées (hors Apple/système) :"
           otool -L "$BINARY" | grep -v '/usr/lib' | grep -v '/System' | grep -v "$APP_NAME" || echo "(aucune)"
 
-      # ─── 4. Installer optool (binaire pré-compilé) ───────────────────────
+      # ─── 4. Sauvegarder les dylibs custom AVANT nettoyage ────────────────
+      - name: 💾 Sauvegarder les dylibs custom
+        run: |
+          mkdir -p dylibs_output
+
+          echo "=== Toutes les dylibs dans Frameworks ==="
+          find IPA_extracted/ -name "*.dylib" | sort
+
+          # Copier uniquement les dylibs hors Apple/système
+          while IFS= read -r dylib; do
+            echo "📦 Sauvegarde : $(basename "$dylib")"
+            cp "$dylib" dylibs_output/
+          done < <(find IPA_extracted/ -name "*.dylib")
+
+          echo ""
+          echo "📋 Dylibs sauvegardées ($(ls dylibs_output/ | wc -l | tr -d ' ') fichiers) :"
+          ls -lah dylibs_output/
+
+      # ─── 5. Upload des dylibs extraites ──────────────────────────────────
+      - name: 📤 Upload des dylibs extraites
+        uses: actions/upload-artifact@v4
+        with:
+          name: dylibs-extraites
+          path: dylibs_output/
+          retention-days: 7
+          compression-level: 0
+
+      # ─── 6. Installer optool ──────────────────────────────────────────────
       - name: 🛠️ Installer optool
         run: |
           curl -sSL https://github.com/alexzielenski/optool/releases/download/0.1/optool.zip \
@@ -73,10 +99,9 @@ jobs:
           sudo chmod +x /usr/local/bin/optool
           echo "✅ optool installé"
 
-      # ─── 5. Supprimer les dylibs custom ──────────────────────────────────
+      # ─── 7. Supprimer les dylibs custom ──────────────────────────────────
       - name: 🗑️ Supprimer les dylibs custom
         run: |
-          # ⚙️  Liste des dylibs à retirer — modifie selon ton IPA
           DYLIBS_TO_REMOVE=(
             "TwitchControl0.0.5.dylib"
             "MadeByMohkg.dylib"
@@ -91,12 +116,10 @@ jobs:
             DYLIB_PATH="$FRAMEWORKS/$DYLIB"
 
             if [ -f "$DYLIB_PATH" ]; then
-              # Retirer l'entrée LC_LOAD_DYLIB du binaire Mach-O
               optool uninstall -p "@rpath/$DYLIB" -t "$BINARY" 2>/dev/null \
                 && echo "🔧 LC_LOAD_DYLIB retiré : $DYLIB" \
                 || echo "⚠️  optool skip (déjà absent ou chemin différent) : $DYLIB"
 
-              # Supprimer le fichier physique
               rm -f "$DYLIB_PATH"
               echo "🗑️  Fichier supprimé : $DYLIB"
               REMOVED=$((REMOVED + 1))
@@ -113,7 +136,7 @@ jobs:
           echo "📋 Frameworks restants :"
           ls -lah "$FRAMEWORKS/"
 
-      # ─── 6. Vérification post-nettoyage ───────────────────────────────────
+      # ─── 8. Vérification post-nettoyage ───────────────────────────────────
       - name: ✅ Vérifier le binaire nettoyé
         run: |
           echo "📋 Load commands après nettoyage (hors Apple/système) :"
@@ -125,7 +148,7 @@ jobs:
             echo "$REMAINING"
           fi
 
-      # ─── 7. Repackager en IPA ─────────────────────────────────────────────
+      # ─── 9. Repackager en IPA ─────────────────────────────────────────────
       - name: 📦 Repackager en IPA propre
         run: |
           OUTPUT_IPA="${{ github.event.inputs.output_name }}.ipa"
@@ -135,11 +158,11 @@ jobs:
           echo "OUTPUT_IPA=$OUTPUT_IPA" >> $GITHUB_ENV
           echo "✅ IPA reconstruite : $(du -sh "$OUTPUT_IPA" | cut -f1)"
 
-      # ─── 8. Upload de l'artifact ──────────────────────────────────────────
+      # ─── 10. Upload de l'IPA finale ───────────────────────────────────────
       - name: 📤 Upload de l'IPA finale
         uses: actions/upload-artifact@v4
         with:
           name: ${{ github.event.inputs.output_name }}
           path: ${{ env.OUTPUT_IPA }}
           retention-days: 7
-          compression-level: 0   # L'IPA est déjà un ZIP, inutile de recompresser
+          compression-level: 0
