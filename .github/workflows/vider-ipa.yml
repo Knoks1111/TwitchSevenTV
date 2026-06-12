@@ -99,39 +99,30 @@ jobs:
           sudo chmod +x /usr/local/bin/optool
           echo "✅ optool installé"
 
-      # ─── 7. Supprimer les dylibs custom ──────────────────────────────────
-      - name: 🗑️ Supprimer les dylibs custom
+      # ─── 7. Supprimer automatiquement toutes les dylibs nues custom ───────
+      # Règle : un fichier .dylib nu dans Frameworks/ = injection custom
+      # Les frameworks légitimes de Twitch sont des dossiers .framework, pas des .dylib nus
+      - name: 🗑️ Supprimer les dylibs custom (automatique)
         run: |
-          DYLIBS_TO_REMOVE=(
-            "TwitchControl0.0.5.dylib"
-            "MadeByMohkg.dylib"
-            "zxPluginsInject.dylib"
-            "sideloadFixerLol.dylib"
-          )
-
           REMOVED=0
-          SKIPPED=0
 
-          for DYLIB in "${DYLIBS_TO_REMOVE[@]}"; do
-            DYLIB_PATH="$FRAMEWORKS/$DYLIB"
+          # Chercher tous les fichiers .dylib directement dans Frameworks/ (pas dans les sous-dossiers .framework)
+          while IFS= read -r DYLIB_PATH; do
+            DYLIB=$(basename "$DYLIB_PATH")
 
-            if [ -f "$DYLIB_PATH" ]; then
-              optool uninstall -p "@rpath/$DYLIB" -t "$BINARY" 2>/dev/null \
-                && echo "🔧 LC_LOAD_DYLIB retiré : $DYLIB" \
-                || echo "⚠️  optool skip (déjà absent ou chemin différent) : $DYLIB"
+            echo "🔧 Retrait LC_LOAD_DYLIB : $DYLIB"
+            optool uninstall -p "@rpath/$DYLIB" -t "$BINARY" 2>/dev/null \
+              && echo "   ✅ LC_LOAD_DYLIB retiré" \
+              || echo "   ⚠️  optool skip (chemin différent ou déjà absent)"
 
-              rm -f "$DYLIB_PATH"
-              echo "🗑️  Fichier supprimé : $DYLIB"
-              REMOVED=$((REMOVED + 1))
-            else
-              echo "⏭️  Non trouvée (déjà absente) : $DYLIB"
-              SKIPPED=$((SKIPPED + 1))
-            fi
-          done
+            rm -f "$DYLIB_PATH"
+            echo "   🗑️  Fichier supprimé"
+            REMOVED=$((REMOVED + 1))
+          done < <(find "$FRAMEWORKS" -maxdepth 1 -name "*.dylib" -type f)
 
           echo ""
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "✅ Supprimées : $REMOVED   ⏭️ Ignorées : $SKIPPED"
+          echo "✅ Dylibs supprimées : $REMOVED"
           echo ""
           echo "📋 Frameworks restants :"
           ls -lah "$FRAMEWORKS/"
