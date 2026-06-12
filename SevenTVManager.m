@@ -2412,6 +2412,24 @@ referenceSizeForHeaderInSection:(NSInteger)section {
     NSString *line = [NSString stringWithFormat:@"[%@] %@",
                       [fmt stringFromDate:[NSDate date]], msg];
 
+    // ── Écriture persistante sur disque ──────────────────────────────────
+    {
+        NSString *lineWithNL = [line stringByAppendingString:@"\n"];
+        NSData *data = [lineWithNL dataUsingEncoding:NSUTF8StringEncoding];
+        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_BACKGROUND, 0), ^{
+            NSArray *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+            NSString *path = [docs.firstObject stringByAppendingPathComponent:@"s7tv_logs.txt"];
+            NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
+            if (fh) {
+                [fh seekToEndOfFile];
+                [fh writeData:data];
+                [fh closeFile];
+            } else {
+                [data writeToFile:path atomically:NO];
+            }
+        });
+    }
+
     // Toujours écrire dans le buffer in-app (visible dans l'écran Logs 7TV)
     [self.logLock lock];
     [self.logBuffer addObject:line];
