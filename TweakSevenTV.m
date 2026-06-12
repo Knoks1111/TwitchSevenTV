@@ -1056,28 +1056,46 @@ static void TwitchSevenTVInit(void) {
                     NSArray *arr = (NSArray *)imgLayersObj;
                     if (arr.count == 0) return;
 
-                    // Logger le contenu de imageAttachmentsByCharacterIndex pour debug
-                    static BOOL s_logged = NO;
+                    // Vérifier si ce message contient des emotes 7TV
+                    // via imageAttachmentsByCharacterIndex (iVar offset direct — pas KVC)
+                    BOOL has7TV = NO;
                     Ivar msgStringIvar = class_getInstanceVariable(msgLayerClass, "messageString");
-                    if (msgStringIvar && !s_logged) {
+                    if (msgStringIvar) {
                         void *msPtr = *(void **)(layerAddr + ivar_getOffset(msgStringIvar));
                         if (msPtr) {
                             id ms = (__bridge id)(msPtr);
-                            @try {
-                                id attachMap = [ms valueForKey:@"imageAttachmentsByCharacterIndex"];
-                                [[SevenTVManager sharedManager] log:@"📐 attachMap type: %@", NSStringFromClass([attachMap class])];
-                                if ([attachMap isKindOfClass:[NSDictionary class]]) {
-                                    [(NSDictionary *)attachMap enumerateKeysAndObjectsUsingBlock:^(id k, id obj, BOOL *stop) {
-                                        [[SevenTVManager sharedManager] log:@"📐 attach[%@] = %@ desc=%@",
-                                         k, NSStringFromClass([obj class]), [obj description]];
-                                    }];
+                            Class msCls = object_getClass(ms);
+                            Ivar attachIvar = class_getInstanceVariable(msCls, "imageAttachmentsByCharacterIndex");
+                            if (attachIvar) {
+                                uintptr_t msAddr2 = (uintptr_t)msPtr;
+                                void *attachPtr = *(void **)(msAddr2 + ivar_getOffset(attachIvar));
+                                if (attachPtr) {
+                                    id attachMap = (__bridge id)(attachPtr);
+                                    if ([attachMap isKindOfClass:[NSDictionary class]]) {
+                                        [(NSDictionary *)attachMap enumerateKeysAndObjectsUsingBlock:^(id k, id obj, BOOL *stop) {
+                                            @try {
+                                                NSString *d = [obj description];
+                                                if ([d containsString:@"7tv_"] || [d containsString:@"cdn.7tv"]) {
+                                                    has7TV = YES; *stop = YES;
+                                                }
+                                            } @catch (...) {}
+                                        }];
+                                        // Debug: logger le premier attach pour voir la structure
+                                        static BOOL s_logged = NO;
+                                        if (!s_logged && ((NSDictionary *)attachMap).count > 0) {
+                                            s_logged = YES;
+                                            id firstKey = ((NSDictionary *)attachMap).allKeys.firstObject;
+                                            id firstVal = ((NSDictionary *)attachMap)[firstKey];
+                                            [[SevenTVManager sharedManager] log:@"📐 attach[%@]=%@ desc=%@",
+                                             firstKey, NSStringFromClass([firstVal class]), [firstVal description]];
+                                        }
+                                    }
                                 }
-                                s_logged = YES;
-                            } @catch (NSException *e) {
-                                [[SevenTVManager sharedManager] log:@"❌ attachMap crash: %@", e.reason];
                             }
                         }
                     }
+
+                    if (!has7TV) return;
 
                     NSArray *capturedArr = [arr copy];
                     dispatch_async(dispatch_get_main_queue(), ^{
