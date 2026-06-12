@@ -1063,17 +1063,34 @@ static void TwitchSevenTVInit(void) {
                     s_dumped = YES;
                     [mgr log:@"📐 ═══ DUMP (emotes=%lu) ═══", (unsigned long)arr.count];
 
+                    CGFloat targetSize = 28.0;
                     for (id imgLayer in arr) {
                         if (!imgLayer) continue;
                         CALayer *caLayer = (CALayer *)imgLayer;
-                        [mgr log:@"📐 imageLayer: %@ bounds=(%.1fx%.1f) frame=(%.1f,%.1f,%.1f,%.1f)",
-                         NSStringFromClass(object_getClass(imgLayer)),
+                        CGRect oldFrame = caLayer.frame;
+                        [mgr log:@"📐 AVANT: bounds=(%.1fx%.1f) frame=(%.1f,%.1f,%.1f,%.1f)",
+                         caLayer.bounds.size.width, caLayer.bounds.size.height,
+                         oldFrame.origin.x, oldFrame.origin.y,
+                         oldFrame.size.width, oldFrame.size.height];
+
+                        // Modifier la taille en gardant le centre
+                        CGFloat centerX = oldFrame.origin.x + oldFrame.size.width / 2.0;
+                        CGFloat centerY = oldFrame.origin.y + oldFrame.size.height / 2.0;
+                        CGRect newFrame = CGRectMake(
+                            centerX - targetSize / 2.0,
+                            centerY - targetSize / 2.0,
+                            targetSize, targetSize
+                        );
+                        caLayer.bounds = CGRectMake(0, 0, targetSize, targetSize);
+                        caLayer.frame = newFrame;
+
+                        [mgr log:@"📐 APRÈS: bounds=(%.1fx%.1f) frame=(%.1f,%.1f,%.1f,%.1f)",
                          caLayer.bounds.size.width, caLayer.bounds.size.height,
                          caLayer.frame.origin.x, caLayer.frame.origin.y,
                          caLayer.frame.size.width, caLayer.frame.size.height];
                     }
 
-                    [mgr log:@"📐 ═══ FIN DUMP ═══"];
+                    [mgr log:@"📐 ═══ FIN TEST TAILLE ═══"];
 
                 } @catch (NSException *e) {
                     [[SevenTVManager sharedManager] log:@"❌ willDisplayCell crash: %@", e.reason];
