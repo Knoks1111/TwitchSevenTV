@@ -1062,8 +1062,10 @@ static void TwitchSevenTVInit(void) {
                     // C'est la façon la plus fiable sans accéder à des iVars Swift dangereux
 
                     NSArray *capturedArr = [arr copy];
-                    dispatch_async(dispatch_get_main_queue(), ^{
-                        CGFloat targetSize = 28.0; // taille cible des emotes 7TV
+                    // Délai court pour laisser Twitch finir son layout avant qu'on modifie les layers
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)),
+                    dispatch_get_main_queue(), ^{
+                        CGFloat targetSize = 56.0; // taille cible des emotes 7TV
                         for (id imgLayer in capturedArr) {
                             if (!imgLayer) continue;
                             @try {
@@ -1087,7 +1089,7 @@ static void TwitchSevenTVInit(void) {
                                 [CATransaction commit];
                             } @catch (...) {}
                         }
-                    });
+                    }); // end dispatch_after
 
                 } @catch (NSException *e) {
                     [[SevenTVManager sharedManager] log:@"❌ willDisplayCell crash: %@", e.reason];
