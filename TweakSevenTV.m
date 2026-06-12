@@ -1065,63 +1065,12 @@ static void TwitchSevenTVInit(void) {
 
                     for (id imgLayer in arr) {
                         if (!imgLayer) continue;
-                        Class cls = object_getClass(imgLayer);
-                        [mgr log:@"📐 imageLayer: %@", NSStringFromClass(cls)];
-
-                        // Méthodes
-                        unsigned int mc = 0;
-                        Method *methods = class_copyMethodList(cls, &mc);
-                        for (unsigned int i = 0; i < mc; i++) {
-                            [mgr log:@"📐   méthode: %@", NSStringFromSelector(method_getName(methods[i]))];
-                        }
-                        free(methods);
-
-                        // iVar content
-                        Ivar cIvar = class_getInstanceVariable(cls, "content");
-                        if (cIvar) {
-                            uintptr_t ilAddr = (uintptr_t)(__bridge void *)imgLayer;
-                            void *cPtr = *(void **)(ilAddr + ivar_getOffset(cIvar));
-                            if (cPtr) {
-                                id cVal = (__bridge id)(cPtr);
-                                Class cCls = object_getClass(cVal);
-                                [mgr log:@"📐   content: %@", NSStringFromClass(cCls)];
-                                unsigned int cic = 0;
-                                Ivar *civ = class_copyIvarList(cCls, &cic);
-                                for (unsigned int i = 0; i < cic; i++) {
-                                    [mgr log:@"📐     iVar: %s", ivar_getName(civ[i])];
-                                }
-                                free(civ);
-                                unsigned int cmc = 0;
-                                Method *cmeth = class_copyMethodList(cCls, &cmc);
-                                for (unsigned int i = 0; i < cmc; i++) {
-                                    [mgr log:@"📐     méthode: %@", NSStringFromSelector(method_getName(cmeth[i]))];
-                                }
-                                free(cmeth);
-                            }
-                        }
-                    }
-
-                    // messageString
-                    Ivar msIvar = class_getInstanceVariable(msgLayerClass, "messageString");
-                    if (msIvar) {
-                        void *msPtr = *(void **)(layerAddr + ivar_getOffset(msIvar));
-                        if (msPtr) {
-                            id ms = (__bridge id)(msPtr);
-                            Class msCls = object_getClass(ms);
-                            [mgr log:@"📐 messageString: %@", NSStringFromClass(msCls)];
-                            unsigned int mic = 0;
-                            Ivar *miv = class_copyIvarList(msCls, &mic);
-                            for (unsigned int i = 0; i < mic; i++) {
-                                [mgr log:@"📐   iVar: %s", ivar_getName(miv[i])];
-                            }
-                            free(miv);
-                            unsigned int mmc = 0;
-                            Method *mmeth = class_copyMethodList(msCls, &mmc);
-                            for (unsigned int i = 0; i < mmc; i++) {
-                                [mgr log:@"📐   méthode: %@", NSStringFromSelector(method_getName(mmeth[i]))];
-                            }
-                            free(mmeth);
-                        }
+                        CALayer *caLayer = (CALayer *)imgLayer;
+                        [mgr log:@"📐 imageLayer: %@ bounds=(%.1fx%.1f) frame=(%.1f,%.1f,%.1f,%.1f)",
+                         NSStringFromClass(object_getClass(imgLayer)),
+                         caLayer.bounds.size.width, caLayer.bounds.size.height,
+                         caLayer.frame.origin.x, caLayer.frame.origin.y,
+                         caLayer.frame.size.width, caLayer.frame.size.height];
                     }
 
                     [mgr log:@"📐 ═══ FIN DUMP ═══"];
