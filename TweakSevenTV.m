@@ -1058,7 +1058,7 @@ static void TwitchSevenTVInit(void) {
 
                     // Vérifier si ce message contient des emotes 7TV
                     // via imageAttachmentsByCharacterIndex (iVar offset direct — pas KVC)
-                    BOOL has7TV = NO;
+                    __block BOOL has7TV = NO;
                     Ivar msgStringIvar = class_getInstanceVariable(msgLayerClass, "messageString");
                     if (msgStringIvar) {
                         void *msPtr = *(void **)(layerAddr + ivar_getOffset(msgStringIvar));
