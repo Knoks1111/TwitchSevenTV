@@ -1027,10 +1027,6 @@ static void TwitchSevenTVInit(void) {
 
                 @try {
                     if (![NSStringFromClass([cell class]) isEqualToString:@"Twitch.ChatMessageTableViewCell"]) return;
-                    static BOOL s_dumped = NO;
-                    if (s_dumped) return;
-
-                    SevenTVManager *mgr = [SevenTVManager sharedManager];
 
                     // Récupérer MessageStringView
                     if (msgViewOffset < 0) return;
@@ -1060,35 +1056,52 @@ static void TwitchSevenTVInit(void) {
                     NSArray *arr = (NSArray *)imgLayersObj;
                     if (arr.count == 0) return;
 
-                    s_dumped = YES;
-                    [mgr log:@"📐 ═══ DUMP (emotes=%lu) ═══", (unsigned long)arr.count];
+                    // Vérifier si ce message contient des emotes 7TV
+                    // via imageAttachmentsByCharacterIndex dans messageString
+                    BOOL has7TV = NO;
+                    Ivar msgStringIvar = class_getInstanceVariable(msgLayerClass, "messageString");
+                    if (msgStringIvar) {
+                        void *msPtr = *(void **)(layerAddr + ivar_getOffset(msgStringIvar));
+                        if (msPtr) {
+                            id ms = (__bridge id)(msPtr);
+                            @try {
+                                id attachMap = [ms valueForKey:@"imageAttachmentsByCharacterIndex"];
+                                if ([attachMap isKindOfClass:[NSDictionary class]]) {
+                                    [(NSDictionary *)attachMap enumerateKeysAndObjectsUsingBlock:^(id k, id obj, BOOL *stop) {
+                                        @try {
+                                            NSString *d = [obj description];
+                                            if ([d containsString:@"7tv_"] || [d containsString:@"cdn.7tv"]) {
+                                                has7TV = YES; *stop = YES;
+                                            }
+                                        } @catch (...) {}
+                                    }];
+                                }
+                            } @catch (...) {}
+                        }
+                    }
+
+                    if (!has7TV) return;
 
                     NSArray *capturedArr = [arr copy];
                     dispatch_async(dispatch_get_main_queue(), ^{
                         CGFloat targetSize = 56.0;
-                        NSInteger resized = 0;
                         for (id imgLayer in capturedArr) {
                             if (!imgLayer) continue;
                             @try {
                                 CALayer *caLayer = (CALayer *)imgLayer;
-                                CGRect oldFrame = caLayer.frame;
-                                CGFloat centerX = oldFrame.origin.x + oldFrame.size.width / 2.0;
-                                CGFloat centerY = oldFrame.origin.y + oldFrame.size.height / 2.0;
+                                CGRect f = caLayer.frame;
+                                if (f.size.width <= 0 || f.size.height <= 0) continue;
                                 [CATransaction begin];
                                 [CATransaction setDisableActions:YES];
                                 caLayer.bounds = CGRectMake(0, 0, targetSize, targetSize);
                                 caLayer.frame = CGRectMake(
-                                    centerX - targetSize / 2.0,
-                                    centerY - targetSize / 2.0,
+                                    f.origin.x,
+                                    f.origin.y + (f.size.height - targetSize) / 2.0,
                                     targetSize, targetSize
                                 );
                                 [CATransaction commit];
-                                resized++;
-                            } @catch (NSException *e) {
-                                [[SevenTVManager sharedManager] log:@"❌ resize crash: %@", e.reason];
-                            }
+                            } @catch (...) {}
                         }
-                        [[SevenTVManager sharedManager] log:@"📐 ═══ FIN RESIZE: %ld layers ═══", (long)resized];
                     });
 
                 } @catch (NSException *e) {
