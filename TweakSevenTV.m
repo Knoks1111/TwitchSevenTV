@@ -1039,34 +1039,8 @@ static void TwitchSevenTVInit(void) {
                         CGRect f = caLayer.frame;
                         if (f.size.width <= 0 || f.size.height <= 0) continue;
 
-                        // Identifier les emotes 7TV via leurs sublayers
-                        // StaticImageAttachmentLayer charge l'image depuis cdn.7tv.app
-                        BOOL is7TV = NO;
-                        for (CALayer *sub in caLayer.sublayers) {
-                            if (!sub) continue;
-                            NSString *subClass = NSStringFromClass(object_getClass(sub));
-                            // Les emotes 7TV passent par SevenTVURLProtocol
-                            // qui intercepte les URLs "7tv_EMOTEID"
-                            // Le sublayer StaticImageAttachmentLayer a une image dont
-                            // on peut vérifier si elle vient du cache 7TV
-                            if ([subClass containsString:@"ImageAttachment"]) {
-                                // Vérifier via le networkImageRequester du sublayer
-                                Class subCls = object_getClass(sub);
-                                Ivar reqIvar = class_getInstanceVariable(subCls, "networkImageRequester");
-                                if (reqIvar) {
-                                    // Si ce layer a un requester, c'est une emote (pas un badge)
-                                    // Les badges n'ont pas de networkImageRequester dans leur sublayer
-                                    uintptr_t subAddr = (uintptr_t)(__bridge void *)sub;
-                                    void *reqPtr = *(void **)(subAddr + ivar_getOffset(reqIvar));
-                                    if (reqPtr) {
-                                        is7TV = YES;
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-
-                        if (!is7TV) continue;
+                            // Exclure les badges (origin.x < 30pt)
+                        if (f.origin.x < 30.0) continue;
 
                         caLayer.bounds = CGRectMake(0, 0, targetSize, targetSize);
                         caLayer.frame = CGRectMake(
