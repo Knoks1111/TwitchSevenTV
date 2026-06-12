@@ -10,7 +10,7 @@ on:
       ipa_filename:
         description: "Nom exact du fichier IPA dans la release"
         required: true
-        default: "Twitch29.6.7TV.01.ipa"
+        default: "Twitch29.8.7TV.01.ipa"
       output_name:
         description: "Nom de l'IPA finale (sans .ipa)"
         required: true
