@@ -1063,7 +1063,7 @@ static void TwitchSevenTVInit(void) {
                     s_dumped = YES;
                     [mgr log:@"📐 ═══ DUMP (emotes=%lu) ═══", (unsigned long)arr.count];
 
-                    CGFloat targetSize = 28.0;
+                    CGFloat targetSize = 56.0;
                     NSArray *capturedArr = [arr copy];
                     dispatch_async(dispatch_get_main_queue(), ^{
                         for (id imgLayer in capturedArr) {
