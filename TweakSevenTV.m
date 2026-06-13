@@ -192,7 +192,7 @@ static void s7tv_swizzle(Class targetClass,
             bitsBtn.accessibilityLabel = @"7TV Emotes";
 
             objc_setAssociatedObject(bitsBtn, &kS7TVTextFieldTagged, chatInputView,
-                                     OBJC_ASSOCIATION_ASSIGN);
+                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
             [bitsBtn addTarget:mgr
                         action:@selector(s7tv_emoteButtonTappedForButton:)
@@ -245,7 +245,7 @@ static void s7tv_swizzle(Class targetClass,
                                  | UIViewAutoresizingFlexibleBottomMargin;
 
             objc_setAssociatedObject(btn, &kS7TVTextFieldTagged, chatInputView,
-                                     OBJC_ASSOCIATION_ASSIGN);
+                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             [btn addTarget:mgr
                     action:@selector(s7tv_emoteButtonTappedForButton:)
           forControlEvents:UIControlEventTouchUpInside];
@@ -276,6 +276,7 @@ static void s7tv_swizzle(Class targetClass,
 
 - (void)s7tv_emoteButtonTappedForButton:(UIButton *)sender {
     UIView *chatInputView = objc_getAssociatedObject(sender, &kS7TVTextFieldTagged);
+    if (!chatInputView || !chatInputView.window) return;
     [self toggleEmotePickerForChatInputView:chatInputView];
 }
 
