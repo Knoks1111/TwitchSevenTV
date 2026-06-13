@@ -1043,10 +1043,25 @@ static void TwitchSevenTVInit(void) {
                         [CATransaction setDisableActions:YES];
                         for (id imgLayer in arr) {
                             if (!imgLayer) continue;
+                            // Seules les emotes sont des Twitch.ImageAttachmentLayer
+                            // Les badges sont d'autres classes
+                            NSString *layerClassName = NSStringFromClass(object_getClass(imgLayer));
+                            if (![layerClassName isEqualToString:@"Twitch.ImageAttachmentLayer"]) continue;
+
+                            // Vérifier que c'est une emote 7TV via son sublayer
+                            // StaticImageAttachmentLayer est présent uniquement dans les emotes
                             CALayer *caLayer = (CALayer *)imgLayer;
+                            BOOL hasStaticImageSublayer = NO;
+                            for (CALayer *sub in caLayer.sublayers) {
+                                if ([NSStringFromClass(object_getClass(sub)) containsString:@"StaticImage"]) {
+                                    hasStaticImageSublayer = YES;
+                                    break;
+                                }
+                            }
+                            if (!hasStaticImageSublayer) continue;
+
                             CGRect f = caLayer.frame;
                             if (f.size.width <= 0 || f.size.height <= 0) continue;
-                            if (f.origin.x < 30.0) continue;
                             caLayer.bounds = CGRectMake(0, 0, targetSize, targetSize);
                             caLayer.frame = CGRectMake(
                                 f.origin.x,
