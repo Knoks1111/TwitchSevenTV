@@ -1468,8 +1468,6 @@ static void TwitchSevenTVInit(void) {
                         // Extraire les frames et les durées
                         NSMutableArray<UIImage *> *frames = [NSMutableArray array];
                         NSMutableArray<NSNumber *> *delays = [NSMutableArray array];
-                        CGFloat totalDuration = 0;
-
                         for (NSInteger fi = 0; fi < frameCount; fi++) {
                             CGImageRef cgImg = CGImageSourceCreateImageAtIndex(src, fi, NULL);
                             if (!cgImg) continue;
@@ -1486,7 +1484,6 @@ static void TwitchSevenTVInit(void) {
                                            ?: @(0.1);
                             CGFloat d = delay.floatValue < 0.011 ? 0.1 : delay.floatValue;
                             [delays addObject:@(d)];
-                            totalDuration += d;
                         }
                         CFRelease(src);
 
@@ -1518,8 +1515,10 @@ static void TwitchSevenTVInit(void) {
                             }
                             UIImage *frame = framesCopy[frameIdx % framesCopy.count];
                             @try {
-                                [sub performSelector:NSSelectorFromString(@"setCurrentFrame:")
-                                         withObject:frame];
+                                SEL setCF = NSSelectorFromString(@"setCurrentFrame:");
+                                void (*fn)(id, SEL, id) = (void (*)(id, SEL, id))
+                                    [sub methodForSelector:setCF];
+                                if (fn) fn(sub, setCF, frame);
                             } @catch (__unused NSException *e) {}
                             frameIdx = (frameIdx + 1) % (NSInteger)framesCopy.count;
                             // Mettre à jour l'intervalle pour la prochaine frame
