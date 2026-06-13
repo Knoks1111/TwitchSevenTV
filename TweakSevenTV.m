@@ -1097,6 +1097,39 @@ static void TwitchSevenTVInit(void) {
 
                     if (emoteLayers.count == 0) return;
 
+                    // ── Dump ONE-SHOT AnimatedImageAttachmentLayer ────────────────
+                    static BOOL s_animDumped = NO;
+                    if (!s_animDumped && emoteLayers.count > 0) {
+                        s_animDumped = YES;
+                        SevenTVManager *mgr = [SevenTVManager sharedManager];
+                        CALayer *sample = emoteLayers.firstObject;
+                        // 1. Classe du layer parent
+                        [mgr log:@"🎞 parent: %@  frame=(%.1f,%.1f,%.1f,%.1f)",
+                         NSStringFromClass(object_getClass(sample)),
+                         sample.frame.origin.x, sample.frame.origin.y,
+                         sample.frame.size.width, sample.frame.size.height];
+                        // 2. Sublayers (AnimatedImageAttachmentLayer) — via API publique
+                        for (CALayer *sub in sample.sublayers) {
+                            Class sc = object_getClass(sub);
+                            [mgr log:@"🎞 sublayer: %@  bounds=(%.1fx%.1f)",
+                             NSStringFromClass(sc),
+                             sub.bounds.size.width, sub.bounds.size.height];
+                            // iVars du sublayer
+                            unsigned int ic = 0;
+                            Ivar *iv = class_copyIvarList(sc, &ic);
+                            for (unsigned int i = 0; i < ic; i++)
+                                [mgr log:@"🎞   iVar: %s", ivar_getName(iv[i])];
+                            free(iv);
+                            // Méthodes du sublayer
+                            unsigned int mc = 0;
+                            Method *mv = class_copyMethodList(sc, &mc);
+                            for (unsigned int i = 0; i < mc; i++)
+                                [mgr log:@"🎞   method: %@", NSStringFromSelector(method_getName(mv[i]))];
+                            free(mv);
+                        }
+                    }
+                    // ─────────────────────────────────────────────────────────────
+
                     NSInteger emoteIndex = 0;
                     [CATransaction begin];
                     [CATransaction setDisableActions:YES];
