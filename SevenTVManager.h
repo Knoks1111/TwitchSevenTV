@@ -116,6 +116,6 @@ extern NSString *const S7TVLogsDidUpdateNotification;
 
 // --- Ratios emotes ---
 // Dictionnaire { emoteID → ratio (width/height) } utilisé par willDisplayCell pour resize
-- (NSDictionary *)emoteRatios;
+- (NSMutableDictionary *)emoteRatios;
 
 @end
