@@ -1557,10 +1557,6 @@ static NSString *s7tv_emoteSetKey(NSDictionary *global, NSDictionary *channel) {
     picker.layer.shadowOffset = CGSizeMake(0, -3);
     picker.layer.shadowRadius = 8;
     picker.layer.shadowOpacity = 0.35;
-    // Coins arrondis en haut uniquement
-    picker.layer.cornerRadius = 12;
-    picker.layer.maskedCorners = kCALayerMinXMinYCorner | kCALayerMaxXMinYCorner;
-    picker.clipsToBounds = YES;
     self.emotePickerView = picker;
 
     // ── Header ─────────────────────────────────────────────────────────────
