@@ -98,24 +98,17 @@ static void s7tv_swizzle(Class targetClass,
 // MARK: - Helper dump KVC sécurisé (pour les logs 🎞)
 // ────────────────────────────────────────────────────────────
 
-// Lit une propriété via KVC en toute sécurité (try/catch, pas de raw pointer).
-// Log la classe + une description tronquée si la valeur existe, nil sinon,
-// ou l'exception si la clé n'est pas KVC-compliant.
-static void s7tvLogKVC(id obj, NSString *key, NSInteger sampleIdx, NSString *label) {
+// Vérifie quelles méthodes (getters/setters) une instance possède réellement,
+// sans rien lire ni écrire — juste respondsToSelector:, donc zéro risque de crash.
+static void s7tvLogResponds(id obj, NSArray<NSString *> *selectors, NSInteger sampleIdx, NSString *label) {
     SevenTVManager *mgr = [SevenTVManager sharedManager];
-    @try {
-        id val = [obj valueForKey:key];
-        if (val) {
-            NSString *desc = [val description] ?: @"";
-            if (desc.length > 150) desc = [desc substringToIndex:150];
-            [mgr log:@"🎞[%ld]   %@ classe=%@ desc=%@",
-             (long)sampleIdx, label, NSStringFromClass(object_getClass(val)), desc];
-        } else {
-            [mgr log:@"🎞[%ld]   %@ = nil", (long)sampleIdx, label];
-        }
-    } @catch (NSException *ex) {
-        [mgr log:@"🎞[%ld]   %@ KVC exception: %@", (long)sampleIdx, label, ex.reason];
+    NSMutableArray *found = [NSMutableArray array];
+    for (NSString *selStr in selectors) {
+        SEL sel = NSSelectorFromString(selStr);
+        if ([obj respondsToSelector:sel]) [found addObject:selStr];
     }
+    [mgr log:@"🎞[%ld]   %@ répond à: %@",
+     (long)sampleIdx, label, found.count ? [found componentsJoinedByString:@", "] : @"(aucun)"];
 }
 
 
@@ -1151,23 +1144,17 @@ static void TwitchSevenTVInit(void) {
                         }
                         free(piv);
 
-                        // 3. Tentative lecture "content" via KVC (try/catch, pas de raw pointer)
-                        @try {
-                            id contentVal = [sample valueForKey:@"content"];
-                            if (contentVal) {
-                                NSString *desc = [contentVal description] ?: @"";
-                                if (desc.length > 200) desc = [desc substringToIndex:200];
-                                [mgr log:@"🎞[%ld]   content classe=%@ desc=%@",
-                                 (long)sampleIdx, NSStringFromClass(object_getClass(contentVal)), desc];
-                            } else {
-                                [mgr log:@"🎞[%ld]   content = nil", (long)sampleIdx];
-                            }
-                        } @catch (NSException *ex) {
-                            [mgr log:@"🎞[%ld]   content KVC exception: %@", (long)sampleIdx, ex.reason];
-                        }
+                        // 3. Quelles méthodes le parent expose-t-il vraiment ? (sans rien lire)
+                        s7tvLogResponds(sample, @[
+                            @"content", @"setContent:",
+                            @"currentDisplayMode", @"setCurrentDisplayMode:",
+                            @"animatedImageLayer", @"setAnimatedImageLayer:",
+                            @"staticImageLayer", @"setStaticImageLayer:",
+                            @"currentImageLayer", @"setCurrentImageLayer:",
+                            @"networkImageRequester", @"setNetworkImageRequester:"
+                        ], sampleIdx, @"parent");
 
                         // 4. Sublayers (AnimatedImageAttachmentLayer) — via API publique
-                        __weak CALayer *weakSample = sample;
                         for (CALayer *sub in sample.sublayers) {
                             Class sc = object_getClass(sub);
                             [mgr log:@"🎞[%ld] sublayer: %@  bounds=(%.1fx%.1f)",
@@ -1252,7 +1239,16 @@ static void TwitchSevenTVInit(void) {
                                     }
                                 }
                             }
-                            // 6. Après 3s : compteur displayLayer: + re-check KVC du parent
+                            // 5c. Quelles méthodes le sublayer animé expose-t-il vraiment ?
+                            s7tvLogResponds(sub, @[
+                                @"invalidationToken", @"setInvalidationToken:",
+                                @"networkImageRequester", @"setNetworkImageRequester:",
+                                @"startAnimating", @"stopAnimating", @"play", @"pause",
+                                @"setFps:", @"fps", @"setPaused:", @"isPaused",
+                                @"currentFrame", @"setCurrentFrame:"
+                            ], sampleIdx, @"sublayer");
+
+                            // 6. Après 3s : compteur displayLayer:
                             __weak CALayer *weakSub = sub;
                             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
                                            dispatch_get_main_queue(), ^{
@@ -1266,15 +1262,6 @@ static void TwitchSevenTVInit(void) {
                                 }
                                 [[SevenTVManager sharedManager] log:@"🎞[%ld] displayLayer: appelé %ld fois en 3s",
                                  (long)sampleIdx, (long)count];
-
-                                CALayer *strongSample = weakSample;
-                                if (strongSample) {
-                                    s7tvLogKVC(strongSample, @"content", sampleIdx, @"content(+3s)");
-                                    s7tvLogKVC(strongSample, @"currentDisplayMode", sampleIdx, @"currentDisplayMode");
-                                    s7tvLogKVC(strongSample, @"animatedImageLayer", sampleIdx, @"animatedImageLayer");
-                                    s7tvLogKVC(strongSample, @"staticImageLayer", sampleIdx, @"staticImageLayer");
-                                    s7tvLogKVC(strongSample, @"currentImageLayer", sampleIdx, @"currentImageLayer");
-                                }
                             });
                         }
                     }
