@@ -1097,35 +1097,123 @@ static void TwitchSevenTVInit(void) {
 
                     if (emoteLayers.count == 0) return;
 
-                    // ── Dump ONE-SHOT AnimatedImageAttachmentLayer ────────────────
-                    static BOOL s_animDumped = NO;
-                    if (!s_animDumped && emoteLayers.count > 0) {
-                        s_animDumped = YES;
+                    // ── Dump MULTI-ÉCHANTILLONS AnimatedImageAttachmentLayer (max 5) ──
+                    static NSInteger s_animSampleCount = 0;
+                    static const NSInteger kS7TVAnimMaxSamples = 5;
+                    static BOOL s_displayLayerSwizzled = NO;
+                    static NSMutableDictionary *s_displayCounts = nil;
+                    if (s_animSampleCount < kS7TVAnimMaxSamples && emoteLayers.count > 0) {
+                        s_animSampleCount++;
+                        NSInteger sampleIdx = s_animSampleCount;
                         SevenTVManager *mgr = [SevenTVManager sharedManager];
                         CALayer *sample = emoteLayers.firstObject;
-                        // 1. Classe du layer parent
-                        [mgr log:@"🎞 parent: %@  frame=(%.1f,%.1f,%.1f,%.1f)",
-                         NSStringFromClass(object_getClass(sample)),
+
+                        // 1. Classe + frame du layer parent (ImageAttachmentLayer)
+                        Class parentClass = object_getClass(sample);
+                        [mgr log:@"🎞[%ld] parent: %@  frame=(%.1f,%.1f,%.1f,%.1f)",
+                         (long)sampleIdx, NSStringFromClass(parentClass),
                          sample.frame.origin.x, sample.frame.origin.y,
                          sample.frame.size.width, sample.frame.size.height];
-                        // 2. Sublayers (AnimatedImageAttachmentLayer) — via API publique
+
+                        // 2. iVars du parent + encodages (pour repérer "content")
+                        unsigned int pic = 0;
+                        Ivar *piv = class_copyIvarList(parentClass, &pic);
+                        for (unsigned int i = 0; i < pic; i++) {
+                            const char *enc = ivar_getTypeEncoding(piv[i]);
+                            [mgr log:@"🎞[%ld]   parent iVar: %s (%s)",
+                             (long)sampleIdx, ivar_getName(piv[i]), enc ?: "?"];
+                        }
+                        free(piv);
+
+                        // 3. Tentative lecture "content" via KVC (try/catch, pas de raw pointer)
+                        @try {
+                            id contentVal = [sample valueForKey:@"content"];
+                            if (contentVal) {
+                                NSString *desc = [contentVal description] ?: @"";
+                                if (desc.length > 200) desc = [desc substringToIndex:200];
+                                [mgr log:@"🎞[%ld]   content classe=%@ desc=%@",
+                                 (long)sampleIdx, NSStringFromClass(object_getClass(contentVal)), desc];
+                            } else {
+                                [mgr log:@"🎞[%ld]   content = nil", (long)sampleIdx];
+                            }
+                        } @catch (NSException *ex) {
+                            [mgr log:@"🎞[%ld]   content KVC exception: %@", (long)sampleIdx, ex.reason];
+                        }
+
+                        // 4. Sublayers (AnimatedImageAttachmentLayer) — via API publique
                         for (CALayer *sub in sample.sublayers) {
                             Class sc = object_getClass(sub);
-                            [mgr log:@"🎞 sublayer: %@  bounds=(%.1fx%.1f)",
-                             NSStringFromClass(sc),
+                            [mgr log:@"🎞[%ld] sublayer: %@  bounds=(%.1fx%.1f)",
+                             (long)sampleIdx, NSStringFromClass(sc),
                              sub.bounds.size.width, sub.bounds.size.height];
-                            // iVars du sublayer
+
+                            // iVars + encodages
                             unsigned int ic = 0;
                             Ivar *iv = class_copyIvarList(sc, &ic);
-                            for (unsigned int i = 0; i < ic; i++)
-                                [mgr log:@"🎞   iVar: %s", ivar_getName(iv[i])];
+                            for (unsigned int i = 0; i < ic; i++) {
+                                const char *enc = ivar_getTypeEncoding(iv[i]);
+                                [mgr log:@"🎞[%ld]   iVar: %s (%s)",
+                                 (long)sampleIdx, ivar_getName(iv[i]), enc ?: "?"];
+                            }
                             free(iv);
-                            // Méthodes du sublayer
+
+                            // Méthodes + encodages (notamment initWithFPS: et displayLayer:)
                             unsigned int mc = 0;
                             Method *mv = class_copyMethodList(sc, &mc);
-                            for (unsigned int i = 0; i < mc; i++)
-                                [mgr log:@"🎞   method: %@", NSStringFromSelector(method_getName(mv[i]))];
+                            for (unsigned int i = 0; i < mc; i++) {
+                                const char *enc = method_getTypeEncoding(mv[i]);
+                                [mgr log:@"🎞[%ld]   method: %@ (%s)",
+                                 (long)sampleIdx, NSStringFromSelector(method_getName(mv[i])), enc ?: "?"];
+                            }
+
+                            // 5. Swizzle displayLayer: (une seule fois, toutes instances confondues)
+                            //    — uniquement si l'encodage correspond au pattern attendu
+                            //    (void return, 1 argument objet), pour éviter tout mismatch d'ABI.
+                            if (!s_displayLayerSwizzled) {
+                                SEL displaySel = NSSelectorFromString(@"displayLayer:");
+                                Method dm = class_getInstanceMethod(sc, displaySel);
+                                if (dm) {
+                                    const char *denc = method_getTypeEncoding(dm);
+                                    if (denc && denc[0] == 'v' && strchr(denc, '@') != NULL) {
+                                        s_displayLayerSwizzled = YES;
+                                        s_displayCounts = [NSMutableDictionary dictionary];
+                                        IMP origIMP = method_getImplementation(dm);
+                                        IMP newIMP = imp_implementationWithBlock(^(id self_, id layerArg){
+                                            @try {
+                                                NSValue *key = [NSValue valueWithNonretainedObject:self_];
+                                                @synchronized (s_displayCounts) {
+                                                    NSNumber *c = s_displayCounts[key];
+                                                    s_displayCounts[key] = @(c.integerValue + 1);
+                                                }
+                                            } @catch (__unused NSException *e) {}
+                                            @try {
+                                                ((void(*)(id,SEL,id))origIMP)(self_, displaySel, layerArg);
+                                            } @catch (__unused NSException *e) {}
+                                        });
+                                        method_setImplementation(dm, newIMP);
+                                        [mgr log:@"🎞 displayLayer: swizzlé pour comptage (encoding=%s)", denc];
+                                    } else {
+                                        [mgr log:@"🎞 displayLayer: encoding inattendu (%s), pas de swizzle", denc ?: "?"];
+                                    }
+                                }
+                            }
                             free(mv);
+
+                            // 6. Après 3s, log du nombre d'appels displayLayer: pour CE sublayer
+                            __weak CALayer *weakSub = sub;
+                            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
+                                           dispatch_get_main_queue(), ^{
+                                CALayer *strongSub = weakSub;
+                                NSInteger count = 0;
+                                if (strongSub && s_displayCounts) {
+                                    NSValue *key = [NSValue valueWithNonretainedObject:strongSub];
+                                    @synchronized (s_displayCounts) {
+                                        count = [s_displayCounts[key] integerValue];
+                                    }
+                                }
+                                [[SevenTVManager sharedManager] log:@"🎞[%ld] displayLayer: appelé %ld fois en 3s",
+                                 (long)sampleIdx, (long)count];
+                            });
                         }
                     }
                     // ─────────────────────────────────────────────────────────────
