@@ -994,49 +994,58 @@ static void s7tv_hook_network_image_requester(void) {
         return;
     }
 
-    // Lister toutes les méthodes pour trouver les sélecteurs exacts
-    unsigned int mc = 0;
-    Method *methods = class_copyMethodList(nic, &mc);
-    NSMutableArray *imageSelectors   = [NSMutableArray array];
-    NSMutableArray *animatedSelectors = [NSMutableArray array];
-    for (unsigned int i = 0; i < mc; i++) {
-        NSString *name = NSStringFromSelector(method_getName(methods[i]));
-        if ([name hasPrefix:@"imageAtURL:"]) [imageSelectors addObject:name];
-        if ([name hasPrefix:@"animatedImageAtURL:"]) [animatedSelectors addObject:name];
-    }
-    free(methods);
+    SevenTVManager *mgr = [SevenTVManager sharedManager];
 
-    [[SevenTVManager sharedManager] log:@"🖼 NetworkImageRequester imageAtURL: variantes: %@", imageSelectors];
-    [[SevenTVManager sharedManager] log:@"🎞 NetworkImageRequester animatedImageAtURL: variantes: %@", animatedSelectors];
-
-    // Hook imageAtURL:withScale:persistingFor: (variante la plus courte)
-    SEL selImg = NSSelectorFromString(@"imageAtURL:withScale:persistingFor:");
-    Method mImg = class_getInstanceMethod(nic, selImg);
-    if (mImg) {
-        IMP origImg = method_getImplementation(mImg);
-        IMP newImg = imp_implementationWithBlock(^id(id self_, NSURL *url, CGFloat scale, id persist) {
-            if ([url.host containsString:@"7tv"]) {
-                [[SevenTVManager sharedManager] log:@"🖼 imageAtURL: %@  scale=%.1f", url.absoluteString, scale];
-            }
-            return ((id(*)(id,SEL,NSURL*,CGFloat,id))origImg)(self_, selImg, url, scale, persist);
-        });
-        method_setImplementation(mImg, newImg);
-        [[SevenTVManager sharedManager] log:@"✅ Hook imageAtURL:withScale:persistingFor: OK"];
+    // ── variante courte : imageAtURL:withScale:persistingFor: ──
+    SEL selImg1 = NSSelectorFromString(@"imageAtURL:withScale:persistingFor:");
+    Method mImg1 = class_getInstanceMethod(nic, selImg1);
+    if (mImg1) {
+        IMP orig = method_getImplementation(mImg1);
+        method_setImplementation(mImg1, imp_implementationWithBlock(
+            ^id(id self_, NSURL *url, CGFloat scale, id persist) {
+                [mgr log:@"🖼A %@  scale=%.1f", url.absoluteString, scale];
+                return ((id(*)(id,SEL,NSURL*,CGFloat,id))orig)(self_, selImg1, url, scale, persist);
+            }));
+        [mgr log:@"✅ Hook imageAtURL:withScale:persistingFor: OK"];
     }
 
-    // Hook animatedImageAtURL:withStaticScale:persistingFor: (variante la plus courte)
-    SEL selAnim = NSSelectorFromString(@"animatedImageAtURL:withStaticScale:persistingFor:");
-    Method mAnim = class_getInstanceMethod(nic, selAnim);
-    if (mAnim) {
-        IMP origAnim = method_getImplementation(mAnim);
-        IMP newAnim = imp_implementationWithBlock(^id(id self_, NSURL *url, CGFloat scale, id persist) {
-            if ([url.host containsString:@"7tv"]) {
-                [[SevenTVManager sharedManager] log:@"🎞 animatedImageAtURL: %@  scale=%.1f", url.absoluteString, scale];
-            }
-            return ((id(*)(id,SEL,NSURL*,CGFloat,id))origAnim)(self_, selAnim, url, scale, persist);
-        });
-        method_setImplementation(mAnim, newAnim);
-        [[SevenTVManager sharedManager] log:@"✅ Hook animatedImageAtURL:withStaticScale:persistingFor: OK"];
+    // ── variante longue : imageAtURL:withScale:persistingFor:storeInMemoryCache:userInitiated: ──
+    SEL selImg2 = NSSelectorFromString(@"imageAtURL:withScale:persistingFor:storeInMemoryCache:userInitiated:");
+    Method mImg2 = class_getInstanceMethod(nic, selImg2);
+    if (mImg2) {
+        IMP orig = method_getImplementation(mImg2);
+        method_setImplementation(mImg2, imp_implementationWithBlock(
+            ^id(id self_, NSURL *url, CGFloat scale, id persist, BOOL mem, BOOL user) {
+                [mgr log:@"🖼B %@  scale=%.1f mem=%d user=%d", url.absoluteString, scale, mem, user];
+                return ((id(*)(id,SEL,NSURL*,CGFloat,id,BOOL,BOOL))orig)(self_, selImg2, url, scale, persist, mem, user);
+            }));
+        [mgr log:@"✅ Hook imageAtURL:...:storeInMemoryCache:userInitiated: OK"];
+    }
+
+    // ── variante courte : animatedImageAtURL:withStaticScale:persistingFor: ──
+    SEL selAnim1 = NSSelectorFromString(@"animatedImageAtURL:withStaticScale:persistingFor:");
+    Method mAnim1 = class_getInstanceMethod(nic, selAnim1);
+    if (mAnim1) {
+        IMP orig = method_getImplementation(mAnim1);
+        method_setImplementation(mAnim1, imp_implementationWithBlock(
+            ^id(id self_, NSURL *url, CGFloat scale, id persist) {
+                [mgr log:@"🎞A %@  scale=%.1f", url.absoluteString, scale];
+                return ((id(*)(id,SEL,NSURL*,CGFloat,id))orig)(self_, selAnim1, url, scale, persist);
+            }));
+        [mgr log:@"✅ Hook animatedImageAtURL:withStaticScale:persistingFor: OK"];
+    }
+
+    // ── variante longue : animatedImageAtURL:withStaticScale:persistingFor:userInitiated: ──
+    SEL selAnim2 = NSSelectorFromString(@"animatedImageAtURL:withStaticScale:persistingFor:userInitiated:");
+    Method mAnim2 = class_getInstanceMethod(nic, selAnim2);
+    if (mAnim2) {
+        IMP orig = method_getImplementation(mAnim2);
+        method_setImplementation(mAnim2, imp_implementationWithBlock(
+            ^id(id self_, NSURL *url, CGFloat scale, id persist, BOOL user) {
+                [mgr log:@"🎞B %@  scale=%.1f user=%d", url.absoluteString, scale, user];
+                return ((id(*)(id,SEL,NSURL*,CGFloat,id,BOOL))orig)(self_, selAnim2, url, scale, persist, user);
+            }));
+        [mgr log:@"✅ Hook animatedImageAtURL:...:userInitiated: OK"];
     }
 }
 
