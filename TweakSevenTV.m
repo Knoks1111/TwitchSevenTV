@@ -1003,20 +1003,22 @@ static void TwitchSevenTVInit(void) {
             }
             ptrdiff_t imgLayersOffset = ivar_getOffset(imgLayersIvar);
 
-            IMP origIMP = origMethod ? method_getImplementation(origMethod) : nil;
+            // Si layoutSublayers n'existe pas dans MessageStringLayer,
+            // on ne peut pas le hooker proprement — on utilise la superclasse CALayer
+            if (!origMethod) {
+                // Chercher dans la superclasse
+                origMethod = class_getInstanceMethod(class_getSuperclass(msgLayerClass), layoutSel);
+            }
+            if (!origMethod) {
+                [[SevenTVManager sharedManager] log:@"❌ layoutSublayers introuvable partout"];
+                return;
+            }
+
+            IMP origIMP = method_getImplementation(origMethod);
 
             IMP newIMP = imp_implementationWithBlock(^(CALayer *selfLayer) {
                 // Appel original EN PREMIER
-                if (origIMP) {
-                    ((void (*)(id, SEL))origIMP)(selfLayer, layoutSel);
-                } else {
-                    // Appeler la superclasse
-                    struct objc_super superInfo = {
-                        .receiver = selfLayer,
-                        .super_class = class_getSuperclass(msgLayerClass)
-                    };
-                    ((void (*)(struct objc_super *, SEL))objc_msgSendSuper)(&superInfo, layoutSel);
-                }
+                ((void (*)(id, SEL))origIMP)(selfLayer, layoutSel);
 
                 // Maintenant orderedImageLayers est peuplé et positionné
                 @try {
@@ -1051,11 +1053,7 @@ static void TwitchSevenTVInit(void) {
                 } @catch (...) {}
             });
 
-            if (origMethod) {
-                method_setImplementation(origMethod, newIMP);
-            } else {
-                class_addMethod(msgLayerClass, layoutSel, newIMP, "v@:");
-            }
+            method_setImplementation(origMethod, newIMP);
             [[SevenTVManager sharedManager] log:@"✅ layoutSublayers hooké sur MessageStringLayer"];
         });
         // ─────────────────────────────────────────────────────────────────
