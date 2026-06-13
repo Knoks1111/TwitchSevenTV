@@ -975,86 +975,92 @@ static void TwitchSevenTVInit(void) {
 
         // Démarrer le local proxy si activé
 
-        // ── Hook layoutSublayers sur MessageStringLayer ──────────────────
-        // C'est le CALayer custom de Twitch qui gère le positionnement des emotes.
-        // layoutSublayers est appelé APRÈS que orderedImageLayers est peuplé et positionné.
-        // C'est l'endroit exact où on doit modifier la taille des emotes.
+        // ── Hook willDisplayCell sur ChatTranscriptView ──────────────────
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
+            Class transcriptClass = NSClassFromString(@"Twitch.ChatTranscriptView");
+            if (!transcriptClass) return;
+
+            SEL origSel = @selector(tableView:willDisplayCell:forRowAtIndexPath:);
+            Method origMethod = class_getInstanceMethod(transcriptClass, origSel);
+            if (!origMethod) return;
+
+            Class msgStringViewClass = NSClassFromString(@"Twitch.MessageStringView");
             Class msgLayerClass = NSClassFromString(@"Twitch.MessageStringLayer");
-            if (!msgLayerClass) {
-                [[SevenTVManager sharedManager] log:@"❌ MessageStringLayer introuvable"];
-                return;
-            }
+            if (!msgStringViewClass || !msgLayerClass) return;
 
-            SEL layoutSel = @selector(layoutSublayers);
-            Method origMethod = class_getInstanceMethod(msgLayerClass, layoutSel);
-            if (!origMethod) {
-                // layoutSublayers non défini dans MessageStringLayer — on hérite de CALayer
-                // On l'ajoute directement
-                [[SevenTVManager sharedManager] log:@"ℹ️ layoutSublayers non défini, on utilise addMethod"];
-            }
-
-            // Récupérer offset de orderedImageLayers
+            Ivar layerIvar = class_getInstanceVariable(msgStringViewClass, "messageStringLayer");
             Ivar imgLayersIvar = class_getInstanceVariable(msgLayerClass, "orderedImageLayers");
-            if (!imgLayersIvar) {
-                [[SevenTVManager sharedManager] log:@"❌ orderedImageLayers iVar introuvable"];
-                return;
-            }
+            if (!layerIvar || !imgLayersIvar) return;
+
+            ptrdiff_t layerOffset = ivar_getOffset(layerIvar);
             ptrdiff_t imgLayersOffset = ivar_getOffset(imgLayersIvar);
 
-            // Si layoutSublayers n'existe pas dans MessageStringLayer,
-            // on ne peut pas le hooker proprement — on utilise la superclasse CALayer
-            if (!origMethod) {
-                // Chercher dans la superclasse
-                origMethod = class_getInstanceMethod(class_getSuperclass(msgLayerClass), layoutSel);
-            }
-            if (!origMethod) {
-                [[SevenTVManager sharedManager] log:@"❌ layoutSublayers introuvable partout"];
-                return;
-            }
+            // Offset de MessageStringView dans ChatMessageTableViewCell
+            Class cellClass = NSClassFromString(@"Twitch.ChatMessageTableViewCell");
+            Ivar msgViewIvar = class_getInstanceVariable(cellClass, "$__lazy_storage_$__messageStringView");
+            if (!msgViewIvar) return;
+            ptrdiff_t msgViewOffset = ivar_getOffset(msgViewIvar);
 
             IMP origIMP = method_getImplementation(origMethod);
 
-            IMP newIMP = imp_implementationWithBlock(^(CALayer *selfLayer) {
-                // Appel original EN PREMIER
-                ((void (*)(id, SEL))origIMP)(selfLayer, layoutSel);
+            IMP newIMP = imp_implementationWithBlock(^(id self_tv,
+                                                       UITableView *tableView,
+                                                       UITableViewCell *cell,
+                                                       NSIndexPath *indexPath) {
+                // Appel original
+                ((void (*)(id, SEL, UITableView *, UITableViewCell *, NSIndexPath *))origIMP)
+                    (self_tv, origSel, tableView, cell, indexPath);
 
-                // Maintenant orderedImageLayers est peuplé et positionné
-                @try {
-                    uintptr_t layerAddr = (uintptr_t)(__bridge void *)selfLayer;
-                    void *imgLayersPtr = *(void **)(layerAddr + imgLayersOffset);
-                    if (!imgLayersPtr) return;
-                    id imgLayersObj = (__bridge id)(imgLayersPtr);
-                    if (![imgLayersObj isKindOfClass:[NSArray class]]) return;
+                // Seulement pour ChatMessageTableViewCell
+                if (![NSStringFromClass([cell class]) isEqualToString:@"Twitch.ChatMessageTableViewCell"]) return;
 
-                    NSArray *arr = (NSArray *)imgLayersObj;
-                    if (arr.count == 0) return;
+                // Attendre que le layout soit fini puis resizer
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)),
+                               dispatch_get_main_queue(), ^{
+                    @try {
+                        uintptr_t cellAddr = (uintptr_t)(__bridge void *)cell;
+                        void *msgViewPtr = *(void **)(cellAddr + msgViewOffset);
+                        if (!msgViewPtr) return;
+                        id msgStringView = (__bridge id)(msgViewPtr);
 
-                    CGFloat targetSize = 56.0;
+                        uintptr_t msAddr = (uintptr_t)(__bridge void *)msgStringView;
+                        void *layerPtr = *(void **)(msAddr + layerOffset);
+                        if (!layerPtr) return;
+                        id layer = (__bridge id)(layerPtr);
 
-                    [CATransaction begin];
-                    [CATransaction setDisableActions:YES];
-                    for (id imgLayer in arr) {
-                        if (!imgLayer) continue;
-                        CALayer *caLayer = (CALayer *)imgLayer;
-                        CGRect f = caLayer.frame;
-                        if (f.size.width <= 0 || f.size.height <= 0) continue;
-                        // Exclure les badges (origin.x < 30pt)
-                        if (f.origin.x < 30.0) continue;
-                        caLayer.bounds = CGRectMake(0, 0, targetSize, targetSize);
-                        caLayer.frame = CGRectMake(
-                            f.origin.x,
-                            f.origin.y + (f.size.height - targetSize) / 2.0,
-                            targetSize, targetSize
-                        );
-                    }
-                    [CATransaction commit];
-                } @catch (...) {}
+                        uintptr_t layerAddr = (uintptr_t)layerPtr;
+                        void *imgLayersPtr = *(void **)(layerAddr + imgLayersOffset);
+                        if (!imgLayersPtr) return;
+                        id imgLayersObj = (__bridge id)(imgLayersPtr);
+                        if (![imgLayersObj isKindOfClass:[NSArray class]]) return;
+
+                        NSArray *arr = (NSArray *)imgLayersObj;
+                        if (arr.count == 0) return;
+
+                        CGFloat targetSize = 56.0;
+                        [CATransaction begin];
+                        [CATransaction setDisableActions:YES];
+                        for (id imgLayer in arr) {
+                            if (!imgLayer) continue;
+                            CALayer *caLayer = (CALayer *)imgLayer;
+                            CGRect f = caLayer.frame;
+                            if (f.size.width <= 0 || f.size.height <= 0) continue;
+                            if (f.origin.x < 30.0) continue;
+                            caLayer.bounds = CGRectMake(0, 0, targetSize, targetSize);
+                            caLayer.frame = CGRectMake(
+                                f.origin.x,
+                                f.origin.y + (f.size.height - targetSize) / 2.0,
+                                targetSize, targetSize
+                            );
+                        }
+                        [CATransaction commit];
+                    } @catch (...) {}
+                });
             });
 
             method_setImplementation(origMethod, newIMP);
-            [[SevenTVManager sharedManager] log:@"✅ layoutSublayers hooké sur MessageStringLayer"];
+            [[SevenTVManager sharedManager] log:@"✅ willDisplayCell hooké (avec délai 100ms)"];
         });
         // ─────────────────────────────────────────────────────────────────
 
