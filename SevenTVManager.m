@@ -85,9 +85,9 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
 @property (nonatomic, strong) UIView              *emotePickerView;
 // FORT (pas weak) — doit rester valide jusqu'au tap sur l'emote.
 // Un weak pointer devient nil dès que Twitch recycle la vue → insertion silencieuse.
-@property (nonatomic, strong) UIView              *emotePickerTextField;
+@property (nonatomic, weak)   UIView              *emotePickerTextField;
 // Référence forte au _TtC6Twitch...TextEntryView — reste firstResponder pendant le picker.
-@property (nonatomic, strong) UITextView          *emotePickerTextEntryView;
+@property (nonatomic, weak)   UITextView          *emotePickerTextEntryView;
 @property (nonatomic, strong) UICollectionView    *emoteCollectionView;
 @property (nonatomic, strong) UITextField         *emoteSearchField;
 @property (nonatomic, strong) NSArray<SevenTVEmote *> *emotePickerEmotes;
@@ -1892,12 +1892,16 @@ static NSString *s7tv_emoteSetKey(NSDictionary *global, NSDictionary *channel) {
 // On attend la fin de l'animation de fermeture (~0.35s) puis on réassigne
 // inputView = picker et on force reloadInputViews.
 - (void)_restorePickerFocus {
-    UITextView *tv = self.emotePickerTextEntryView;
-    UIView *pickerView = self.emotePickerView;
-    if (!tv || !pickerView) return;
+    __weak UITextView *weakTV = self.emotePickerTextEntryView;
+    __weak UIView *weakPicker = self.emotePickerView;
+    if (!weakTV || !weakPicker) return;
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
+        UITextView *tv = weakTV;
+        UIView *pickerView = weakPicker;
+        // Guard : si le stream a été fermé entre temps, tv.window == nil
+        if (!tv || !tv.window || !pickerView) return;
         // Réassigner l'inputView au cas où il aurait été effacé
         tv.inputView = pickerView;
         tv.inputAccessoryView = nil;

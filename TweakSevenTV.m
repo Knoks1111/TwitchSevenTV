@@ -606,10 +606,13 @@ static UIViewController *s7tv_vcForView(UIView *v) {
     }
     [mgr log:@"  ── fin hiérarchie ──"];
 
+    __weak UIWindow *weakWindow = self;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
+        UIWindow *strongWindow = weakWindow;
+        if (!strongWindow) return;
         [mgr log:@"  🔍 SCAN CHAT @ (%.0f,%.0f) ──────────────", pt.x, pt.y];
-        NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:self];
+        NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:strongWindow];
         NSInteger scanCount = 0;
         while (queue.count > 0 && scanCount < 2000) {
             UIView *sv = queue.firstObject; [queue removeObjectAtIndex:0];
@@ -1130,7 +1133,11 @@ static void TwitchSevenTVInit(void) {
 
             // Observer : quand le slider change la taille, on force un reloadData
             // sur toutes les ChatTranscriptView visibles.
-            [[NSNotificationCenter defaultCenter]
+            // L'objet retourné est stocké dans une static pour éviter le leak
+            // et garantir qu'on ne s'enregistre qu'une seule fois.
+            static id s_emoteSizeObserver = nil;
+            if (s_emoteSizeObserver) return; // déjà enregistré
+            s_emoteSizeObserver = [[NSNotificationCenter defaultCenter]
                 addObserverForName:@"S7TVEmoteSizeDidChangeNotification"
                             object:nil
                              queue:[NSOperationQueue mainQueue]
