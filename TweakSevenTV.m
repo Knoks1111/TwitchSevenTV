@@ -90,8 +90,11 @@ static void s7tv_swizzle(Class targetClass,
 
     // ── Force _areEmoteAnimationsEnabled via offset mémoire direct ──────────
     if ([selfClass isEqualToString:@"Twitch.ChatTranscriptView"]) {
+        __weak UIView *weakSelf = self;
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
+            UIView *strongSelf = weakSelf;
+            if (!strongSelf) return;
             Class cls = NSClassFromString(@"Twitch.ChatTranscriptView");
             Ivar ivar = class_getInstanceVariable(cls, "_areEmoteAnimationsEnabled");
             if (!ivar) {
@@ -99,10 +102,8 @@ static void s7tv_swizzle(Class targetClass,
                 return;
             }
             ptrdiff_t offset = ivar_getOffset(ivar);
-            // Lire la valeur actuelle (BOOL = 1 byte)
-            BOOL *ptr = (BOOL *)((uint8_t *)(__bridge void *)self + offset);
+            BOOL *ptr = (BOOL *)((uint8_t *)(__bridge void *)strongSelf + offset);
             BOOL before = *ptr;
-            // Forcer à YES
             *ptr = YES;
             BOOL after = *ptr;
             [[SevenTVManager sharedManager] log:@"🎬 _areEmoteAnimationsEnabled: %d → %d (offset=%td)",
@@ -118,9 +119,11 @@ static void s7tv_swizzle(Class targetClass,
     objc_setAssociatedObject(chatInputView, &kS7TVTextFieldTagged, @YES,
                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
+    __weak UIView *weakChatInputView = chatInputView;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
-
+        UIView *chatInputView = weakChatInputView;
+        if (!chatInputView) return;
         SevenTVManager *mgr = [SevenTVManager sharedManager];
 
         __block UIButton *bitsBtn     = nil;
@@ -1016,8 +1019,11 @@ static void TwitchSevenTVInit(void) {
                 if (![NSStringFromClass([cell class]) isEqualToString:@"Twitch.ChatMessageTableViewCell"]) return;
 
                 // Attendre que le layout soit fini puis resizer
+                __weak UITableViewCell *weakCell = cell;
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)),
                                dispatch_get_main_queue(), ^{
+                    UITableViewCell *cell = weakCell;
+                    if (!cell) return;
                     @try {
                         uintptr_t cellAddr = (uintptr_t)(__bridge void *)cell;
                         void *msgViewPtr = *(void **)(cellAddr + msgViewOffset);

@@ -1395,18 +1395,16 @@ static const char kS7TVTaskKey = 0;
 }
 
 - (void)_hideEmotePicker {
-    // Fermer le picker SANS faire réapparaître le clavier.
-    // resignFirstResponder retire simplement le focus — aucune vue
-    // de saisie n'est affichée. L'utilisateur devra re-tapper le champ
-    // pour écrire (comportement identique au picker d'emojis iOS natif
-    // quand on le ferme via la touche ⌨).
     UITextView *tv = self.emotePickerTextEntryView;
-    if (tv) {
-        tv.inputView = nil;
-        tv.inputAccessoryView = nil;
-        [tv resignFirstResponder]; // ferme tout sans afficher le clavier
+    if (tv && tv.window) {
+        @try {
+            tv.inputView = nil;
+            tv.inputAccessoryView = nil;
+            [tv resignFirstResponder];
+        } @catch (...) {}
     }
-    // Cacher la vue picker (réutilisée la prochaine fois)
+    self.emotePickerTextEntryView = nil;
+    self.emotePickerTextField = nil;
     self.emotePickerView.hidden = YES;
 }
 
