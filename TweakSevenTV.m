@@ -123,35 +123,9 @@ static void s7tv_swizzle(Class targetClass,
         return;
     }
 
-    // ── Force _areEmoteAnimationsEnabled via offset mémoire direct ──────────
-    // DÉSACTIVÉ (Option A — test diagnostic) : ce bloc écrivait 1 octet (0x01)
-    // directement en mémoire à un offset calculé via ivar_getOffset(). Suspect
-    // n°1 de la corruption mémoire à l'origine du crash swift_release /
-    // UITableView dealloc (SIGBUS EXC_ARM_DA_ALIGN) à la fermeture du stream.
-    // Bloc entièrement désactivé pour confirmer/infirmer ce diagnostic.
-    /*
-    if ([selfClass isEqualToString:@"Twitch.ChatTranscriptView"]) {
-        __weak UIView *weakSelf = self;
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            UIView *strongSelf = weakSelf;
-            if (!strongSelf) return;
-            Class cls = NSClassFromString(@"Twitch.ChatTranscriptView");
-            Ivar ivar = class_getInstanceVariable(cls, "_areEmoteAnimationsEnabled");
-            if (!ivar) {
-                [[SevenTVManager sharedManager] log:@"❌ iVar _areEmoteAnimationsEnabled introuvable"];
-                return;
-            }
-            ptrdiff_t offset = ivar_getOffset(ivar);
-            BOOL *ptr = (BOOL *)((uint8_t *)(__bridge void *)strongSelf + offset);
-            BOOL before = *ptr;
-            *ptr = YES;
-            BOOL after = *ptr;
-            [[SevenTVManager sharedManager] log:@"🎬 _areEmoteAnimationsEnabled: %d → %d (offset=%td)",
-             before, after, offset];
-        });
-    }
-    */
+    // (Ancien hack "_areEmoteAnimationsEnabled" via écriture mémoire brute
+    //  supprimé : c'était la cause du crash swift_release / UITableView dealloc
+    //  à la fermeture du stream — et la feature ne fonctionnait pas anyway.)
 
     // ── Hijack du bouton Bits → bouton 7TV ───────────────────────────────────
     if (![selfClass isEqualToString:@"Twitch.ChatInputView"]) return;
