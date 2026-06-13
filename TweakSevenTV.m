@@ -1083,103 +1083,73 @@ static void TwitchSevenTVInit(void) {
                     if (!cell || !tv) return;
                     if (!cell.window || !tv.window) return;
                     if (cell.superview != tv) return;
-                    @try {
-                        uintptr_t cellAddr = (uintptr_t)(__bridge void *)cell;
-                        void *msgViewPtr = *(void **)(cellAddr + msgViewOffset);
-                        if (!msgViewPtr) return;
-                        id msgStringView = (__bridge id)(msgViewPtr);
 
-                        uintptr_t msAddr = (uintptr_t)(__bridge void *)msgStringView;
-                        void *layerPtr = *(void **)(msAddr + layerOffset);
-                        if (!layerPtr) return;
-                        id layer = (__bridge id)(layerPtr);
+                    CGFloat targetSize = (CGFloat)[[NSUserDefaults standardUserDefaults]
+                        integerForKey:@"s7tv_emote_size"] ?: 30.0;
 
-                        uintptr_t layerAddr = (uintptr_t)layerPtr;
-                        void *imgLayersPtr = *(void **)(layerAddr + imgLayersOffset);
-                        if (!imgLayersPtr) return;
-                        id imgLayersObj = (__bridge id)(imgLayersPtr);
-                        if (![imgLayersObj isKindOfClass:[NSArray class]]) return;
-
-                        NSArray *arr = (NSArray *)imgLayersObj;
-                        if (arr.count == 0) return;
-
-                        CGFloat targetSize = (CGFloat)[[NSUserDefaults standardUserDefaults]
-                            integerForKey:@"s7tv_emote_size"] ?: 30.0;
-
-                        // Extraire les ratios des emotes 7TV dans l'ordre depuis le texte de la cellule
-                        // On cherche un UILabel dans la hiérarchie pour lire le texte brut
-                        NSMutableArray<NSNumber *> *orderedRatios = [NSMutableArray array];
-                        @try {
-                            NSMutableArray *queue = [NSMutableArray arrayWithObject:cell];
-                            NSString *cellText = nil;
-                            while (queue.count > 0 && !cellText) {
-                                UIView *v = queue[0];
-                                [queue removeObjectAtIndex:0];
-                                if ([v isKindOfClass:[UILabel class]]) {
-                                    NSString *t = ((UILabel *)v).text;
-                                    if (t.length > 0) { cellText = t; break; }
-                                }
-                                for (UIView *sub in v.subviews) [queue addObject:sub];
-                            }
-                            if (cellText) {
-                                SevenTVManager *mgr2 = [SevenTVManager sharedManager];
-                                NSMutableDictionary *ratios = [mgr2 emoteRatios];
-                                NSArray<NSString *> *words = [cellText componentsSeparatedByString:@" "];
-                                for (NSString *word in words) {
-                                    // Chercher si ce mot est une emote connue (via emoteForName)
-                                    SevenTVEmote *em = [mgr2 emoteForName:word];
-                                    if (em && em.width > 0 && em.height > 0) {
-                                        CGFloat r = (CGFloat)em.width / (CGFloat)em.height;
-                                        [orderedRatios addObject:@(r)];
-                                    } else if (em) {
-                                        // Emote connue mais pas de dimensions → fallback emoteRatios
-                                        NSNumber *rn = ratios[em.emoteID];
-                                        [orderedRatios addObject:rn ?: @(1.0)];
-                                    }
-                                }
-                            }
-                        } @catch (...) {}
-
-                        NSInteger emoteIndex = 0;
-                        [CATransaction begin];
-                        [CATransaction setDisableActions:YES];
-                        for (id imgLayer in arr) {
-                            if (!imgLayer) continue;
-                            CALayer *caLayer = (CALayer *)imgLayer;
-
-                            // Les emotes 7TV ont AnimatedImageAttachmentLayer comme sublayer
-                            // Les badges ont StaticImageAttachmentLayer
-                            BOOL isEmote = NO;
-                            for (CALayer *sub in caLayer.sublayers) {
-                                if ([NSStringFromClass(object_getClass(sub)) containsString:@"Animated"]) {
-                                    isEmote = YES;
-                                    break;
-                                }
-                            }
-                            if (!isEmote) continue;
-
-                            CGRect f = caLayer.frame;
-                            if (f.size.width <= 0 || f.size.height <= 0) continue;
-
-                            // Ratio depuis orderedRatios (par index), fallback sur ratio du layer
-                            CGFloat ratio;
-                            if (emoteIndex < (NSInteger)orderedRatios.count) {
-                                ratio = orderedRatios[emoteIndex].floatValue;
-                            } else {
-                                ratio = f.size.width / f.size.height;
-                            }
-                            emoteIndex++;
-
-                            CGFloat newWidth = targetSize * ratio;
-                            caLayer.bounds = CGRectMake(0, 0, newWidth, targetSize);
-                            caLayer.frame = CGRectMake(
-                                f.origin.x,
-                                f.origin.y + (f.size.height - targetSize) / 2.0,
-                                newWidth, targetSize
-                            );
+                    // Extraire les ratios depuis le texte de la cellule (UILabel walk)
+                    NSMutableArray<NSNumber *> *orderedRatios = [NSMutableArray array];
+                    NSMutableArray *viewQueue = [NSMutableArray arrayWithObject:cell];
+                    NSString *cellText = nil;
+                    while (viewQueue.count > 0 && !cellText) {
+                        UIView *v = viewQueue[0];
+                        [viewQueue removeObjectAtIndex:0];
+                        if ([v isKindOfClass:[UILabel class]]) {
+                            NSString *t = ((UILabel *)v).text;
+                            if (t.length > 0) { cellText = t; }
                         }
-                        [CATransaction commit];
-                    } @catch (...) {}
+                        for (UIView *sub in v.subviews) [viewQueue addObject:sub];
+                    }
+                    if (cellText) {
+                        SevenTVManager *mgr2 = [SevenTVManager sharedManager];
+                        NSMutableDictionary *ratios = [mgr2 emoteRatios];
+                        for (NSString *word in [cellText componentsSeparatedByString:@" "]) {
+                            SevenTVEmote *em = [mgr2 emoteForName:word];
+                            if (em && em.width > 0 && em.height > 0) {
+                                [orderedRatios addObject:@((CGFloat)em.width / (CGFloat)em.height)];
+                            } else if (em) {
+                                NSNumber *rn = ratios[em.emoteID];
+                                [orderedRatios addObject:rn ?: @(1.0)];
+                            }
+                        }
+                    }
+
+                    // Collecter les emote layers via l'API publique CALayer uniquement
+                    // (plus de raw pointer → élimine le crash objc_retain sur Swift storage)
+                    NSMutableArray<CALayer *> *emoteLayers = [NSMutableArray array];
+                    NSMutableArray<CALayer *> *layerQueue = [NSMutableArray arrayWithArray:cell.layer.sublayers];
+                    while (layerQueue.count > 0) {
+                        CALayer *l = layerQueue[0];
+                        [layerQueue removeObjectAtIndex:0];
+                        // Chercher les layers qui ont un sublayer "Animated" (= emote 7TV)
+                        for (CALayer *sub in l.sublayers) {
+                            if ([NSStringFromClass(object_getClass(sub)) containsString:@"Animated"]) {
+                                [emoteLayers addObject:l];
+                                break;
+                            }
+                        }
+                        if (l.sublayers) [layerQueue addObjectsFromArray:l.sublayers];
+                    }
+
+                    if (emoteLayers.count == 0) return;
+
+                    NSInteger emoteIndex = 0;
+                    [CATransaction begin];
+                    [CATransaction setDisableActions:YES];
+                    for (CALayer *caLayer in emoteLayers) {
+                        CGRect f = caLayer.frame;
+                        if (f.size.width <= 0 || f.size.height <= 0) { emoteIndex++; continue; }
+                        CGFloat ratio = (emoteIndex < (NSInteger)orderedRatios.count)
+                            ? orderedRatios[emoteIndex].floatValue
+                            : f.size.width / f.size.height;
+                        emoteIndex++;
+                        CGFloat newWidth = targetSize * ratio;
+                        caLayer.bounds = CGRectMake(0, 0, newWidth, targetSize);
+                        caLayer.frame  = CGRectMake(f.origin.x,
+                                                    f.origin.y + (f.size.height - targetSize) / 2.0,
+                                                    newWidth, targetSize);
+                    }
+                    [CATransaction commit];
                 });
             });
 
