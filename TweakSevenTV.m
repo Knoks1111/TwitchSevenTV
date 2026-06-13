@@ -1038,24 +1038,34 @@ static void TwitchSevenTVInit(void) {
                         NSArray *arr = (NSArray *)imgLayersObj;
                         if (arr.count == 0) return;
 
-                        // Logger une fois pour comprendre la structure
-                        static BOOL s_logged = NO;
-                        if (!s_logged) {
-                            s_logged = YES;
-                            [[SevenTVManager sharedManager] log:@"🔍 orderedImageLayers count=%lu", (unsigned long)arr.count];
-                            for (id imgLayer in arr) {
-                                if (!imgLayer) continue;
-                                CALayer *caLayer = (CALayer *)imgLayer;
-                                NSString *cls = NSStringFromClass(object_getClass(imgLayer));
-                                [[SevenTVManager sharedManager] log:@"🔍 layer: %@ frame=(%.1f,%.1f,%.1f,%.1f)",
-                                 cls, caLayer.frame.origin.x, caLayer.frame.origin.y,
-                                 caLayer.frame.size.width, caLayer.frame.size.height];
-                                for (CALayer *sub in caLayer.sublayers) {
-                                    [[SevenTVManager sharedManager] log:@"🔍   sublayer: %@",
-                                     NSStringFromClass(object_getClass(sub))];
+                        CGFloat targetSize = 56.0;
+                        [CATransaction begin];
+                        [CATransaction setDisableActions:YES];
+                        for (id imgLayer in arr) {
+                            if (!imgLayer) continue;
+                            CALayer *caLayer = (CALayer *)imgLayer;
+
+                            // Les emotes 7TV ont AnimatedImageAttachmentLayer comme sublayer
+                            // Les badges ont StaticImageAttachmentLayer
+                            BOOL isEmote = NO;
+                            for (CALayer *sub in caLayer.sublayers) {
+                                if ([NSStringFromClass(object_getClass(sub)) containsString:@"Animated"]) {
+                                    isEmote = YES;
+                                    break;
                                 }
                             }
+                            if (!isEmote) continue;
+
+                            CGRect f = caLayer.frame;
+                            if (f.size.width <= 0 || f.size.height <= 0) continue;
+                            caLayer.bounds = CGRectMake(0, 0, targetSize, targetSize);
+                            caLayer.frame = CGRectMake(
+                                f.origin.x,
+                                f.origin.y + (f.size.height - targetSize) / 2.0,
+                                targetSize, targetSize
+                            );
                         }
+                        [CATransaction commit];
                     } @catch (...) {}
                 });
             });
