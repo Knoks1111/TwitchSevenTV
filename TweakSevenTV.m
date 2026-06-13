@@ -1058,11 +1058,14 @@ static void TwitchSevenTVInit(void) {
 
                             CGRect f = caLayer.frame;
                             if (f.size.width <= 0 || f.size.height <= 0) continue;
-                            caLayer.bounds = CGRectMake(0, 0, targetSize, targetSize);
+                            // Hauteur fixe, largeur proportionnelle
+                            CGFloat ratio = f.size.width / f.size.height;
+                            CGFloat newWidth = targetSize * ratio;
+                            caLayer.bounds = CGRectMake(0, 0, newWidth, targetSize);
                             caLayer.frame = CGRectMake(
                                 f.origin.x,
                                 f.origin.y + (f.size.height - targetSize) / 2.0,
-                                targetSize, targetSize
+                                newWidth, targetSize
                             );
                         }
                         [CATransaction commit];
