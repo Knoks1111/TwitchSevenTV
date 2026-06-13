@@ -1039,23 +1039,6 @@ static void TwitchSevenTVInit(void) {
             Method origMethod = class_getInstanceMethod(transcriptClass, origSel);
             if (!origMethod) return;
 
-            Class msgStringViewClass = NSClassFromString(@"Twitch.MessageStringView");
-            Class msgLayerClass = NSClassFromString(@"Twitch.MessageStringLayer");
-            if (!msgStringViewClass || !msgLayerClass) return;
-
-            Ivar layerIvar = class_getInstanceVariable(msgStringViewClass, "messageStringLayer");
-            Ivar imgLayersIvar = class_getInstanceVariable(msgLayerClass, "orderedImageLayers");
-            if (!layerIvar || !imgLayersIvar) return;
-
-            ptrdiff_t layerOffset = ivar_getOffset(layerIvar);
-            ptrdiff_t imgLayersOffset = ivar_getOffset(imgLayersIvar);
-
-            // Offset de MessageStringView dans ChatMessageTableViewCell
-            Class cellClass = NSClassFromString(@"Twitch.ChatMessageTableViewCell");
-            Ivar msgViewIvar = class_getInstanceVariable(cellClass, "$__lazy_storage_$__messageStringView");
-            if (!msgViewIvar) return;
-            ptrdiff_t msgViewOffset = ivar_getOffset(msgViewIvar);
-
             IMP origIMP = method_getImplementation(origMethod);
 
             IMP newIMP = imp_implementationWithBlock(^(id self_tv,
