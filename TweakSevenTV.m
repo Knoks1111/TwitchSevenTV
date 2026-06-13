@@ -1320,6 +1320,18 @@ static void TwitchSevenTVInit(void) {
                                 @"currentFrame", @"setCurrentFrame:"
                             ], sampleIdx, @"sublayer");
 
+                            // 5d. Encodage ObjC de setCurrentFrame: et startAnimating
+                            // → détermine le type exact de l'argument attendu
+                            for (NSString *selName in @[@"setCurrentFrame:", @"startAnimating",
+                                                        @"stopAnimating", @"currentFrame"]) {
+                                Method m = class_getInstanceMethod(object_getClass(sub),
+                                                                   NSSelectorFromString(selName));
+                                if (m) {
+                                    [mgr log:@"🔬[%ld] %@ → encoding=%s",
+                                     (long)sampleIdx, selName, method_getTypeEncoding(m)];
+                                }
+                            }
+
                             // 6. Après 3s : compteur displayLayer:
                             __weak CALayer *weakSub = sub;
                             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
