@@ -114,4 +114,8 @@ extern NSString *const S7TVLogsDidUpdateNotification;
 // Vide le buffer de logs
 - (void)clearLogs;
 
+// --- Ratios emotes ---
+// Dictionnaire { emoteID → ratio (width/height) } utilisé par willDisplayCell pour resize
+- (NSDictionary *)emoteRatios;
+
 @end
