@@ -103,6 +103,10 @@ extern NSString *const S7TVLogsDidUpdateNotification;
 // chatInputView: la Twitch.ChatInputView (pour positionner le picker et insérer le nom).
 - (void)toggleEmotePickerForChatInputView:(UIView *)chatInputView;
 
+// Appelé par TweakSevenTV quand le stream se ferme (ChatInputView.window → nil).
+// Nettoie le picker sans toucher au responder chain (UIKit crashe sans fenêtre).
+- (void)cleanupPickerForStreamClose;
+
 // --- Logs ---
 // log: est TOUJOURS enregistré dans le buffer in-app (indépendamment de debugLogging).
 // Si debugLogging == YES, la ligne est aussi envoyée à NSLog / Console.

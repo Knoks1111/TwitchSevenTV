@@ -74,6 +74,27 @@ static void s7tv_swizzle(Class targetClass,
 
 
 // ────────────────────────────────────────────────────────────
+// MARK: - Wrapper weak pour associated objects (brise les retain cycles)
+// ────────────────────────────────────────────────────────────
+
+// objc_setAssociatedObject ne supporte pas les weak refs nativement.
+// On emballe la référence faible dans cet objet pour éviter le retain cycle
+// bitsBtn (subview) → chatInputView (superview) qui empêche la libération
+// de la vue au moment de la fermeture du stream.
+@interface S7TVWeakRef : NSObject
+@property (nonatomic, weak) id object;
++ (instancetype)refWithObject:(id)object;
+@end
+@implementation S7TVWeakRef
++ (instancetype)refWithObject:(id)object {
+    S7TVWeakRef *r = [S7TVWeakRef new];
+    r.object = object;
+    return r;
+}
+@end
+
+
+// ────────────────────────────────────────────────────────────
 // MARK: - Hijack du bouton Bits → bouton 7TV
 // ────────────────────────────────────────────────────────────
 
@@ -87,6 +108,20 @@ static void s7tv_swizzle(Class targetClass,
     [self s7tv_didMoveToWindow]; // appel original
 
     NSString *selfClass = NSStringFromClass([self class]);
+
+    // ── Détection fermeture du stream ────────────────────────────────────────
+    // Quand Twitch ferme le stream, ChatInputView quitte la fenêtre (window → nil).
+    // On nettoie le picker AVANT que UIKit ne touche au responder chain.
+    if ([selfClass isEqualToString:@"Twitch.ChatInputView"] && !self.window) {
+        // Vérifie qu'on avait bien initialisé cette vue (associated object marqueur)
+        if (objc_getAssociatedObject(self, &kS7TVTextFieldTagged)) {
+            [[SevenTVManager sharedManager] cleanupPickerForStreamClose];
+            // Reset le marqueur pour permettre une ré-initialisation au prochain stream
+            objc_setAssociatedObject(self, &kS7TVTextFieldTagged, nil,
+                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        return;
+    }
 
     // ── Force _areEmoteAnimationsEnabled via offset mémoire direct ──────────
     if ([selfClass isEqualToString:@"Twitch.ChatTranscriptView"]) {
@@ -191,7 +226,10 @@ static void s7tv_swizzle(Class targetClass,
 
             bitsBtn.accessibilityLabel = @"7TV Emotes";
 
-            objc_setAssociatedObject(bitsBtn, &kS7TVTextFieldTagged, chatInputView,
+            // Weak ref pour éviter le retain cycle :
+            // bitsBtn (subview) retenait chatInputView (superview) → fuite mémoire.
+            objc_setAssociatedObject(bitsBtn, &kS7TVTextFieldTagged,
+                                     [S7TVWeakRef refWithObject:chatInputView],
                                      OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
             [bitsBtn addTarget:mgr
@@ -244,7 +282,9 @@ static void s7tv_swizzle(Class targetClass,
                                  | UIViewAutoresizingFlexibleTopMargin
                                  | UIViewAutoresizingFlexibleBottomMargin;
 
-            objc_setAssociatedObject(btn, &kS7TVTextFieldTagged, chatInputView,
+            // Weak ref pour éviter le retain cycle bouton → chatInputView.
+            objc_setAssociatedObject(btn, &kS7TVTextFieldTagged,
+                                     [S7TVWeakRef refWithObject:chatInputView],
                                      OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             [btn addTarget:mgr
                     action:@selector(s7tv_emoteButtonTappedForButton:)
@@ -275,7 +315,14 @@ static void s7tv_swizzle(Class targetClass,
 @implementation SevenTVManager (ChatBarButton)
 
 - (void)s7tv_emoteButtonTappedForButton:(UIButton *)sender {
-    UIView *chatInputView = objc_getAssociatedObject(sender, &kS7TVTextFieldTagged);
+    id assoc = objc_getAssociatedObject(sender, &kS7TVTextFieldTagged);
+    UIView *chatInputView = nil;
+    // Support S7TVWeakRef (nouveau) et UIView direct (legacy/compatibilité)
+    if ([assoc isKindOfClass:[S7TVWeakRef class]]) {
+        chatInputView = ((S7TVWeakRef *)assoc).object;
+    } else {
+        chatInputView = assoc;
+    }
     if (!chatInputView || !chatInputView.window) return;
     [self toggleEmotePickerForChatInputView:chatInputView];
 }

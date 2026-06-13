@@ -1396,11 +1396,33 @@ static const char kS7TVTaskKey = 0;
 
 - (void)_hideEmotePicker {
     UITextView *tv = self.emotePickerTextEntryView;
-    if (tv && tv.window) {
+    if (tv) {
         @try {
+            // Toujours nettoyer inputView, même si tv.window == nil (stream fermé).
+            // Ne pas appeler reloadInputViews/resignFirstResponder sans fenêtre →
+            // UIKit crashe. On retire juste le custom inputView proprement.
             tv.inputView = nil;
             tv.inputAccessoryView = nil;
-            [tv resignFirstResponder];
+            if (tv.window) {
+                [tv resignFirstResponder];
+                [tv reloadInputViews];
+            }
+        } @catch (...) {}
+    }
+    self.emotePickerTextEntryView = nil;
+    self.emotePickerTextField = nil;
+    self.emotePickerView.hidden = YES;
+}
+
+// Appelé par TweakSevenTV quand ChatInputView quitte la fenêtre (stream fermé).
+- (void)cleanupPickerForStreamClose {
+    [self log:@"🔒 cleanupPickerForStreamClose → nettoyage picker"];
+    UITextView *tv = self.emotePickerTextEntryView;
+    if (tv) {
+        @try {
+            // Pas de window → ne pas toucher au responder chain.
+            tv.inputView = nil;
+            tv.inputAccessoryView = nil;
         } @catch (...) {}
     }
     self.emotePickerTextEntryView = nil;
