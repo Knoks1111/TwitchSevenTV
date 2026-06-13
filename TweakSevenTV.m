@@ -1038,7 +1038,8 @@ static void TwitchSevenTVInit(void) {
                         NSArray *arr = (NSArray *)imgLayersObj;
                         if (arr.count == 0) return;
 
-                        CGFloat targetSize = 56.0;
+                        CGFloat targetSize = (CGFloat)[[NSUserDefaults standardUserDefaults]
+                            integerForKey:@"s7tv_emote_size"] ?: 56.0;
 
                         // Extraire les ratios des emotes 7TV dans l'ordre depuis le texte de la cellule
                         // On cherche un UILabel dans la hiérarchie pour lire le texte brut
@@ -1119,6 +1120,32 @@ static void TwitchSevenTVInit(void) {
 
             method_setImplementation(origMethod, newIMP);
             [[SevenTVManager sharedManager] log:@"✅ willDisplayCell hooké (avec délai 100ms)"];
+
+            // Observer : quand le slider change la taille, on force un reloadData
+            // sur toutes les ChatTranscriptView visibles.
+            [[NSNotificationCenter defaultCenter]
+                addObserverForName:@"S7TVEmoteSizeDidChangeNotification"
+                            object:nil
+                             queue:[NSOperationQueue mainQueue]
+                        usingBlock:^(NSNotification *n) {
+                // Parcourir toutes les fenêtres et trouver les UITableView
+                // dans les ChatTranscriptView
+                for (UIWindow *win in [UIApplication sharedApplication].windows) {
+                    NSMutableArray *stack = [NSMutableArray arrayWithObject:win];
+                    while (stack.count) {
+                        UIView *v = stack[0];
+                        [stack removeObjectAtIndex:0];
+                        if ([NSStringFromClass([v class]) isEqualToString:@"Twitch.ChatTranscriptView"]) {
+                            for (UIView *sub in v.subviews) {
+                                if ([sub isKindOfClass:[UITableView class]]) {
+                                    [(UITableView *)sub reloadData];
+                                }
+                            }
+                        }
+                        [stack addObjectsFromArray:v.subviews];
+                    }
+                }
+            }];
         });
         // ─────────────────────────────────────────────────────────────────
 

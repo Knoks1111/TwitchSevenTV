@@ -119,6 +119,12 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
 // Protégé par @synchronized(self).
 @property (nonatomic, strong) NSMutableSet<NSString *> *activePrefetchKeys;
 
+// Slider de taille des emotes dans le header du picker
+@property (nonatomic, weak) UIView   *pickerHeaderView;
+@property (nonatomic, weak) UIView   *pickerHeaderNormalContent; // logo+titre+search
+@property (nonatomic, weak) UIView   *pickerHeaderSliderContent; // slider + label valeur
+@property (nonatomic, weak) UILabel  *pickerSizeValueLabel;
+
 
 @end
 
@@ -1569,6 +1575,11 @@ static NSString *s7tv_emoteSetKey(NSDictionary *global, NSDictionary *channel) {
     sep.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     [headerView addSubview:sep];
 
+    // ── Conteneur "normal" : logo + titre + search ─────────────────────────
+    UIView *normalContent = [[UIView alloc] initWithFrame:CGRectMake(0, 0, frame.size.width, headerH)];
+    normalContent.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    self.pickerHeaderNormalContent = normalContent;
+
     // Logo 7TV (PNG base64, ratio correct) + label "Emotes"
     // PNG : 76×56 px → @2x = 38×28 pt
     NSData *_logoData = [[NSData alloc]
@@ -1582,7 +1593,7 @@ static NSString *s7tv_emoteSetKey(NSDictionary *global, NSDictionary *channel) {
     UIImageView *_logoIV = [[UIImageView alloc] initWithFrame:CGRectMake(12, _logoY, _logoW, _logoH)];
     _logoIV.image = _logoImg;
     _logoIV.contentMode = UIViewContentModeScaleAspectFit;
-    [headerView addSubview:_logoIV];
+    [normalContent addSubview:_logoIV];
 
     // Label "Emotes" à droite du logo
     CGFloat _lblX = 12 + _logoW + 4;
@@ -1590,12 +1601,12 @@ static NSString *s7tv_emoteSetKey(NSDictionary *global, NSDictionary *channel) {
     titleLbl.text = @"Emotes";
     titleLbl.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
     titleLbl.textColor = textColor;
-    [headerView addSubview:titleLbl];
+    [normalContent addSubview:titleLbl];
 
     // Champ de recherche
     // X = logo(38) + gap(4) + label(~60) + gap(6) = ~108 → on prend 110
     UITextField *search = [[UITextField alloc] initWithFrame:
-        CGRectMake(110, 9, frame.size.width - 110 - 48, 30)];
+        CGRectMake(110, 9, frame.size.width - 110 - 48 - 44, 30)];
     search.placeholder     = @"Rechercher une emote…";
     search.font            = [UIFont systemFontOfSize:13];
     search.returnKeyType   = UIReturnKeyDone;
@@ -1616,7 +1627,83 @@ static NSString *s7tv_emoteSetKey(NSDictionary *global, NSDictionary *channel) {
     [search addTarget:self action:@selector(_emoteSearchChanged:)
      forControlEvents:UIControlEventEditingChanged];
     self.emoteSearchField = search;
-    [headerView addSubview:search];
+    [normalContent addSubview:search];
+
+    // Bouton slider (à gauche du ×)
+    UIButton *sliderBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    sliderBtn.frame = CGRectMake(frame.size.width - 44 - 44, 0, 44, headerH);
+    sliderBtn.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
+    UIImageSymbolConfiguration *sliderCfg = [UIImageSymbolConfiguration
+        configurationWithPointSize:14 weight:UIImageSymbolWeightMedium];
+    [sliderBtn setImage:[UIImage systemImageNamed:@"slider.horizontal.3" withConfiguration:sliderCfg]
+               forState:UIControlStateNormal];
+    sliderBtn.tintColor = subColor;
+    [sliderBtn addTarget:self action:@selector(_emotePickerSliderBtnTapped)
+        forControlEvents:UIControlEventTouchUpInside];
+    [normalContent addSubview:sliderBtn];
+
+    [headerView addSubview:normalContent];
+
+    // ── Conteneur "slider" : ← + label valeur + UISlider ──────────────────
+    UIView *sliderContent = [[UIView alloc] initWithFrame:CGRectMake(0, 0, frame.size.width, headerH)];
+    sliderContent.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    sliderContent.hidden = YES;
+    self.pickerHeaderSliderContent = sliderContent;
+
+    // Bouton retour ←
+    UIButton *backBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    backBtn.frame = CGRectMake(0, 0, 44, headerH);
+    UIImageSymbolConfiguration *backCfg = [UIImageSymbolConfiguration
+        configurationWithPointSize:14 weight:UIImageSymbolWeightMedium];
+    [backBtn setImage:[UIImage systemImageNamed:@"chevron.left" withConfiguration:backCfg]
+             forState:UIControlStateNormal];
+    backBtn.tintColor = subColor;
+    [backBtn addTarget:self action:@selector(_emotePickerSliderBackTapped)
+      forControlEvents:UIControlEventTouchUpInside];
+    [sliderContent addSubview:backBtn];
+
+    // Label valeur actuelle (au-dessus du thumb, style Twitch pill)
+    NSInteger savedSize = [[NSUserDefaults standardUserDefaults] integerForKey:@"s7tv_emote_size"];
+    if (savedSize < 18 || savedSize > 56) savedSize = 56;
+
+    UILabel *valueLabel = [[UILabel alloc] init];
+    valueLabel.text = [NSString stringWithFormat:@"%ld pt", (long)savedSize];
+    valueLabel.font = [UIFont boldSystemFontOfSize:11];
+    valueLabel.textColor = [UIColor whiteColor];
+    valueLabel.textAlignment = NSTextAlignmentCenter;
+    valueLabel.backgroundColor = [UIColor colorWithRed:0.35 green:0.13 blue:0.86 alpha:1.0]; // violet Twitch
+    valueLabel.layer.cornerRadius = 4;
+    valueLabel.layer.masksToBounds = YES;
+    valueLabel.frame = CGRectMake(0, 0, 36, 18); // position recalculée via _updateSliderValueLabel:
+    self.pickerSizeValueLabel = valueLabel;
+    [sliderContent addSubview:valueLabel];
+
+    // UISlider
+    CGFloat sliderX = 44 + 8;
+    CGFloat sliderW = frame.size.width - sliderX - 12;
+    UISlider *sizeSlider = [[UISlider alloc] initWithFrame:
+        CGRectMake(sliderX, (headerH - 28) / 2.0, sliderW, 28)];
+    sizeSlider.minimumValue = 18;
+    sizeSlider.maximumValue = 56;
+    sizeSlider.value = (float)savedSize;
+    sizeSlider.continuous = YES;
+    // Couleurs style Twitch
+    sizeSlider.minimumTrackTintColor = [UIColor colorWithRed:0.35 green:0.13 blue:0.86 alpha:1.0];
+    sizeSlider.maximumTrackTintColor = [UIColor colorWithRed:0.25 green:0.25 blue:0.28 alpha:1.0];
+    sizeSlider.thumbTintColor        = [UIColor colorWithRed:0.35 green:0.13 blue:0.86 alpha:1.0];
+    sizeSlider.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    [sizeSlider addTarget:self action:@selector(_emotePickerSliderChanged:)
+         forControlEvents:UIControlEventValueChanged];
+    [sliderContent addSubview:sizeSlider];
+
+    [headerView addSubview:sliderContent];
+
+    // Positionner le label valeur au-dessus du thumb initial
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self _updateSliderValueLabel:sizeSlider];
+    });
+
+    self.pickerHeaderView = headerView;
 
     // Bouton fermer ×
     UIButton *closeBtn = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -1629,7 +1716,7 @@ static NSString *s7tv_emoteSetKey(NSDictionary *global, NSDictionary *channel) {
     closeBtn.tintColor = subColor;
     [closeBtn addTarget:self action:@selector(_emotePickerCloseTapped)
        forControlEvents:UIControlEventTouchUpInside];
-    [headerView addSubview:closeBtn];
+    [normalContent addSubview:closeBtn];
 
     [picker addSubview:headerView];
 
@@ -1882,6 +1969,54 @@ static NSString *s7tv_emoteSetKey(NSDictionary *global, NSDictionary *channel) {
             return self.emotePickerGlobalEmotes[(NSUInteger)ip.item];
     }
     return nil;
+}
+
+// ── Slider taille des emotes ───────────────────────────────────────────────
+
+- (void)_emotePickerSliderBtnTapped {
+    self.pickerHeaderNormalContent.hidden = YES;
+    self.pickerHeaderSliderContent.hidden = NO;
+}
+
+- (void)_emotePickerSliderBackTapped {
+    self.pickerHeaderSliderContent.hidden = YES;
+    self.pickerHeaderNormalContent.hidden = NO;
+}
+
+- (void)_emotePickerSliderChanged:(UISlider *)slider {
+    NSInteger val = (NSInteger)roundf(slider.value);
+    slider.value = (float)val; // snap au pas 1
+
+    // Mettre à jour le label valeur
+    [self _updateSliderValueLabel:slider];
+
+    // Sauvegarder
+    [[NSUserDefaults standardUserDefaults] setInteger:val forKey:@"s7tv_emote_size"];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+
+    // Notifier TweakSevenTV.m pour reloadData
+    [[NSNotificationCenter defaultCenter]
+        postNotificationName:@"S7TVEmoteSizeDidChangeNotification"
+                      object:nil];
+}
+
+- (void)_updateSliderValueLabel:(UISlider *)slider {
+    UILabel *lbl = self.pickerSizeValueLabel;
+    if (!lbl || !slider.superview) return;
+
+    NSInteger val = (NSInteger)roundf(slider.value);
+    lbl.text = [NSString stringWithFormat:@"%ld", (long)val];
+
+    // Calculer la position X du thumb dans le référentiel de sliderContent
+    CGFloat trackW = slider.bounds.size.width;
+    CGFloat thumbHalfW = 12.0; // estimation thumb iOS
+    CGFloat ratio = (slider.value - slider.minimumValue) / (slider.maximumValue - slider.minimumValue);
+    CGFloat thumbX = slider.frame.origin.x + thumbHalfW + ratio * (trackW - 2 * thumbHalfW);
+
+    CGFloat lblW = 36.0, lblH = 18.0;
+    CGFloat lblY = slider.frame.origin.y - lblH - 2.0;
+    if (lblY < 2) lblY = 2;
+    lbl.frame = CGRectMake(thumbX - lblW / 2.0, lblY, lblW, lblH);
 }
 
 - (void)_emotePickerCloseTapped {
