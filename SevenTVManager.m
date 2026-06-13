@@ -103,6 +103,8 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
 
 // Buffer de logs in-app
 @property (nonatomic, strong) NSMutableArray<NSString *> *logBuffer;
+// Dictionnaire { emoteID: ratio (width/height) } pour le resize proportionnel
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSNumber *> *emoteRatios;
 @property (nonatomic, strong) NSLock *logLock;
 
 // Dossier racine du cache JSON (créé à la demande)
@@ -300,6 +302,7 @@ static const CGFloat kS7TVMenuHeight = 520.0;
 
 
         _logBuffer = [NSMutableArray arrayWithCapacity:256];
+    _emoteRatios = [NSMutableDictionary dictionary];
         _logLock   = [[NSLock alloc] init];
 
         _favoriteEmoteIDs        = [NSMutableSet set];
@@ -1150,6 +1153,14 @@ static const CGFloat kS7TVMenuHeight = 520.0;
                                     S7TV_EMOTE_ID_PREFIX, emote.emoteID,
                                     (unsigned long)start, (unsigned long)end];
                 [entries addObject:entry];
+                // Stocker { emoteID -> ratio } pour le resize proportionnel
+                if (emote.width > 0 && emote.height > 0) {
+                    CGFloat ratio = (CGFloat)emote.width / (CGFloat)emote.height;
+                    self.emoteRatios[emote.emoteID] = @(ratio);
+                } else {
+                    // Ratio carré par défaut si dimensions inconnues
+                    self.emoteRatios[emote.emoteID] = @(1.0);
+                }
                 [self log:@"✅ Emote détectée: %@ → %@", word, entry];
             }
         }
