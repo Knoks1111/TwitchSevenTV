@@ -982,6 +982,66 @@ static void s7tv_swizzle_websocket(void) {
 
 
 // ────────────────────────────────────────────────────────────
+// MARK: - Hook TwitchKit.NetworkImageRequester (lecture seule)
+// Intercepte imageAtURL: et animatedImageAtURL: pour voir lequel
+// est appelé pour nos URLs cdn.7tv.app — et avec quels args.
+// ────────────────────────────────────────────────────────────
+
+static void s7tv_hook_network_image_requester(void) {
+    Class nic = NSClassFromString(@"TwitchKit.NetworkImageRequester");
+    if (!nic) {
+        [[SevenTVManager sharedManager] log:@"⚠️ NetworkImageRequester introuvable"];
+        return;
+    }
+
+    // Lister toutes les méthodes pour trouver les sélecteurs exacts
+    unsigned int mc = 0;
+    Method *methods = class_copyMethodList(nic, &mc);
+    NSMutableArray *imageSelectors   = [NSMutableArray array];
+    NSMutableArray *animatedSelectors = [NSMutableArray array];
+    for (unsigned int i = 0; i < mc; i++) {
+        NSString *name = NSStringFromSelector(method_getName(methods[i]));
+        if ([name hasPrefix:@"imageAtURL:"]) [imageSelectors addObject:name];
+        if ([name hasPrefix:@"animatedImageAtURL:"]) [animatedSelectors addObject:name];
+    }
+    free(methods);
+
+    [[SevenTVManager sharedManager] log:@"🖼 NetworkImageRequester imageAtURL: variantes: %@", imageSelectors];
+    [[SevenTVManager sharedManager] log:@"🎞 NetworkImageRequester animatedImageAtURL: variantes: %@", animatedSelectors];
+
+    // Hook imageAtURL:withScale:persistingFor: (variante la plus courte)
+    SEL selImg = NSSelectorFromString(@"imageAtURL:withScale:persistingFor:");
+    Method mImg = class_getInstanceMethod(nic, selImg);
+    if (mImg) {
+        IMP origImg = method_getImplementation(mImg);
+        IMP newImg = imp_implementationWithBlock(^id(id self_, NSURL *url, CGFloat scale, id persist) {
+            if ([url.host containsString:@"7tv"]) {
+                [[SevenTVManager sharedManager] log:@"🖼 imageAtURL: %@  scale=%.1f", url.absoluteString, scale];
+            }
+            return ((id(*)(id,SEL,NSURL*,CGFloat,id))origImg)(self_, selImg, url, scale, persist);
+        });
+        method_setImplementation(mImg, newImg);
+        [[SevenTVManager sharedManager] log:@"✅ Hook imageAtURL:withScale:persistingFor: OK"];
+    }
+
+    // Hook animatedImageAtURL:withStaticScale:persistingFor: (variante la plus courte)
+    SEL selAnim = NSSelectorFromString(@"animatedImageAtURL:withStaticScale:persistingFor:");
+    Method mAnim = class_getInstanceMethod(nic, selAnim);
+    if (mAnim) {
+        IMP origAnim = method_getImplementation(mAnim);
+        IMP newAnim = imp_implementationWithBlock(^id(id self_, NSURL *url, CGFloat scale, id persist) {
+            if ([url.host containsString:@"7tv"]) {
+                [[SevenTVManager sharedManager] log:@"🎞 animatedImageAtURL: %@  scale=%.1f", url.absoluteString, scale];
+            }
+            return ((id(*)(id,SEL,NSURL*,CGFloat,id))origAnim)(self_, selAnim, url, scale, persist);
+        });
+        method_setImplementation(mAnim, newAnim);
+        [[SevenTVManager sharedManager] log:@"✅ Hook animatedImageAtURL:withStaticScale:persistingFor: OK"];
+    }
+}
+
+
+// ────────────────────────────────────────────────────────────
 // MARK: - Point d'entrée __attribute__((constructor))
 // ────────────────────────────────────────────────────────────
 
@@ -1013,6 +1073,9 @@ static void TwitchSevenTVInit(void) {
 
     // Interception IRC WebSocket
     s7tv_swizzle_websocket();
+
+    // Hook NetworkImageRequester (lecture seule, log URLs 7TV)
+    s7tv_hook_network_image_requester();
 
     // Section 7TV dans les paramètres Twitch
     s7tv_swizzle_account_menu();
