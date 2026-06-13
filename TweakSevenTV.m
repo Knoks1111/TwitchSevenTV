@@ -1071,10 +1071,18 @@ static void TwitchSevenTVInit(void) {
 
                 // Attendre que le layout soit fini puis resizer
                 __weak UITableViewCell *weakCell = cell;
+                __weak UITableView     *weakTV   = tableView;
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)),
                                dispatch_get_main_queue(), ^{
                     UITableViewCell *cell = weakCell;
-                    if (!cell) return;
+                    UITableView     *tv   = weakTV;
+                    // Guards stream-close : si l'un des deux objets est mort,
+                    // ou si la cellule n'est plus dans la fenêtre (stream fermé),
+                    // ou si la cellule a été sortie de la table (recyclage en cours)
+                    // → on abandonne pour éviter EXC_BAD_ACCESS sur les ivars Swift.
+                    if (!cell || !tv) return;
+                    if (!cell.window || !tv.window) return;
+                    if (cell.superview != tv) return;
                     @try {
                         uintptr_t cellAddr = (uintptr_t)(__bridge void *)cell;
                         void *msgViewPtr = *(void **)(cellAddr + msgViewOffset);
