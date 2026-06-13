@@ -95,6 +95,31 @@ static void s7tv_swizzle(Class targetClass,
 
 
 // ────────────────────────────────────────────────────────────
+// MARK: - Helper dump KVC sécurisé (pour les logs 🎞)
+// ────────────────────────────────────────────────────────────
+
+// Lit une propriété via KVC en toute sécurité (try/catch, pas de raw pointer).
+// Log la classe + une description tronquée si la valeur existe, nil sinon,
+// ou l'exception si la clé n'est pas KVC-compliant.
+static void s7tvLogKVC(id obj, NSString *key, NSInteger sampleIdx, NSString *label) {
+    SevenTVManager *mgr = [SevenTVManager sharedManager];
+    @try {
+        id val = [obj valueForKey:key];
+        if (val) {
+            NSString *desc = [val description] ?: @"";
+            if (desc.length > 150) desc = [desc substringToIndex:150];
+            [mgr log:@"🎞[%ld]   %@ classe=%@ desc=%@",
+             (long)sampleIdx, label, NSStringFromClass(object_getClass(val)), desc];
+        } else {
+            [mgr log:@"🎞[%ld]   %@ = nil", (long)sampleIdx, label];
+        }
+    } @catch (NSException *ex) {
+        [mgr log:@"🎞[%ld]   %@ KVC exception: %@", (long)sampleIdx, label, ex.reason];
+    }
+}
+
+
+// ────────────────────────────────────────────────────────────
 // MARK: - Hijack du bouton Bits → bouton 7TV
 // ────────────────────────────────────────────────────────────
 
@@ -1102,6 +1127,7 @@ static void TwitchSevenTVInit(void) {
                     static const NSInteger kS7TVAnimMaxSamples = 5;
                     static BOOL s_displayLayerSwizzled = NO;
                     static NSMutableDictionary *s_displayCounts = nil;
+                    static BOOL s_initFPSSwizzled = NO;
                     if (s_animSampleCount < kS7TVAnimMaxSamples && emoteLayers.count > 0) {
                         s_animSampleCount++;
                         NSInteger sampleIdx = s_animSampleCount;
@@ -1141,6 +1167,7 @@ static void TwitchSevenTVInit(void) {
                         }
 
                         // 4. Sublayers (AnimatedImageAttachmentLayer) — via API publique
+                        __weak CALayer *weakSample = sample;
                         for (CALayer *sub in sample.sublayers) {
                             Class sc = object_getClass(sub);
                             [mgr log:@"🎞[%ld] sublayer: %@  bounds=(%.1fx%.1f)",
@@ -1199,7 +1226,33 @@ static void TwitchSevenTVInit(void) {
                             }
                             free(mv);
 
-                            // 6. Après 3s, log du nombre d'appels displayLayer: pour CE sublayer
+                            // 5b. Swizzle initWithFPS: (encodage @24@0:8q16 = instancetype(int64_t))
+                            //     — confirmé sur l'échantillon précédent, donc safe à hooker.
+                            if (!s_initFPSSwizzled) {
+                                SEL fpsSel = NSSelectorFromString(@"initWithFPS:");
+                                Method fm = class_getInstanceMethod(sc, fpsSel);
+                                if (fm) {
+                                    const char *fenc = method_getTypeEncoding(fm);
+                                    if (fenc && fenc[0] == '@' && strchr(fenc, 'q') != NULL) {
+                                        s_initFPSSwizzled = YES;
+                                        IMP origFPSIMP = method_getImplementation(fm);
+                                        IMP newFPSIMP = imp_implementationWithBlock(^id(id self_, int64_t fps){
+                                            [[SevenTVManager sharedManager] log:@"🎞 initWithFPS: fps=%lld classe=%@",
+                                             (long long)fps, NSStringFromClass(object_getClass(self_))];
+                                            @try {
+                                                return ((id(*)(id,SEL,int64_t))origFPSIMP)(self_, fpsSel, fps);
+                                            } @catch (__unused NSException *e) {
+                                                return self_;
+                                            }
+                                        });
+                                        method_setImplementation(fm, newFPSIMP);
+                                        [mgr log:@"🎞 initWithFPS: swizzlé pour log (encoding=%s)", fenc];
+                                    } else {
+                                        [mgr log:@"🎞 initWithFPS: encoding inattendu (%s), pas de swizzle", fenc ?: "?"];
+                                    }
+                                }
+                            }
+                            // 6. Après 3s : compteur displayLayer: + re-check KVC du parent
                             __weak CALayer *weakSub = sub;
                             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
                                            dispatch_get_main_queue(), ^{
@@ -1213,6 +1266,15 @@ static void TwitchSevenTVInit(void) {
                                 }
                                 [[SevenTVManager sharedManager] log:@"🎞[%ld] displayLayer: appelé %ld fois en 3s",
                                  (long)sampleIdx, (long)count];
+
+                                CALayer *strongSample = weakSample;
+                                if (strongSample) {
+                                    s7tvLogKVC(strongSample, @"content", sampleIdx, @"content(+3s)");
+                                    s7tvLogKVC(strongSample, @"currentDisplayMode", sampleIdx, @"currentDisplayMode");
+                                    s7tvLogKVC(strongSample, @"animatedImageLayer", sampleIdx, @"animatedImageLayer");
+                                    s7tvLogKVC(strongSample, @"staticImageLayer", sampleIdx, @"staticImageLayer");
+                                    s7tvLogKVC(strongSample, @"currentImageLayer", sampleIdx, @"currentImageLayer");
+                                }
                             });
                         }
                     }
