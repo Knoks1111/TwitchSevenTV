@@ -1039,7 +1039,7 @@ static void TwitchSevenTVInit(void) {
                         if (arr.count == 0) return;
 
                         CGFloat targetSize = (CGFloat)[[NSUserDefaults standardUserDefaults]
-                            integerForKey:@"s7tv_emote_size"] ?: 56.0;
+                            integerForKey:@"s7tv_emote_size"] ?: 30.0;
 
                         // Extraire les ratios des emotes 7TV dans l'ordre depuis le texte de la cellule
                         // On cherche un UILabel dans la hiérarchie pour lire le texte brut

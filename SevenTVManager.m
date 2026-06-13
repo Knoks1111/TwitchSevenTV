@@ -1664,7 +1664,7 @@ static NSString *s7tv_emoteSetKey(NSDictionary *global, NSDictionary *channel) {
 
     // Label valeur actuelle (au-dessus du thumb, style Twitch pill)
     NSInteger savedSize = [[NSUserDefaults standardUserDefaults] integerForKey:@"s7tv_emote_size"];
-    if (savedSize < 18 || savedSize > 56) savedSize = 56;
+    if (savedSize < 18 || savedSize > 56) savedSize = 30;
 
     UILabel *valueLabel = [[UILabel alloc] init];
     valueLabel.text = [NSString stringWithFormat:@"%ld pt", (long)savedSize];
