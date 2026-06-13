@@ -1138,7 +1138,12 @@ static void TwitchSevenTVInit(void) {
                         if ([NSStringFromClass([v class]) isEqualToString:@"Twitch.ChatTranscriptView"]) {
                             for (UIView *sub in v.subviews) {
                                 if ([sub isKindOfClass:[UITableView class]]) {
-                                    [(UITableView *)sub reloadData];
+                                    UITableView *tv = (UITableView *)sub;
+                                    NSArray *visible = [tv indexPathsForVisibleRows];
+                                    if (visible.count) {
+                                        [tv reloadRowsAtIndexPaths:visible
+                                               withRowAnimation:UITableViewRowAnimationNone];
+                                    }
                                 }
                             }
                         }

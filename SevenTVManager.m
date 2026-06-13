@@ -1564,7 +1564,7 @@ static NSString *s7tv_emoteSetKey(NSDictionary *global, NSDictionary *channel) {
     self.emotePickerView = picker;
 
     // ── Header ─────────────────────────────────────────────────────────────
-    CGFloat headerH = 48.0;
+    CGFloat headerH = 56.0;
     UIView *headerView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, frame.size.width, headerH)];
     headerView.backgroundColor = headerColor;
     headerView.autoresizingMask = UIViewAutoresizingFlexibleWidth;
@@ -1678,11 +1678,11 @@ static NSString *s7tv_emoteSetKey(NSDictionary *global, NSDictionary *channel) {
     self.pickerSizeValueLabel = valueLabel;
     [sliderContent addSubview:valueLabel];
 
-    // UISlider
+    // UISlider — positionné dans la moitié supérieure pour laisser place au label dessous
     CGFloat sliderX = 44 + 8;
     CGFloat sliderW = frame.size.width - sliderX - 12;
     UISlider *sizeSlider = [[UISlider alloc] initWithFrame:
-        CGRectMake(sliderX, (headerH - 28) / 2.0, sliderW, 28)];
+        CGRectMake(sliderX, 8, sliderW, 22)];
     sizeSlider.minimumValue = 18;
     sizeSlider.maximumValue = 56;
     sizeSlider.value = (float)savedSize;
@@ -2005,17 +2005,17 @@ static NSString *s7tv_emoteSetKey(NSDictionary *global, NSDictionary *channel) {
     if (!lbl || !slider.superview) return;
 
     NSInteger val = (NSInteger)roundf(slider.value);
-    lbl.text = [NSString stringWithFormat:@"%ld", (long)val];
+    lbl.text = [NSString stringWithFormat:@"%ld pt", (long)val];
 
-    // Calculer la position X du thumb dans le référentiel de sliderContent
+    // Position X du thumb dans le référentiel de sliderContent
     CGFloat trackW = slider.bounds.size.width;
-    CGFloat thumbHalfW = 12.0; // estimation thumb iOS
+    CGFloat thumbHalfW = 11.0;
     CGFloat ratio = (slider.value - slider.minimumValue) / (slider.maximumValue - slider.minimumValue);
     CGFloat thumbX = slider.frame.origin.x + thumbHalfW + ratio * (trackW - 2 * thumbHalfW);
 
-    CGFloat lblW = 36.0, lblH = 18.0;
-    CGFloat lblY = slider.frame.origin.y - lblH - 2.0;
-    if (lblY < 2) lblY = 2;
+    // Label sous le slider
+    CGFloat lblW = 44.0, lblH = 18.0;
+    CGFloat lblY = CGRectGetMaxY(slider.frame) + 2.0;
     lbl.frame = CGRectMake(thumbX - lblW / 2.0, lblY, lblW, lblH);
 }
 
