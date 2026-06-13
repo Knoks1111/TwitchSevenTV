@@ -15,6 +15,7 @@
 #import <objc/message.h>
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
+#import <ImageIO/ImageIO.h>
 #import "SevenTVManager.h"
 #import "SevenTVURLProtocol.h"
 #import "SevenTVLogo.h"
@@ -92,6 +93,24 @@ static void s7tv_swizzle(Class targetClass,
     return r;
 }
 @end
+
+// ── Wrapper pour annuler un dispatch_source_t via associated object ──────────
+// Quand le layer est recyclé, le associated object est relâché → dealloc → cancel.
+@interface S7TVTimerWrapper : NSObject
+- (instancetype)initWithTimer:(dispatch_source_t)timer;
+@end
+@implementation S7TVTimerWrapper {
+    dispatch_source_t _timer;
+}
+- (instancetype)initWithTimer:(dispatch_source_t)t {
+    self = [super init];
+    if (self) _timer = t;
+    return self;
+}
+- (void)dealloc { if (_timer) dispatch_source_cancel(_timer); }
+@end
+
+
 
 
 // ────────────────────────────────────────────────────────────
@@ -1368,6 +1387,162 @@ static void TwitchSevenTVInit(void) {
                                                     newWidth, targetSize);
                     }
                     [CATransaction commit];
+
+                    // ── Animation WebP pour les emotes 7TV animées ──────────────────
+                    // Pour chaque emote layer, on cherche son sublayer AnimatedImageAttachmentLayer,
+                    // on récupère l'image WebP depuis NSURLCache, on décode les frames avec ImageIO,
+                    // et on les cycle via setCurrentFrame: + CADisplayLink.
+                    // Clé associated object pour stocker/stopper le CADisplayLink au recyclage.
+                    static const char kS7TVDisplayLink = 0;
+
+                    SevenTVManager *animMgr = [SevenTVManager sharedManager];
+                    NSInteger animIdx = 0;
+                    for (CALayer *emoteLayer in emoteLayers) {
+                        // Trouver le sublayer AnimatedImageAttachmentLayer
+                        CALayer *animSub = nil;
+                        for (CALayer *sub in emoteLayer.sublayers) {
+                            if ([NSStringFromClass(object_getClass(sub)) containsString:@"Animated"]) {
+                                animSub = sub;
+                                break;
+                            }
+                        }
+                        if (!animSub) { animIdx++; continue; }
+
+                        // Stopper le timer existant sur ce layer si recyclage
+                        // (le S7TVTimerWrapper cancel le dispatch_source à son dealloc)
+                        objc_setAssociatedObject(animSub, &kS7TVDisplayLink, nil,
+                                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+                        // Trouver l'emote 7TV animée correspondante à cet index
+                        // On reconstruit la liste ordonnée depuis cellText
+                        NSString *emoteID = nil;
+                        BOOL isAnimated = NO;
+                        if (cellText) {
+                            NSInteger wordEmoteIdx = 0;
+                            for (NSString *word in [cellText componentsSeparatedByString:@" "]) {
+                                SevenTVEmote *em = [animMgr emoteForName:word];
+                                if (em) {
+                                    if (wordEmoteIdx == animIdx) {
+                                        emoteID = em.emoteID;
+                                        isAnimated = em.isAnimated;
+                                        break;
+                                    }
+                                    wordEmoteIdx++;
+                                }
+                            }
+                        }
+
+                        animIdx++;
+                        if (!isAnimated || !emoteID) continue;
+
+                        // Récupérer les données WebP depuis NSURLCache
+                        // L'URL doit correspondre à ce que URLProtocol a mis en cache
+                        NSString *cacheURLStr = [NSString stringWithFormat:
+                            @"https://cdn.7tv.app/emote/%@/4x.webp", emoteID];
+                        NSURL *cacheURL = [NSURL URLWithString:cacheURLStr];
+                        NSURLRequest *cacheReq = [NSURLRequest requestWithURL:cacheURL];
+                        NSCachedURLResponse *cached = [[SevenTVURLProtocol sharedEmoteCache]
+                                                        cachedResponseForRequest:cacheReq];
+                        if (!cached) {
+                            // Fallback : essayer 2x
+                            cacheURLStr = [NSString stringWithFormat:
+                                @"https://cdn.7tv.app/emote/%@/2x.webp", emoteID];
+                            cacheURL = [NSURL URLWithString:cacheURLStr];
+                            cacheReq = [NSURLRequest requestWithURL:cacheURL];
+                            cached = [[SevenTVURLProtocol sharedEmoteCache]
+                                       cachedResponseForRequest:cacheReq];
+                        }
+                        if (!cached) continue;
+
+                        NSData *webpData = cached.data;
+                        if (!webpData || webpData.length == 0) continue;
+
+                        // Décoder les frames avec ImageIO
+                        CGImageSourceRef src = CGImageSourceCreateWithData(
+                            (__bridge CFDataRef)webpData, NULL);
+                        if (!src) continue;
+
+                        NSInteger frameCount = (NSInteger)CGImageSourceGetCount(src);
+                        if (frameCount <= 1) { CFRelease(src); continue; }
+
+                        // Extraire les frames et les durées
+                        NSMutableArray<UIImage *> *frames = [NSMutableArray array];
+                        NSMutableArray<NSNumber *> *delays = [NSMutableArray array];
+                        CGFloat totalDuration = 0;
+
+                        for (NSInteger fi = 0; fi < frameCount; fi++) {
+                            CGImageRef cgImg = CGImageSourceCreateImageAtIndex(src, fi, NULL);
+                            if (!cgImg) continue;
+                            [frames addObject:[UIImage imageWithCGImage:cgImg]];
+                            CGImageRelease(cgImg);
+
+                            // Lire la durée de la frame depuis les métadonnées
+                            NSDictionary *props = (__bridge_transfer NSDictionary *)
+                                CGImageSourceCopyPropertiesAtIndex(src, fi, NULL);
+                            NSDictionary *gifProps = props[@"{GIF}"];
+                            NSDictionary *webpProps = props[@"{WebP}"];
+                            NSNumber *delay = webpProps[@"DelayTime"]
+                                           ?: gifProps[@"DelayTime"]
+                                           ?: @(0.1);
+                            CGFloat d = delay.floatValue < 0.011 ? 0.1 : delay.floatValue;
+                            [delays addObject:@(d)];
+                            totalDuration += d;
+                        }
+                        CFRelease(src);
+
+                        if (frames.count == 0) continue;
+
+                        // Wrapper pour éviter de capturer animSub directement
+                        __block NSInteger frameIdx = 0;
+                        __block CFTimeInterval lastTime = 0;
+                        __block CFTimeInterval accumulator = 0;
+                        __weak CALayer *weakAnimSub = animSub;
+                        NSArray<UIImage *> *framesCopy = [frames copy];
+                        NSArray<NSNumber *> *delaysCopy = [delays copy];
+
+                        // dispatch_source comme timer pour cycler les frames
+
+                        CGFloat frameDuration = delaysCopy[0].floatValue;
+                        dispatch_source_t timer = dispatch_source_create(
+                            DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+                        dispatch_source_set_timer(timer,
+                            dispatch_time(DISPATCH_TIME_NOW, 0),
+                            (uint64_t)(frameDuration * NSEC_PER_SEC),
+                            (uint64_t)(0.005 * NSEC_PER_SEC));
+
+                        dispatch_source_set_event_handler(timer, ^{
+                            CALayer *sub = weakAnimSub;
+                            if (!sub || !sub.superlayer || !sub.superlayer.superlayer) {
+                                dispatch_source_cancel(timer);
+                                return;
+                            }
+                            UIImage *frame = framesCopy[frameIdx % framesCopy.count];
+                            @try {
+                                [sub performSelector:NSSelectorFromString(@"setCurrentFrame:")
+                                         withObject:frame];
+                            } @catch (__unused NSException *e) {}
+                            frameIdx = (frameIdx + 1) % (NSInteger)framesCopy.count;
+                            // Mettre à jour l'intervalle pour la prochaine frame
+                            CGFloat nextDelay = delaysCopy[frameIdx % delaysCopy.count].floatValue;
+                            dispatch_source_set_timer(timer,
+                                dispatch_time(DISPATCH_TIME_NOW,
+                                              (uint64_t)(nextDelay * NSEC_PER_SEC)),
+                                (uint64_t)(nextDelay * NSEC_PER_SEC),
+                                (uint64_t)(0.005 * NSEC_PER_SEC));
+                        });
+
+                        dispatch_resume(timer);
+
+                        // Stocker le timer en associated object sur le sublayer
+                        // pour l'invalider au recyclage (prochain passage dans willDisplayCell)
+                        objc_setAssociatedObject(animSub, &kS7TVDisplayLink,
+                            [[S7TVTimerWrapper alloc] initWithTimer:timer],
+                            OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+                        [animMgr log:@"🎬 Animation démarrée: emote=%@ frames=%ld",
+                         emoteID, (long)framesCopy.count];
+                    }
+                    // ────────────────────────────────────────────────────────────────
                 });
             });
 
