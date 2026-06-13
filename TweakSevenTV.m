@@ -1059,28 +1059,8 @@ static void TwitchSevenTVInit(void) {
                             CGRect f = caLayer.frame;
                             if (f.size.width <= 0 || f.size.height <= 0) continue;
 
-                            // Trouver le ratio réel via l'emoteID dans le content iVar
-                            CGFloat ratio = 1.0; // carré par défaut
-                            @try {
-                                Class layerCls = object_getClass(imgLayer);
-                                Ivar contentIvar = class_getInstanceVariable(layerCls, "content");
-                                if (contentIvar) {
-                                    uintptr_t ilAddr = (uintptr_t)(__bridge void *)imgLayer;
-                                    void *cPtr = *(void **)(ilAddr + ivar_getOffset(contentIvar));
-                                    if (cPtr) {
-                                        id cVal = (__bridge id)(cPtr);
-                                        NSString *desc = [cVal description];
-                                        // L'emoteID est dans la description sous forme "7tv_XXXX" ou "01XXXX"
-                                        NSDictionary *ratios = [[SevenTVManager sharedManager] emoteRatios];
-                                        for (NSString *emoteID in ratios) {
-                                            if ([desc containsString:emoteID]) {
-                                                ratio = ((NSNumber *)ratios[emoteID]).floatValue;
-                                                break;
-                                            }
-                                        }
-                                    }
-                                }
-                            } @catch (...) {}
+                            // Ratio depuis la taille actuelle du layer (Twitch compact mais proportions correctes)
+                            CGFloat ratio = f.size.width / f.size.height;
 
                             CGFloat newWidth = targetSize * ratio;
                             caLayer.bounds = CGRectMake(0, 0, newWidth, targetSize);
