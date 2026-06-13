@@ -124,6 +124,12 @@ static void s7tv_swizzle(Class targetClass,
     }
 
     // ── Force _areEmoteAnimationsEnabled via offset mémoire direct ──────────
+    // DÉSACTIVÉ (Option A — test diagnostic) : ce bloc écrivait 1 octet (0x01)
+    // directement en mémoire à un offset calculé via ivar_getOffset(). Suspect
+    // n°1 de la corruption mémoire à l'origine du crash swift_release /
+    // UITableView dealloc (SIGBUS EXC_ARM_DA_ALIGN) à la fermeture du stream.
+    // Bloc entièrement désactivé pour confirmer/infirmer ce diagnostic.
+    /*
     if ([selfClass isEqualToString:@"Twitch.ChatTranscriptView"]) {
         __weak UIView *weakSelf = self;
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
@@ -145,6 +151,7 @@ static void s7tv_swizzle(Class targetClass,
              before, after, offset];
         });
     }
+    */
 
     // ── Hijack du bouton Bits → bouton 7TV ───────────────────────────────────
     if (![selfClass isEqualToString:@"Twitch.ChatInputView"]) return;
