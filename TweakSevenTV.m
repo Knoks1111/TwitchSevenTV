@@ -12,6 +12,7 @@
  */
 
 #import <objc/runtime.h>
+#import <objc/message.h>
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import "SevenTVManager.h"
@@ -974,51 +975,53 @@ static void TwitchSevenTVInit(void) {
 
         // Démarrer le local proxy si activé
 
-        // ── Hook layoutSubviews sur MessageStringView ────────────────────
-        // layoutSubviews est appelé APRÈS que Twitch a positionné tous les layers
-        // C'est l'endroit idéal pour modifier la taille des emotes
+        // ── Hook layoutSublayers sur MessageStringLayer ──────────────────
+        // C'est le CALayer custom de Twitch qui gère le positionnement des emotes.
+        // layoutSublayers est appelé APRÈS que orderedImageLayers est peuplé et positionné.
+        // C'est l'endroit exact où on doit modifier la taille des emotes.
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
-            Class msgStringViewClass = NSClassFromString(@"Twitch.MessageStringView");
-            if (!msgStringViewClass) {
-                [[SevenTVManager sharedManager] log:@"❌ MessageStringView introuvable"];
+            Class msgLayerClass = NSClassFromString(@"Twitch.MessageStringLayer");
+            if (!msgLayerClass) {
+                [[SevenTVManager sharedManager] log:@"❌ MessageStringLayer introuvable"];
                 return;
             }
 
-            SEL layoutSel = @selector(layoutSubviews);
-            Method origMethod = class_getInstanceMethod(msgStringViewClass, layoutSel);
+            SEL layoutSel = @selector(layoutSublayers);
+            Method origMethod = class_getInstanceMethod(msgLayerClass, layoutSel);
             if (!origMethod) {
-                [[SevenTVManager sharedManager] log:@"❌ layoutSubviews introuvable"];
-                return;
+                // layoutSublayers non défini dans MessageStringLayer — on hérite de CALayer
+                // On l'ajoute directement
+                [[SevenTVManager sharedManager] log:@"ℹ️ layoutSublayers non défini, on utilise addMethod"];
             }
 
-            // Récupérer offsets iVars de MessageStringView
-            Ivar layerIvar = class_getInstanceVariable(msgStringViewClass, "messageStringLayer");
-            if (!layerIvar) {
-                [[SevenTVManager sharedManager] log:@"❌ messageStringLayer iVar introuvable"];
+            // Récupérer offset de orderedImageLayers
+            Ivar imgLayersIvar = class_getInstanceVariable(msgLayerClass, "orderedImageLayers");
+            if (!imgLayersIvar) {
+                [[SevenTVManager sharedManager] log:@"❌ orderedImageLayers iVar introuvable"];
                 return;
             }
-            ptrdiff_t layerOffset = ivar_getOffset(layerIvar);
+            ptrdiff_t imgLayersOffset = ivar_getOffset(imgLayersIvar);
 
-            IMP origIMP = method_getImplementation(origMethod);
+            IMP origIMP = origMethod ? method_getImplementation(origMethod) : nil;
 
-            IMP newIMP = imp_implementationWithBlock(^(UIView *selfView) {
+            IMP newIMP = imp_implementationWithBlock(^(CALayer *selfLayer) {
                 // Appel original EN PREMIER
-                ((void (*)(id, SEL))origIMP)(selfView, layoutSel);
+                if (origIMP) {
+                    ((void (*)(id, SEL))origIMP)(selfLayer, layoutSel);
+                } else {
+                    // Appeler la superclasse
+                    struct objc_super superInfo = {
+                        .receiver = selfLayer,
+                        .super_class = class_getSuperclass(msgLayerClass)
+                    };
+                    ((void (*)(struct objc_super *, SEL))objc_msgSendSuper)(&superInfo, layoutSel);
+                }
 
-                // Après le layout, modifier les emotes 7TV
+                // Maintenant orderedImageLayers est peuplé et positionné
                 @try {
-                    uintptr_t viewAddr = (uintptr_t)(__bridge void *)selfView;
-                    void *layerPtr = *(void **)(viewAddr + layerOffset);
-                    if (!layerPtr) return;
-                    id layer = (__bridge id)(layerPtr);
-
-                    Class msgLayerClass = object_getClass(layer);
-                    Ivar imgLayersIvar = class_getInstanceVariable(msgLayerClass, "orderedImageLayers");
-                    if (!imgLayersIvar) return;
-
-                    uintptr_t layerAddr = (uintptr_t)layerPtr;
-                    void *imgLayersPtr = *(void **)(layerAddr + ivar_getOffset(imgLayersIvar));
+                    uintptr_t layerAddr = (uintptr_t)(__bridge void *)selfLayer;
+                    void *imgLayersPtr = *(void **)(layerAddr + imgLayersOffset);
                     if (!imgLayersPtr) return;
                     id imgLayersObj = (__bridge id)(imgLayersPtr);
                     if (![imgLayersObj isKindOfClass:[NSArray class]]) return;
@@ -1026,9 +1029,6 @@ static void TwitchSevenTVInit(void) {
                     NSArray *arr = (NSArray *)imgLayersObj;
                     if (arr.count == 0) return;
 
-                    // Récupérer les positions des emotes 7TV depuis SevenTVManager
-                    // On identifie une emote 7TV par son sublayer StaticImageAttachmentLayer
-                    // qui contient une image dont l'URL contient "cdn.7tv.app"
                     CGFloat targetSize = 56.0;
 
                     [CATransaction begin];
@@ -1038,10 +1038,8 @@ static void TwitchSevenTVInit(void) {
                         CALayer *caLayer = (CALayer *)imgLayer;
                         CGRect f = caLayer.frame;
                         if (f.size.width <= 0 || f.size.height <= 0) continue;
-
-                            // Exclure les badges (origin.x < 30pt)
+                        // Exclure les badges (origin.x < 30pt)
                         if (f.origin.x < 30.0) continue;
-
                         caLayer.bounds = CGRectMake(0, 0, targetSize, targetSize);
                         caLayer.frame = CGRectMake(
                             f.origin.x,
@@ -1050,14 +1048,15 @@ static void TwitchSevenTVInit(void) {
                         );
                     }
                     [CATransaction commit];
-
-                } @catch (NSException *e) {
-                    // Silencieux pour ne pas spammer les logs
-                }
+                } @catch (...) {}
             });
 
-            method_setImplementation(origMethod, newIMP);
-            [[SevenTVManager sharedManager] log:@"✅ layoutSubviews hooké sur MessageStringView"];
+            if (origMethod) {
+                method_setImplementation(origMethod, newIMP);
+            } else {
+                class_addMethod(msgLayerClass, layoutSel, newIMP, "v@:");
+            }
+            [[SevenTVManager sharedManager] log:@"✅ layoutSublayers hooké sur MessageStringLayer"];
         });
         // ─────────────────────────────────────────────────────────────────
 
