@@ -1039,6 +1039,42 @@ static void TwitchSevenTVInit(void) {
                         if (arr.count == 0) return;
 
                         CGFloat targetSize = 56.0;
+
+                        // Extraire les ratios des emotes 7TV dans l'ordre depuis le texte de la cellule
+                        // On cherche un UILabel dans la hiérarchie pour lire le texte brut
+                        NSMutableArray<NSNumber *> *orderedRatios = [NSMutableArray array];
+                        @try {
+                            NSMutableArray *queue = [NSMutableArray arrayWithObject:cell];
+                            NSString *cellText = nil;
+                            while (queue.count > 0 && !cellText) {
+                                UIView *v = queue[0];
+                                [queue removeObjectAtIndex:0];
+                                if ([v isKindOfClass:[UILabel class]]) {
+                                    NSString *t = ((UILabel *)v).text;
+                                    if (t.length > 0) { cellText = t; break; }
+                                }
+                                for (UIView *sub in v.subviews) [queue addObject:sub];
+                            }
+                            if (cellText) {
+                                SevenTVManager *mgr2 = [SevenTVManager sharedManager];
+                                NSMutableDictionary *ratios = [mgr2 emoteRatios];
+                                NSArray<NSString *> *words = [cellText componentsSeparatedByString:@" "];
+                                for (NSString *word in words) {
+                                    // Chercher si ce mot est une emote connue (via emoteForName)
+                                    SevenTVEmote *em = [mgr2 emoteForName:word];
+                                    if (em && em.width > 0 && em.height > 0) {
+                                        CGFloat r = (CGFloat)em.width / (CGFloat)em.height;
+                                        [orderedRatios addObject:@(r)];
+                                    } else if (em) {
+                                        // Emote connue mais pas de dimensions → fallback emoteRatios
+                                        NSNumber *rn = ratios[em.emoteID];
+                                        [orderedRatios addObject:rn ?: @(1.0)];
+                                    }
+                                }
+                            }
+                        } @catch (...) {}
+
+                        NSInteger emoteIndex = 0;
                         [CATransaction begin];
                         [CATransaction setDisableActions:YES];
                         for (id imgLayer in arr) {
@@ -1059,8 +1095,14 @@ static void TwitchSevenTVInit(void) {
                             CGRect f = caLayer.frame;
                             if (f.size.width <= 0 || f.size.height <= 0) continue;
 
-                            // Ratio depuis la taille actuelle du layer (Twitch compact mais proportions correctes)
-                            CGFloat ratio = f.size.width / f.size.height;
+                            // Ratio depuis orderedRatios (par index), fallback sur ratio du layer
+                            CGFloat ratio;
+                            if (emoteIndex < (NSInteger)orderedRatios.count) {
+                                ratio = orderedRatios[emoteIndex].floatValue;
+                            } else {
+                                ratio = f.size.width / f.size.height;
+                            }
+                            emoteIndex++;
 
                             CGFloat newWidth = targetSize * ratio;
                             caLayer.bounds = CGRectMake(0, 0, newWidth, targetSize);
