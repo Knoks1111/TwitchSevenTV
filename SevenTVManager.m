@@ -2065,11 +2065,18 @@ static NSString *s7tv_emoteSetKey(NSDictionary *global, NSDictionary *channel) {
         [header addSubview:star];
 
         // Label "Favoris" violet Twitch
-        UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(31, 5, 200, 18)];
+        UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(31, 5, 120, 18)];
         lbl.text      = @"Favoris";
         lbl.font      = [UIFont boldSystemFontOfSize:11];
         lbl.textColor = [UIColor colorWithRed:0.60 green:0.35 blue:1.0 alpha:1.0]; // violet Twitch
         [header addSubview:lbl];
+
+        // Compteur
+        UILabel *count = [[UILabel alloc] initWithFrame:CGRectMake(155, 5, cv.bounds.size.width - 155 - 8, 18)];
+        count.text = [NSString stringWithFormat:@"%lu", (unsigned long)self.emotePickerFavoriteEmotes.count];
+        count.font = [UIFont systemFontOfSize:10];
+        count.textColor = [UIColor colorWithWhite:0.40 alpha:1.0];
+        [header addSubview:count];
 
         // Séparateur bas
         UIView *botSep = [[UIView alloc] initWithFrame:CGRectMake(8, 27.5, cv.bounds.size.width - 16, 0.5)];
@@ -2082,11 +2089,18 @@ static NSString *s7tv_emoteSetKey(NSDictionary *global, NSDictionary *channel) {
         topSep.backgroundColor = sepColor;
         [header addSubview:topSep];
 
-        UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(14, 4, 200, 20)];
+        UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(14, 4, 120, 20)];
         lbl.text      = @"Emotes de channel";
         lbl.font      = [UIFont boldSystemFontOfSize:11];
         lbl.textColor = textColor;
         [header addSubview:lbl];
+
+        // Compteur
+        UILabel *count = [[UILabel alloc] initWithFrame:CGRectMake(155, 4, cv.bounds.size.width - 155 - 8, 20)];
+        count.text = [NSString stringWithFormat:@"%lu", (unsigned long)self.emotePickerChannelEmotes.count];
+        count.font = [UIFont systemFontOfSize:10];
+        count.textColor = [UIColor colorWithWhite:0.40 alpha:1.0];
+        [header addSubview:count];
 
         UIView *botSep = [[UIView alloc] initWithFrame:CGRectMake(8, 27.5, cv.bounds.size.width - 16, 0.5)];
         botSep.backgroundColor = sepColor;
@@ -2098,11 +2112,18 @@ static NSString *s7tv_emoteSetKey(NSDictionary *global, NSDictionary *channel) {
         topSep.backgroundColor = sepColor;
         [header addSubview:topSep];
 
-        UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(14, 4, 200, 20)];
+        UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(14, 4, 120, 20)];
         lbl.text      = @"Emotes globales";
         lbl.font      = [UIFont boldSystemFontOfSize:11];
         lbl.textColor = textColor;
         [header addSubview:lbl];
+
+        // Compteur
+        UILabel *count = [[UILabel alloc] initWithFrame:CGRectMake(155, 4, cv.bounds.size.width - 155 - 8, 20)];
+        count.text = [NSString stringWithFormat:@"%lu", (unsigned long)self.emotePickerGlobalEmotes.count];
+        count.font = [UIFont systemFontOfSize:10];
+        count.textColor = [UIColor colorWithWhite:0.40 alpha:1.0];
+        [header addSubview:count];
 
         UIView *botSep = [[UIView alloc] initWithFrame:CGRectMake(8, 27.5, cv.bounds.size.width - 16, 0.5)];
         botSep.backgroundColor = sepColor;
