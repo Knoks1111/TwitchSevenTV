@@ -1198,8 +1198,12 @@ static void TwitchSevenTVInit(void) {
                         [animMgr popEmoteSequenceForCount:emoteLayers.count];
 
                     // Ring buffer miss → entrée expirée ou count mismatch.
-                    if (!emoteSequence || emoteSequence.count != emoteLayers.count) {
-                        [animMgr log:@"⚠️ Ring buffer miss (%lu 7TV layers) — skip", (unsigned long)emoteLayers.count];
+                    // FIX : on accepte seq.count <= emoteLayers.count (cellules mixtes 7TV + Twitch native).
+                    // Si seq.count > emoteLayers.count → vrai miss (plus d'emotes 7TV que de layers = impossible).
+                    if (!emoteSequence || emoteSequence.count == 0 || emoteSequence.count > emoteLayers.count) {
+                        [animMgr log:@"⚠️ Ring buffer miss (%lu layers, %lu 7TV) — skip",
+                         (unsigned long)emoteLayers.count,
+                         (unsigned long)(emoteSequence ? emoteSequence.count : 0)];
                         return;
                     }
 
@@ -1381,10 +1385,14 @@ static void TwitchSevenTVInit(void) {
                     }
                     // ─────────────────────────────────────────────────────────────
 
+                    NSInteger seqLayerCount = (NSInteger)emoteSequence.count;
                     NSInteger emoteIndex = 0;
                     [CATransaction begin];
                     [CATransaction setDisableActions:YES];
                     for (CALayer *animSub in emoteLayers) {
+                        // FIX : ne resizer que les emoteSequence.count premiers layers.
+                        // Les layers Twitch native en surplus (indices >= seqLayerCount) sont ignorés.
+                        if (emoteIndex >= seqLayerCount) break;
                         // emoteLayer = le parent du sublayer Animated (c'est lui qu'on resize)
                         CALayer *caLayer = animSub.superlayer;
                         if (!caLayer) { emoteIndex++; continue; }
@@ -1420,6 +1428,9 @@ static void TwitchSevenTVInit(void) {
 
                     NSInteger animIdx = 0;
                     for (CALayer *animSub in emoteLayers) {
+                        // FIX : ne poser l'overlay que sur les seqLayerCount premiers layers (emotes 7TV).
+                        // Les layers Twitch native en surplus sont ignorés.
+                        if (animIdx >= seqLayerCount) break;
                         // FIX : emoteLayers contient maintenant directement les sublayers Animated.
                         // emoteLayer = le parent (sur lequel on pose l'overlay via addSublayer).
                         CALayer *emoteLayer = animSub.superlayer;
@@ -1468,11 +1479,10 @@ static void TwitchSevenTVInit(void) {
                         NSData *webpData = cached.data;
                         if (!webpData || webpData.length == 0) continue;
 
-                        // FIX 3 : frame overlay robuste
-                        CGRect overlayFrame = animSub.frame;
-                        if (overlayFrame.size.width <= 0 || overlayFrame.size.height <= 0) {
-                            overlayFrame = emoteLayer.bounds;
-                        }
+                        // FIX TAILLE OVERLAY : utiliser emoteLayer.bounds (après resize) et non animSub.frame.
+                        // Le resize a modifié caLayer.bounds/frame, pas animSub.frame → l'overlay
+                        // prenait l'ancienne taille pré-resize. emoteLayer.bounds est toujours correct.
+                        CGRect overlayFrame = emoteLayer.bounds;
 
                         // ── FIX LAG : vérifier le cache global avant de décoder ──────────
                         // NSCache est thread-safe → lecture directe sans lock.
@@ -1494,9 +1504,7 @@ static void TwitchSevenTVInit(void) {
                             NSInteger totalFrames = (NSInteger)imgsFinal.count;
                             if (totalFrames == 0) continue;
 
-                            CGRect finalFrame = animSub.frame;
-                            if (finalFrame.size.width <= 0 || finalFrame.size.height <= 0) finalFrame = overlayFrame;
-                            if (finalFrame.size.width <= 0 || finalFrame.size.height <= 0) finalFrame = emoteLayer.bounds;
+                            CGRect finalFrame = emoteLayer.bounds; // toujours post-resize
 
                             // Nettoyage par nom avant ajout (évite stacking même en cas de race BG)
                             for (CALayer *s in [emoteLayer.sublayers copy]) {
@@ -1598,9 +1606,7 @@ static void TwitchSevenTVInit(void) {
                                     CALayer *sub = weakAnimSubBG;
                                     if (!el || !sub) return;
 
-                                    CGRect finalFrame = sub.frame;
-                                    if (finalFrame.size.width <= 0 || finalFrame.size.height <= 0) finalFrame = frameCopy;
-                                    if (finalFrame.size.width <= 0 || finalFrame.size.height <= 0) finalFrame = el.bounds;
+                                    CGRect finalFrame = el.bounds; // toujours post-resize
 
                                     // Nettoyage par nom avant ajout (évite stacking race condition)
                                     for (CALayer *s in [el.sublayers copy]) {

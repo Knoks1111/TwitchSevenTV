@@ -1282,7 +1282,13 @@ static const CGFloat kS7TVMenuHeight = 520.0;
                 continue;
             }
             NSArray<SevenTVEmote *> *seq = entry[@"seq"];
-            if (seq.count == count) {
+            // FIX : accepter seq.count <= count pour gérer les cellules mixtes
+            // (emotes 7TV + emotes Twitch native dans le même message).
+            // emoteLayers.count = total des layers Animated (7TV + Twitch).
+            // seq.count = uniquement les emotes 7TV injectées via IRC.
+            // Exemple : 1 emote 7TV + 1 emote Twitch native → emoteLayers.count=2, seq.count=1.
+            // Avec == : miss systématique. Avec <= : on prend la bonne séquence.
+            if (seq.count <= count && seq.count > 0) {
                 [self.recentEmoteSequences removeObjectAtIndex:i];
                 return seq;
             }
