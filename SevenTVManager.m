@@ -1276,8 +1276,8 @@ static const CGFloat kS7TVMenuHeight = 520.0;
         for (NSUInteger i = 0; i < self.recentEmoteSequences.count; ) {
             NSDictionary *entry = self.recentEmoteSequences[i];
             NSTimeInterval ts = [entry[@"ts"] doubleValue];
-            // Expirer les entrées de plus de 500ms (cellule Twitch native a déjà consommé avant)
-            if (now - ts > 0.5) {
+            // Expirer les entrées de plus de 2000ms
+            if (now - ts > 2.0) {
                 [self.recentEmoteSequences removeObjectAtIndex:i];
                 continue;
             }

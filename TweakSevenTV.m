@@ -1191,41 +1191,11 @@ static void TwitchSevenTVInit(void) {
                     NSArray<SevenTVEmote *> *emoteSequence =
                         [animMgr popEmoteSequenceForCount:emoteLayers.count];
 
-                    // Fallback : si ring buffer vide ou count mismatch, on reconstruit
-                    // une séquence synthétique depuis le cache WebP (emotes animées connues).
+                    // Ring buffer miss → cellule sans emote 7TV (Twitch native) ou entrée expirée.
+                    // On ne pose aucun overlay pour éviter les mauvaises emotes sur des cellules Twitch.
                     if (!emoteSequence || emoteSequence.count != emoteLayers.count) {
-                        NSMutableArray<SevenTVEmote *> *synthetic = [NSMutableArray array];
-                        NSURLCache *emoteCache = [SevenTVURLProtocol sharedEmoteCache];
-                        // Récupérer toutes les emotes chargées depuis SevenTVManager
-                        // via la propriété publique (channel + global emotes)
-                        NSArray<SevenTVEmote *> *allEmotes = [animMgr currentEmotes];
-                        if (!allEmotes) allEmotes = @[];
-                        // Pour chaque layer emote, chercher la 1ère emote animée dont le cache existe
-                        NSMutableSet *usedIDs = [NSMutableSet set];
-                        for (NSUInteger li = 0; li < emoteLayers.count; li++) {
-                            SevenTVEmote *found = nil;
-                            for (SevenTVEmote *em in allEmotes) {
-                                if (!em.isAnimated || !em.emoteID) continue;
-                                if ([usedIDs containsObject:em.emoteID]) continue;
-                                NSString *u4 = [NSString stringWithFormat:@"https://cdn.7tv.app/emote/%@/4x.webp", em.emoteID];
-                                NSString *u2 = [NSString stringWithFormat:@"https://cdn.7tv.app/emote/%@/2x.webp", em.emoteID];
-                                BOOL has4 = [emoteCache cachedResponseForRequest:[NSURLRequest requestWithURL:[NSURL URLWithString:u4]]] != nil;
-                                BOOL has2 = [emoteCache cachedResponseForRequest:[NSURLRequest requestWithURL:[NSURL URLWithString:u2]]] != nil;
-                                if (has4 || has2) { found = em; break; }
-                            }
-                            if (found) {
-                                [usedIDs addObject:found.emoteID];
-                                [synthetic addObject:found];
-                            } else {
-                                // placeholder non-animé pour conserver l'alignement des index
-                                SevenTVEmote *dummy = [SevenTVEmote new];
-                                [synthetic addObject:dummy];
-                            }
-                        }
-                        if (synthetic.count == emoteLayers.count) {
-                            emoteSequence = [synthetic copy];
-                            [animMgr log:@"⚠️ Ring buffer miss (%lu layers) — séquence synthétique", (unsigned long)emoteLayers.count];
-                        }
+                        [animMgr log:@"⚠️ Ring buffer miss (%lu layers) — skip", (unsigned long)emoteLayers.count];
+                        return;
                     }
 
                     // Construire orderedRatios depuis la séquence du ring buffer
