@@ -1161,7 +1161,13 @@ static void TwitchSevenTVInit(void) {
                         integerForKey:@"s7tv_emote_size"] ?: 30.0;
 
                     // ── Collecter les emote layers ───────────────────────────────────
-                    // On repère les layers qui ont un sublayer "Animated" (= emote 7TV)
+                    // On repère directement les sublayers "Animated" (AnimatedImageAttachmentLayer).
+                    // FIX : on ajoute `sub` (le sublayer Animated lui-même) et non `l` (son parent),
+                    // et on ne fait pas de `break` — un même parent peut contenir plusieurs sublayers
+                    // Animated si plusieurs emotes 7TV sont dans le même bloc de texte.
+                    // Avant ce fix, emoteLayers.count était toujours 1 (un seul parent ajouté même
+                    // quand il contenait N emotes), causant un ring buffer miss systématique et
+                    // le fallback synthétique qui posait la même emote sur tous les layers.
                     NSMutableArray<CALayer *> *emoteLayers = [NSMutableArray array];
                     NSMutableArray<CALayer *> *layerQueue = [NSMutableArray arrayWithArray:cell.layer.sublayers];
                     while (layerQueue.count > 0) {
@@ -1169,8 +1175,7 @@ static void TwitchSevenTVInit(void) {
                         [layerQueue removeObjectAtIndex:0];
                         for (CALayer *sub in l.sublayers) {
                             if ([NSStringFromClass(object_getClass(sub)) containsString:@"Animated"]) {
-                                [emoteLayers addObject:l];
-                                break;
+                                [emoteLayers addObject:sub]; // ← sub, pas l ; pas de break
                             }
                         }
                         if (l.sublayers) [layerQueue addObjectsFromArray:l.sublayers];
@@ -1401,7 +1406,10 @@ static void TwitchSevenTVInit(void) {
                     NSInteger emoteIndex = 0;
                     [CATransaction begin];
                     [CATransaction setDisableActions:YES];
-                    for (CALayer *caLayer in emoteLayers) {
+                    for (CALayer *animSub in emoteLayers) {
+                        // emoteLayer = le parent du sublayer Animated (c'est lui qu'on resize)
+                        CALayer *caLayer = animSub.superlayer;
+                        if (!caLayer) { emoteIndex++; continue; }
                         CGRect f = caLayer.frame;
                         if (f.size.width <= 0 || f.size.height <= 0) { emoteIndex++; continue; }
                         CGFloat ratio = (emoteIndex < (NSInteger)orderedRatios.count)
@@ -1433,16 +1441,11 @@ static void TwitchSevenTVInit(void) {
                     static const char kS7TVOverlayLayer = 1;
 
                     NSInteger animIdx = 0;
-                    for (CALayer *emoteLayer in emoteLayers) {
-                        // Trouver le sublayer AnimatedImageAttachmentLayer
-                        CALayer *animSub = nil;
-                        for (CALayer *sub in emoteLayer.sublayers) {
-                            if ([NSStringFromClass(object_getClass(sub)) containsString:@"Animated"]) {
-                                animSub = sub;
-                                break;
-                            }
-                        }
-                        if (!animSub) { animIdx++; continue; }
+                    for (CALayer *animSub in emoteLayers) {
+                        // FIX : emoteLayers contient maintenant directement les sublayers Animated.
+                        // emoteLayer = le parent (sur lequel on pose l'overlay via addSublayer).
+                        CALayer *emoteLayer = animSub.superlayer;
+                        if (!emoteLayer) { animIdx++; continue; }
 
                         // Stopper le timer existant et retirer l'overlay précédent (recyclage)
                         objc_setAssociatedObject(animSub, &kS7TVDisplayLink, nil,
