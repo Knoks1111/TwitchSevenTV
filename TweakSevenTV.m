@@ -1175,10 +1175,13 @@ static void TwitchSevenTVInit(void) {
                         [layerQueue removeObjectAtIndex:0];
                         for (CALayer *sub in l.sublayers) {
                             if ([NSStringFromClass(object_getClass(sub)) containsString:@"Animated"]) {
-                                [emoteLayers addObject:sub]; // ← sub, pas l ; pas de break
+                                [emoteLayers addObject:sub];
+                                // NE PAS traverser dans le layer Animated : ses sublayers peuvent
+                                // aussi contenir "Animated" → double-comptage → stacking.
+                            } else {
+                                if (sub.sublayers.count > 0) [layerQueue addObject:sub];
                             }
                         }
-                        if (l.sublayers) [layerQueue addObjectsFromArray:l.sublayers];
                     }
 
                     if (emoteLayers.count == 0) return;
