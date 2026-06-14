@@ -1160,113 +1160,13 @@ static void TwitchSevenTVInit(void) {
                     CGFloat targetSize = (CGFloat)[[NSUserDefaults standardUserDefaults]
                         integerForKey:@"s7tv_emote_size"] ?: 30.0;
 
-                    // ── Récupération du texte de la cellule ─────────────────────────
-                    // Twitch ne passe PAS par UILabel pour le chat : le texte est rendu
-                    // dans MessageStringLayer (CALayer pur). On tente 3 stratégies dans
-                    // l'ordre : ring buffer SevenTVManager, CALayer.name, KVC @try/@catch.
-                    NSMutableArray<NSNumber *> *orderedRatios = [NSMutableArray array];
-                    NSString *cellText = nil;
-
-                    // Stratégie 1 : ring buffer des messages récents dans SevenTVManager.
-                    // Les emotes ordonnées sont stockées avec le texte brut du message
-                    // lors de l'injection IRC, retrouvées ici via lookup dans le ring buffer.
-                    // → Implémentée côté SevenTVManager (voir recentMessageEmotes).
-                    // Skippé pour l'instant : on n'a pas encore le texte pour faire la lookup.
-
-                    // Stratégie 2 : CALayer.name sur le layer MessageStringLayer
-                    // + dump de tous les layer.name pour diagnostic (limité à 3 fois)
-                    static NSInteger s_layerNameDump = 0;
-                    {
-                        NSMutableArray<CALayer *> *lq2 = [NSMutableArray arrayWithArray:cell.layer.sublayers];
-                        while (lq2.count > 0 && !cellText) {
-                            CALayer *cl = lq2[0]; [lq2 removeObjectAtIndex:0];
-                            NSString *cn = NSStringFromClass(object_getClass(cl));
-                            // Dump layer name (diagnostic, 3 premières cellules avec emote)
-                            if (s_layerNameDump < 3 && cl.name.length > 0) {
-                                [[SevenTVManager sharedManager] log:
-                                 @"🏷️[%ld] layer=%@ name='%@'",
-                                 (long)(s_layerNameDump+1), cn, cl.name];
-                            }
-                            if ([cn containsString:@"MessageString"] && cl.name.length > 0) {
-                                cellText = cl.name;
-                            }
-                            if (cl.sublayers) [lq2 addObjectsFromArray:cl.sublayers];
-                        }
-                        if (cellText) {
-                            SevenTVManager *mgr2 = [SevenTVManager sharedManager];
-                            NSMutableDictionary *ratios = [mgr2 emoteRatios];
-                            for (NSString *word in [cellText componentsSeparatedByString:@" "]) {
-                                SevenTVEmote *em = [mgr2 emoteForName:word];
-                                if (em && em.width > 0 && em.height > 0) {
-                                    [orderedRatios addObject:@((CGFloat)em.width / (CGFloat)em.height)];
-                                } else if (em) {
-                                    NSNumber *rn = ratios[em.emoteID];
-                                    [orderedRatios addObject:rn ?: @(1.0)];
-                                }
-                            }
-                        }
-                    }
-
-                    // Stratégie 3 : KVC @try/@catch sur MessageStringLayer
-                    // (tente "string", "attributedString", "text", "messageString")
-                    if (!cellText) {
-                        NSMutableArray<CALayer *> *lq3 = [NSMutableArray arrayWithArray:cell.layer.sublayers];
-                        while (lq3.count > 0 && !cellText) {
-                            CALayer *cl = lq3[0]; [lq3 removeObjectAtIndex:0];
-                            NSString *cn = NSStringFromClass(object_getClass(cl));
-                            if ([cn containsString:@"MessageString"]) {
-                                for (NSString *key in @[@"string", @"attributedString",
-                                                        @"text", @"messageString",
-                                                        @"plainText", @"content"]) {
-                                    @try {
-                                        id val = [cl valueForKey:key];
-                                        NSString *s = nil;
-                                        if ([val isKindOfClass:[NSString class]]) s = val;
-                                        else if ([val isKindOfClass:[NSAttributedString class]])
-                                            s = ((NSAttributedString *)val).string;
-                                        if (s.length > 0) { cellText = s; break; }
-                                    } @catch (__unused NSException *e) {}
-                                }
-                            }
-                            if (cl.sublayers) [lq3 addObjectsFromArray:cl.sublayers];
-                        }
-                        if (cellText) {
-                            SevenTVManager *mgr2 = [SevenTVManager sharedManager];
-                            NSMutableDictionary *ratios = [mgr2 emoteRatios];
-                            for (NSString *word in [cellText componentsSeparatedByString:@" "]) {
-                                SevenTVEmote *em = [mgr2 emoteForName:word];
-                                if (em && em.width > 0 && em.height > 0) {
-                                    [orderedRatios addObject:@((CGFloat)em.width / (CGFloat)em.height)];
-                                } else if (em) {
-                                    NSNumber *rn = ratios[em.emoteID];
-                                    [orderedRatios addObject:rn ?: @(1.0)];
-                                }
-                            }
-                        }
-                    }
-
-                    // Incrémenter le compteur de dump layer name après traitement
-                    if (s_layerNameDump < 3) s_layerNameDump++;
-
-                    // Log diagnostic (limité à 10 occurrences)
-                    static NSInteger s_textDiagCount = 0;
-                    if (s_textDiagCount < 10) {
-                        s_textDiagCount++;
-                        [[SevenTVManager sharedManager] log:
-                         @"📝[%ld] cellText=%@ orderedRatios=%ld",
-                         (long)s_textDiagCount,
-                         cellText ?: @"(nil)",
-                         (long)orderedRatios.count];
-                    }
-
-                    // Collecter les emote layers via l'API publique CALayer uniquement
-                    // (plus de raw pointer → élimine le crash objc_retain sur Swift storage)
+                    // ── Collecter les emote layers ───────────────────────────────────
+                    // On repère les layers qui ont un sublayer "Animated" (= emote 7TV)
                     NSMutableArray<CALayer *> *emoteLayers = [NSMutableArray array];
                     NSMutableArray<CALayer *> *layerQueue = [NSMutableArray arrayWithArray:cell.layer.sublayers];
                     while (layerQueue.count > 0) {
                         CALayer *l = layerQueue[0];
                         [layerQueue removeObjectAtIndex:0];
-                        // Chercher les layers qui ont un sublayer "Animated" (= emote 7TV)
                         for (CALayer *sub in l.sublayers) {
                             if ([NSStringFromClass(object_getClass(sub)) containsString:@"Animated"]) {
                                 [emoteLayers addObject:l];
@@ -1277,6 +1177,28 @@ static void TwitchSevenTVInit(void) {
                     }
 
                     if (emoteLayers.count == 0) return;
+
+                    // ── Ring buffer : récupérer les emotes ordonnées ─────────────────
+                    // injectSevenTVEmotesIntoIRCMessage: stocke les emotes dans l'ordre
+                    // du message IRC. On retrouve la séquence correspondant au nombre
+                    // de layers détectés dans cette cellule.
+                    SevenTVManager *animMgr = [SevenTVManager sharedManager];
+                    NSArray<SevenTVEmote *> *emoteSequence =
+                        [animMgr popEmoteSequenceForCount:emoteLayers.count];
+
+                    // Construire orderedRatios depuis la séquence du ring buffer
+                    NSMutableArray<NSNumber *> *orderedRatios = [NSMutableArray array];
+                    if (emoteSequence) {
+                        NSMutableDictionary *ratios = [animMgr emoteRatios];
+                        for (SevenTVEmote *em in emoteSequence) {
+                            if (em.width > 0 && em.height > 0) {
+                                [orderedRatios addObject:@((CGFloat)em.width / (CGFloat)em.height)];
+                            } else {
+                                NSNumber *rn = ratios[em.emoteID];
+                                [orderedRatios addObject:rn ?: @(1.0)];
+                            }
+                        }
+                    }
 
                     // ── Dump MULTI-ÉCHANTILLONS désactivé (mission accomplie) ──────────
                     static NSInteger s_animSampleCount = 0;
@@ -1467,7 +1389,6 @@ static void TwitchSevenTVInit(void) {
                     // Clé associated object pour stocker/stopper le CADisplayLink au recyclage.
                     static const char kS7TVDisplayLink = 0;
 
-                    SevenTVManager *animMgr = [SevenTVManager sharedManager];
                     NSInteger animIdx = 0;
                     for (CALayer *emoteLayer in emoteLayers) {
                         // Trouver le sublayer AnimatedImageAttachmentLayer
@@ -1481,32 +1402,23 @@ static void TwitchSevenTVInit(void) {
                         if (!animSub) { animIdx++; continue; }
 
                         // Stopper le timer existant sur ce layer si recyclage
-                        // (le S7TVTimerWrapper cancel le dispatch_source à son dealloc)
                         objc_setAssociatedObject(animSub, &kS7TVDisplayLink, nil,
                                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
                         // Trouver l'emote 7TV animée correspondante à cet index
-                        // On reconstruit la liste ordonnée depuis cellText
+                        // via la séquence du ring buffer (ordre garanti)
                         NSString *emoteID = nil;
                         BOOL isAnimated = NO;
-                        if (cellText) {
-                            NSInteger wordEmoteIdx = 0;
-                            for (NSString *word in [cellText componentsSeparatedByString:@" "]) {
-                                SevenTVEmote *em = [animMgr emoteForName:word];
-                                if (em) {
-                                    if (wordEmoteIdx == animIdx) {
-                                        emoteID = em.emoteID;
-                                        isAnimated = em.isAnimated;
-                                        break;
-                                    }
-                                    wordEmoteIdx++;
-                                }
-                            }
+                        if (emoteSequence && animIdx < (NSInteger)emoteSequence.count) {
+                            SevenTVEmote *em = emoteSequence[animIdx];
+                            emoteID   = em.emoteID;
+                            isAnimated = em.isAnimated;
                         }
 
                         animIdx++;
-                        [animMgr log:@"🔎 animIdx=%ld emoteID=%@ isAnimated=%d cellText=%@",
-                         (long)(animIdx-1), emoteID ?: @"(nil)", isAnimated, cellText ?: @"(nil)"];
+                        [animMgr log:@"🔎 animIdx=%ld emoteID=%@ isAnimated=%d seqCount=%ld",
+                         (long)(animIdx-1), emoteID ?: @"(nil)", isAnimated,
+                         (long)emoteSequence.count];
                         if (!emoteID) continue;
 
                         // Récupérer les données WebP depuis NSURLCache

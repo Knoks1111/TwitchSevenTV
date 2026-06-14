@@ -122,4 +122,11 @@ extern NSString *const S7TVLogsDidUpdateNotification;
 // Dictionnaire { emoteID → ratio (width/height) } utilisé par willDisplayCell pour resize
 - (NSMutableDictionary *)emoteRatios;
 
+// --- Ring buffer emotes ordonnées ---
+// Appelé depuis willDisplayCell pour récupérer la liste des SevenTVEmote*
+// dans l'ordre du message correspondant au nombre d'emote layers détectés.
+// Retourne nil si aucune séquence ne correspond.
+// Thread-safe. Consomme (retire) l'entrée du ring buffer.
+- (NSArray<SevenTVEmote *> *)popEmoteSequenceForCount:(NSUInteger)count;
+
 @end

@@ -125,6 +125,13 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
 @property (nonatomic, weak) UIView   *pickerHeaderSliderContent; // slider + label valeur
 @property (nonatomic, weak) UILabel  *pickerSizeValueLabel;
 
+// Ring buffer des emotes ordonnées par message IRC.
+// Chaque entrée est un NSArray<SevenTVEmote*> dans l'ordre d'apparition dans le message.
+// Alimenté par injectSevenTVEmotesIntoIRCMessage:, consommé par popEmoteSequenceForCount:.
+// Capacité max : 50 entrées (messages récents).
+// Protégé par @synchronized(self).
+@property (nonatomic, strong) NSMutableArray<NSArray<SevenTVEmote *> *> *recentEmoteSequences;
+
 
 @end
 
@@ -308,8 +315,9 @@ static const CGFloat kS7TVMenuHeight = 520.0;
 
 
         _logBuffer = [NSMutableArray arrayWithCapacity:256];
-    _emoteRatios = [NSMutableDictionary dictionary];
+        _emoteRatios = [NSMutableDictionary dictionary];
         _logLock   = [[NSLock alloc] init];
+        _recentEmoteSequences = [NSMutableArray arrayWithCapacity:50];
 
         _favoriteEmoteIDs        = [NSMutableSet set];
         _emotePickerFavoriteEmotes = @[];
@@ -1175,6 +1183,30 @@ static const CGFloat kS7TVMenuHeight = 520.0;
 
     if (entries.count == 0) return raw;
 
+    // ── Ring buffer : stocker les emotes dans l'ordre pour willDisplayCell ──
+    // On collecte les SevenTVEmote* dans l'ordre du message (même boucle que entries).
+    // willDisplayCell les retrouvera via popEmoteSequenceForCount:.
+    {
+        NSMutableArray<SevenTVEmote *> *seq = [NSMutableArray arrayWithCapacity:entries.count];
+        NSUInteger p2 = 0;
+        for (NSString *word in words) {
+            if (word.length > 0) {
+                SevenTVEmote *em = channel[word] ?: global[word];
+                if (em) [seq addObject:em];
+            }
+            p2 += word.length + 1;
+        }
+        if (seq.count > 0) {
+            @synchronized (self) {
+                [self.recentEmoteSequences addObject:[seq copy]];
+                // Capacité max 50 : retirer le plus ancien si dépassé
+                if (self.recentEmoteSequences.count > 50) {
+                    [self.recentEmoteSequences removeObjectAtIndex:0];
+                }
+            }
+        }
+    }
+
     NSString *emoteTag = [entries componentsJoinedByString:@"/"];
     [self log:@"💉 Injection: emotes=%@", emoteTag];
 
@@ -1205,6 +1237,37 @@ static const CGFloat kS7TVMenuHeight = 520.0;
         }
         return [NSString stringWithFormat:@"@emotes=%@ %@", emoteTag, raw];
     }
+}
+
+
+// ============================================================
+// MARK: - Ring buffer : popEmoteSequenceForCount:
+//
+// Cherche dans _recentEmoteSequences la première entrée dont le
+// nombre d'emotes correspond à `count` (= nombre d'emote layers
+// trouvés dans la cellule par willDisplayCell).
+// Retire et retourne cette entrée, ou nil si non trouvée.
+//
+// Stratégie FIFO avec match par count :
+//   - Les messages arrivent dans l'ordre IRC → la cellule la plus
+//     ancienne non encore consommée est en tête du tableau.
+//   - On recherche en partant du début pour respecter l'ordre.
+//   - On retire UNIQUEMENT la première occurrence correspondante,
+//     pas toutes (un message avec 2 emotes ne consomme pas le suivant).
+// ============================================================
+
+- (NSArray<SevenTVEmote *> *)popEmoteSequenceForCount:(NSUInteger)count {
+    if (count == 0) return nil;
+    @synchronized (self) {
+        for (NSUInteger i = 0; i < self.recentEmoteSequences.count; i++) {
+            NSArray<SevenTVEmote *> *seq = self.recentEmoteSequences[i];
+            if (seq.count == count) {
+                [self.recentEmoteSequences removeObjectAtIndex:i];
+                return seq;
+            }
+        }
+    }
+    return nil;
 }
 
 
