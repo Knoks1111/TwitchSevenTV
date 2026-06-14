@@ -1356,6 +1356,17 @@ static void TwitchSevenTVInit(void) {
                                                     newWidth, targetSize);
                     }
                     [CATransaction commit];
+
+                    // Démarrer l'animation sur chaque AnimatedImageAttachmentLayer
+                    for (CALayer *caLayer in emoteLayers) {
+                        for (CALayer *sub in caLayer.sublayers) {
+                            if ([NSStringFromClass(object_getClass(sub)) containsString:@"Animated"]) {
+                                if ([sub respondsToSelector:NSSelectorFromString(@"startAnimating")]) {
+                                    [sub performSelector:NSSelectorFromString(@"startAnimating")];
+                                }
+                            }
+                        }
+                    }
                 });
             });
 
