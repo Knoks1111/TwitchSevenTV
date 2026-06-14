@@ -1433,10 +1433,11 @@ static void TwitchSevenTVInit(void) {
                         }
 
                         animIdx++;
-                        if (!isAnimated || !emoteID) continue;
+                        [animMgr log:@"🔎 animIdx=%ld emoteID=%@ isAnimated=%d cellText=%@",
+                         (long)(animIdx-1), emoteID ?: @"(nil)", isAnimated, cellText ?: @"(nil)"];
+                        if (!emoteID) continue;
 
                         // Récupérer les données WebP depuis NSURLCache
-                        // L'URL doit correspondre à ce que URLProtocol a mis en cache
                         NSString *cacheURLStr = [NSString stringWithFormat:
                             @"https://cdn.7tv.app/emote/%@/4x.webp", emoteID];
                         NSURL *cacheURL = [NSURL URLWithString:cacheURLStr];
@@ -1444,7 +1445,6 @@ static void TwitchSevenTVInit(void) {
                         NSCachedURLResponse *cached = [[SevenTVURLProtocol sharedEmoteCache]
                                                         cachedResponseForRequest:cacheReq];
                         if (!cached) {
-                            // Fallback : essayer 2x
                             cacheURLStr = [NSString stringWithFormat:
                                 @"https://cdn.7tv.app/emote/%@/2x.webp", emoteID];
                             cacheURL = [NSURL URLWithString:cacheURLStr];
@@ -1452,6 +1452,7 @@ static void TwitchSevenTVInit(void) {
                             cached = [[SevenTVURLProtocol sharedEmoteCache]
                                        cachedResponseForRequest:cacheReq];
                         }
+                        [animMgr log:@"🔎 cache=%@ url=%@", cached ? @"HIT" : @"MISS", cacheURLStr];
                         if (!cached) continue;
 
                         NSData *webpData = cached.data;
@@ -1463,6 +1464,7 @@ static void TwitchSevenTVInit(void) {
                         if (!src) continue;
 
                         NSInteger frameCount = (NSInteger)CGImageSourceGetCount(src);
+                        [animMgr log:@"🔎 frameCount=%ld isAnimated=%d", (long)frameCount, isAnimated];
                         if (frameCount <= 1) { CFRelease(src); continue; }
 
                         // Extraire les frames et les durées
