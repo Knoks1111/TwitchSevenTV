@@ -130,7 +130,8 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
 // Alimenté par injectSevenTVEmotesIntoIRCMessage:, consommé par popEmoteSequenceForCount:.
 // Capacité max : 50 entrées (messages récents).
 // Protégé par @synchronized(self).
-@property (nonatomic, strong) NSMutableArray<NSArray<SevenTVEmote *> *> *recentEmoteSequences;
+// Chaque entrée : @{ @"seq": NSArray<SevenTVEmote*>, @"ts": NSNumber(timeInterval) }
+@property (nonatomic, strong) NSMutableArray<NSDictionary *> *recentEmoteSequences;
 
 // Cache global des frames WebP décodées { emoteID → NSArray<UIImage*> }.
 // NSCache libère automatiquement sous pression mémoire — zéro OOM.
@@ -1207,7 +1208,10 @@ static const CGFloat kS7TVMenuHeight = 520.0;
         }
         if (seq.count > 0) {
             @synchronized (self) {
-                [self.recentEmoteSequences addObject:[seq copy]];
+                [self.recentEmoteSequences addObject:@{
+                    @"seq": [seq copy],
+                    @"ts":  @([[NSDate date] timeIntervalSinceReferenceDate])
+                }];
                 // Capacité max 50 : retirer le plus ancien si dépassé
                 if (self.recentEmoteSequences.count > 50) {
                     [self.recentEmoteSequences removeObjectAtIndex:0];
@@ -1267,13 +1271,22 @@ static const CGFloat kS7TVMenuHeight = 520.0;
 
 - (NSArray<SevenTVEmote *> *)popEmoteSequenceForCount:(NSUInteger)count {
     if (count == 0) return nil;
+    NSTimeInterval now = [[NSDate date] timeIntervalSinceReferenceDate];
     @synchronized (self) {
-        for (NSUInteger i = 0; i < self.recentEmoteSequences.count; i++) {
-            NSArray<SevenTVEmote *> *seq = self.recentEmoteSequences[i];
+        for (NSUInteger i = 0; i < self.recentEmoteSequences.count; ) {
+            NSDictionary *entry = self.recentEmoteSequences[i];
+            NSTimeInterval ts = [entry[@"ts"] doubleValue];
+            // Expirer les entrées de plus de 500ms (cellule Twitch native a déjà consommé avant)
+            if (now - ts > 0.5) {
+                [self.recentEmoteSequences removeObjectAtIndex:i];
+                continue;
+            }
+            NSArray<SevenTVEmote *> *seq = entry[@"seq"];
             if (seq.count == count) {
                 [self.recentEmoteSequences removeObjectAtIndex:i];
                 return seq;
             }
+            i++;
         }
     }
     return nil;

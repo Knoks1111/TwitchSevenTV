@@ -1516,14 +1516,16 @@ static void TwitchSevenTVInit(void) {
                             NSInteger totalFrames = (NSInteger)imgsFinal.count;
                             if (totalFrames == 0) continue;
 
-                            CALayer *existingOverlay = objc_getAssociatedObject(animSub, &kS7TVOverlayLayer);
-                            if (existingOverlay && existingOverlay.superlayer == emoteLayer) continue;
-
                             CGRect finalFrame = animSub.frame;
                             if (finalFrame.size.width <= 0 || finalFrame.size.height <= 0) finalFrame = overlayFrame;
                             if (finalFrame.size.width <= 0 || finalFrame.size.height <= 0) finalFrame = emoteLayer.bounds;
 
+                            // Nettoyage par nom avant ajout (évite stacking même en cas de race BG)
+                            for (CALayer *s in [emoteLayer.sublayers copy]) {
+                                if ([s.name isEqualToString:@"7tv_overlay"]) [s removeFromSuperlayer];
+                            }
                             CALayer *overlay = [CALayer layer];
+                            overlay.name            = @"7tv_overlay";
                             overlay.frame           = finalFrame;
                             overlay.contentsGravity = kCAGravityResizeAspect;
                             overlay.contentsScale   = [UIScreen mainScreen].scale;
@@ -1617,14 +1619,17 @@ static void TwitchSevenTVInit(void) {
                                     CALayer *el  = weakEmoteLayerBG;
                                     CALayer *sub = weakAnimSubBG;
                                     if (!el || !sub) return;
-                                    CALayer *existingOverlay = objc_getAssociatedObject(sub, &kS7TVOverlayLayer);
-                                    if (existingOverlay && existingOverlay.superlayer == el) return;
 
                                     CGRect finalFrame = sub.frame;
                                     if (finalFrame.size.width <= 0 || finalFrame.size.height <= 0) finalFrame = frameCopy;
                                     if (finalFrame.size.width <= 0 || finalFrame.size.height <= 0) finalFrame = el.bounds;
 
+                                    // Nettoyage par nom avant ajout (évite stacking race condition)
+                                    for (CALayer *s in [el.sublayers copy]) {
+                                        if ([s.name isEqualToString:@"7tv_overlay"]) [s removeFromSuperlayer];
+                                    }
                                     CALayer *overlay = [CALayer layer];
+                                    overlay.name            = @"7tv_overlay";
                                     overlay.frame           = finalFrame;
                                     overlay.contentsGravity = kCAGravityResizeAspect;
                                     overlay.contentsScale   = [UIScreen mainScreen].scale;
