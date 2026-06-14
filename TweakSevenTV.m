@@ -1204,6 +1204,36 @@ static void TwitchSevenTVInit(void) {
                         if (l.sublayers) [layerQueue addObjectsFromArray:l.sublayers];
                     }
 
+                    // ── DIAGNOSTIC : état avant guard ─────────────────────────────
+                    static NSInteger s_diagCount = 0;
+                    if (s_diagCount < 20) {
+                        s_diagCount++;
+                        SevenTVManager *diagMgr = [SevenTVManager sharedManager];
+                        // Nombre de sublayers directs de la cellule (niveau 1)
+                        NSInteger directSub = cell.layer.sublayers.count;
+                        // Compter les layers parcourus totaux dans la queue
+                        NSMutableArray<CALayer *> *diagQueue = [NSMutableArray arrayWithArray:cell.layer.sublayers];
+                        NSInteger totalVisited = 0;
+                        NSInteger animatedFound = 0;
+                        while (diagQueue.count > 0) {
+                            CALayer *dl = diagQueue[0]; [diagQueue removeObjectAtIndex:0];
+                            totalVisited++;
+                            for (CALayer *ds in dl.sublayers) {
+                                NSString *dsn = NSStringFromClass(object_getClass(ds));
+                                if ([dsn containsString:@"Animated"]) { animatedFound++; break; }
+                            }
+                            if (dl.sublayers) [diagQueue addObjectsFromArray:dl.sublayers];
+                        }
+                        [diagMgr log:@"🩺[%ld] cellText=%@ directSub=%ld visited=%ld animatedFound=%ld emoteLayers=%ld",
+                         (long)s_diagCount,
+                         cellText ?: @"(nil)",
+                         (long)directSub,
+                         (long)totalVisited,
+                         (long)animatedFound,
+                         (long)emoteLayers.count];
+                    }
+                    // ─────────────────────────────────────────────────────────────
+
                     if (emoteLayers.count == 0) return;
 
                     // ── Dump MULTI-ÉCHANTILLONS AnimatedImageAttachmentLayer (max 5) ──
