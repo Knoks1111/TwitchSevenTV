@@ -1451,16 +1451,11 @@ static void TwitchSevenTVInit(void) {
                         [animMgr log:@"🔎 frameCount=%ld isAnimated=%d", (long)frameCount, isAnimated];
                         if (frameCount <= 1) { CFRelease(src); continue; }
 
-                        // Extraire les frames et les durées
-                        NSMutableArray<UIImage *> *frames = [NSMutableArray array];
+                        // Extraire le nombre de frames et les durées (on n'a pas besoin des UIImage :
+                        // setCurrentFrame: prend un index, le layer gère ses propres pixels)
                         NSMutableArray<NSNumber *> *delays = [NSMutableArray array];
-                        for (NSInteger fi = 0; fi < frameCount; fi++) {
-                            CGImageRef cgImg = CGImageSourceCreateImageAtIndex(src, fi, NULL);
-                            if (!cgImg) continue;
-                            [frames addObject:[UIImage imageWithCGImage:cgImg]];
-                            CGImageRelease(cgImg);
-
-                            // Lire la durée de la frame depuis les métadonnées
+                        NSInteger totalFrameCount = (NSInteger)frameCount;
+                        for (NSInteger fi = 0; fi < totalFrameCount; fi++) {
                             NSDictionary *props = (__bridge_transfer NSDictionary *)
                                 CGImageSourceCopyPropertiesAtIndex(src, fi, NULL);
                             NSDictionary *gifProps = props[@"{GIF}"];
@@ -1473,18 +1468,14 @@ static void TwitchSevenTVInit(void) {
                         }
                         CFRelease(src);
 
-                        if (frames.count == 0) continue;
+                        if (totalFrameCount == 0) continue;
 
-                        // Wrapper pour éviter de capturer animSub directement
                         __block NSInteger frameIdx = 0;
-                        __block CFTimeInterval lastTime = 0;
-                        __block CFTimeInterval accumulator = 0;
                         __weak CALayer *weakAnimSub = animSub;
-                        NSArray<UIImage *> *framesCopy = [frames copy];
                         NSArray<NSNumber *> *delaysCopy = [delays copy];
+                        NSInteger totalFrames = totalFrameCount;
 
                         // dispatch_source comme timer pour cycler les frames
-
                         CGFloat frameDuration = delaysCopy[0].floatValue;
                         dispatch_source_t timer = dispatch_source_create(
                             DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
@@ -1495,18 +1486,25 @@ static void TwitchSevenTVInit(void) {
 
                         dispatch_source_set_event_handler(timer, ^{
                             CALayer *sub = weakAnimSub;
-                            if (!sub || !sub.superlayer || !sub.superlayer.superlayer) {
+                            // Guard souple : on cancel seulement si le layer est
+                            // complètement détaché (plus de superlayer du tout).
+                            if (!sub || !sub.superlayer) {
                                 dispatch_source_cancel(timer);
                                 return;
                             }
-                            UIImage *frame = framesCopy[frameIdx % framesCopy.count];
+                            // setCurrentFrame: prend un int64_t (index de frame),
+                            // PAS un UIImage*. C'est le layer interne Twitch qui
+                            // gère ses propres frames — on lui donne juste l'index.
                             @try {
                                 SEL setCF = NSSelectorFromString(@"setCurrentFrame:");
-                                void (*fn)(id, SEL, id) = (void (*)(id, SEL, id))
-                                    [sub methodForSelector:setCF];
-                                if (fn) fn(sub, setCF, frame);
+                                Method m = class_getInstanceMethod(object_getClass(sub), setCF);
+                                if (m) {
+                                    void (*fn)(id, SEL, int64_t) =
+                                        (void (*)(id, SEL, int64_t))method_getImplementation(m);
+                                    fn(sub, setCF, (int64_t)frameIdx);
+                                }
                             } @catch (__unused NSException *e) {}
-                            frameIdx = (frameIdx + 1) % (NSInteger)framesCopy.count;
+                            frameIdx = (frameIdx + 1) % totalFrames;
                             // Mettre à jour l'intervalle pour la prochaine frame
                             CGFloat nextDelay = delaysCopy[frameIdx % delaysCopy.count].floatValue;
                             dispatch_source_set_timer(timer,
@@ -1525,7 +1523,7 @@ static void TwitchSevenTVInit(void) {
                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
                         [animMgr log:@"🎬 Animation démarrée: emote=%@ frames=%ld",
-                         emoteID, (long)framesCopy.count];
+                         emoteID, (long)totalFrames];
                     }
                     // ────────────────────────────────────────────────────────────────
                 });
