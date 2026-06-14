@@ -1179,12 +1179,46 @@ static void TwitchSevenTVInit(void) {
                     if (emoteLayers.count == 0) return;
 
                     // ── Ring buffer : récupérer les emotes ordonnées ─────────────────
-                    // injectSevenTVEmotesIntoIRCMessage: stocke les emotes dans l'ordre
-                    // du message IRC. On retrouve la séquence correspondant au nombre
-                    // de layers détectés dans cette cellule.
                     SevenTVManager *animMgr = [SevenTVManager sharedManager];
                     NSArray<SevenTVEmote *> *emoteSequence =
                         [animMgr popEmoteSequenceForCount:emoteLayers.count];
+
+                    // Fallback : si ring buffer vide ou count mismatch, on reconstruit
+                    // une séquence synthétique depuis le cache WebP (emotes animées connues).
+                    if (!emoteSequence || emoteSequence.count != emoteLayers.count) {
+                        NSMutableArray<SevenTVEmote *> *synthetic = [NSMutableArray array];
+                        NSURLCache *emoteCache = [SevenTVURLProtocol sharedEmoteCache];
+                        // Récupérer toutes les emotes chargées depuis SevenTVManager
+                        // via la propriété publique (channel + global emotes)
+                        NSArray<SevenTVEmote *> *allEmotes = [animMgr currentEmotes];
+                        if (!allEmotes) allEmotes = @[];
+                        // Pour chaque layer emote, chercher la 1ère emote animée dont le cache existe
+                        NSMutableSet *usedIDs = [NSMutableSet set];
+                        for (NSUInteger li = 0; li < emoteLayers.count; li++) {
+                            SevenTVEmote *found = nil;
+                            for (SevenTVEmote *em in allEmotes) {
+                                if (!em.isAnimated || !em.emoteID) continue;
+                                if ([usedIDs containsObject:em.emoteID]) continue;
+                                NSString *u4 = [NSString stringWithFormat:@"https://cdn.7tv.app/emote/%@/4x.webp", em.emoteID];
+                                NSString *u2 = [NSString stringWithFormat:@"https://cdn.7tv.app/emote/%@/2x.webp", em.emoteID];
+                                BOOL has4 = [emoteCache cachedResponseForRequest:[NSURLRequest requestWithURL:[NSURL URLWithString:u4]]] != nil;
+                                BOOL has2 = [emoteCache cachedResponseForRequest:[NSURLRequest requestWithURL:[NSURL URLWithString:u2]]] != nil;
+                                if (has4 || has2) { found = em; break; }
+                            }
+                            if (found) {
+                                [usedIDs addObject:found.emoteID];
+                                [synthetic addObject:found];
+                            } else {
+                                // placeholder non-animé pour conserver l'alignement des index
+                                SevenTVEmote *dummy = [SevenTVEmote new];
+                                [synthetic addObject:dummy];
+                            }
+                        }
+                        if (synthetic.count == emoteLayers.count) {
+                            emoteSequence = [synthetic copy];
+                            [animMgr log:@"⚠️ Ring buffer miss (%lu layers) — séquence synthétique", (unsigned long)emoteLayers.count];
+                        }
+                    }
 
                     // Construire orderedRatios depuis la séquence du ring buffer
                     NSMutableArray<NSNumber *> *orderedRatios = [NSMutableArray array];
@@ -1443,92 +1477,123 @@ static void TwitchSevenTVInit(void) {
                         NSData *webpData = cached.data;
                         if (!webpData || webpData.length == 0) continue;
 
-                        // Décoder les frames avec ImageIO
-                        CGImageSourceRef src = CGImageSourceCreateWithData(
-                            (__bridge CFDataRef)webpData, NULL);
-                        if (!src) continue;
-
-                        NSInteger frameCount = (NSInteger)CGImageSourceGetCount(src);
-                        if (frameCount <= 1) { CFRelease(src); continue; }
-
-                        // Stocker les frames comme UIImage (ARC gère le CGImageRef sous-jacent)
-                        // + lire les durées de chaque frame
-                        NSMutableArray<UIImage *>  *cgImages = [NSMutableArray array];
-                        NSMutableArray<NSNumber *> *delays   = [NSMutableArray array];
-                        for (NSInteger fi = 0; fi < frameCount; fi++) {
-                            CGImageRef cgImg = CGImageSourceCreateImageAtIndex(src, fi, NULL);
-                            if (!cgImg) continue;
-                            [cgImages addObject:[UIImage imageWithCGImage:cgImg]];
-                            CGImageRelease(cgImg); // UIImage a retenu, on relâche notre ref
-                            NSDictionary *props = (__bridge_transfer NSDictionary *)
-                                CGImageSourceCopyPropertiesAtIndex(src, fi, NULL);
-                            NSNumber *delay = props[@"{WebP}"][@"DelayTime"]
-                                          ?: props[@"{GIF}"][@"DelayTime"]
-                                          ?: @(0.1);
-                            CGFloat d = delay.floatValue < 0.011 ? 0.1 : delay.floatValue;
-                            [delays addObject:@(d)];
+                        // ── FIX 3 : frame overlay robuste ───────────────────────────────
+                        // animSub.frame peut être {0,0,0,0} si le layout n'est pas encore
+                        // fini. On prend emoteLayer.bounds comme fallback (coordonnées locales).
+                        CGRect overlayFrame = animSub.frame;
+                        if (overlayFrame.size.width <= 0 || overlayFrame.size.height <= 0) {
+                            overlayFrame = emoteLayer.bounds;
                         }
-                        CFRelease(src);
-                        if (cgImages.count == 0) continue;
 
-                        // Créer le CALayer overlay (même frame que animSub)
-                        CALayer *overlay = [CALayer layer];
-                        overlay.frame           = animSub.frame;
-                        overlay.contentsGravity = kCAGravityResizeAspect;
-                        overlay.contentsScale   = [UIScreen mainScreen].scale;
-                        // Frame 0 immédiatement
-                        overlay.contents = (__bridge id)[cgImages[0] CGImage];
-                        [emoteLayer addSublayer:overlay];
+                        // ── FIX 2 : décodage WebP en background ─────────────────────────
+                        // Décoder sur une queue globale (QOS_CLASS_USER_INITIATED) pour
+                        // ne pas bloquer le main thread pendant le scroll.
+                        __weak CALayer *weakEmoteLayerBG = emoteLayer;
+                        __weak CALayer *weakAnimSubBG    = animSub;
+                        NSString *emoteIDCopy = [emoteID copy];
+                        NSData   *webpCopy    = webpData; // NSData est immuable, pas de copie réelle
+                        CGRect    frameCopy   = overlayFrame;
 
-                        // Stocker l'overlay pour pouvoir le retirer au prochain recyclage
-                        objc_setAssociatedObject(animSub, &kS7TVOverlayLayer, overlay,
-                                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+                            CGImageSourceRef src = CGImageSourceCreateWithData(
+                                (__bridge CFDataRef)webpCopy, NULL);
+                            if (!src) return;
 
-                        // Timer qui cycle les frames via overlay.contents
-                        __block NSInteger frameIdx = 1 % (NSInteger)cgImages.count;
-                        __weak CALayer *weakOverlay    = overlay;
-                        __weak CALayer *weakEmoteLayer = emoteLayer;
-                        NSArray<UIImage *>  *imgsCopy   = [cgImages copy];
-                        NSArray<NSNumber *> *delaysCopy = [delays copy];
-                        NSInteger totalFrames = (NSInteger)imgsCopy.count;
+                            NSInteger frameCount = (NSInteger)CGImageSourceGetCount(src);
+                            if (frameCount <= 1) { CFRelease(src); return; }
 
-                        CGFloat firstDelay = [delaysCopy[0] floatValue];
-                        dispatch_source_t timer = dispatch_source_create(
-                            DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
-                        dispatch_source_set_timer(timer,
-                            dispatch_walltime(NULL, (int64_t)(firstDelay * NSEC_PER_SEC)),
-                            (uint64_t)(firstDelay * NSEC_PER_SEC),
-                            (uint64_t)(0.005 * NSEC_PER_SEC));
-
-                        dispatch_source_set_event_handler(timer, ^{
-                            CALayer *ov = weakOverlay;
-                            CALayer *el = weakEmoteLayer;
-                            // Cancel si l'overlay n'est plus dans emoteLayer
-                            if (!ov || !el || ov.superlayer != el) {
-                                dispatch_source_cancel(timer);
-                                return;
+                            NSMutableArray<UIImage *>  *cgImages = [NSMutableArray array];
+                            NSMutableArray<NSNumber *> *delays   = [NSMutableArray array];
+                            for (NSInteger fi = 0; fi < frameCount; fi++) {
+                                CGImageRef cgImg = CGImageSourceCreateImageAtIndex(src, fi, NULL);
+                                if (!cgImg) continue;
+                                [cgImages addObject:[UIImage imageWithCGImage:cgImg]];
+                                CGImageRelease(cgImg);
+                                NSDictionary *props = (__bridge_transfer NSDictionary *)
+                                    CGImageSourceCopyPropertiesAtIndex(src, fi, NULL);
+                                NSNumber *delay = props[@"{WebP}"][@"DelayTime"]
+                                              ?: props[@"{GIF}"][@"DelayTime"]
+                                              ?: @(0.1);
+                                CGFloat d = delay.floatValue < 0.011 ? 0.1 : delay.floatValue;
+                                [delays addObject:@(d)];
                             }
-                            NSInteger idx = frameIdx;
-                            [CATransaction begin];
-                            [CATransaction setDisableActions:YES];
-                            ov.contents = (__bridge id)[imgsCopy[idx] CGImage];
-                            [CATransaction commit];
-                            NSInteger next = (idx + 1) % totalFrames;
-                            frameIdx = next;
-                            CGFloat nextDelay = [delaysCopy[next] floatValue];
-                            dispatch_source_set_timer(timer,
-                                dispatch_walltime(NULL, (int64_t)(nextDelay * NSEC_PER_SEC)),
-                                (uint64_t)(nextDelay * NSEC_PER_SEC),
-                                (uint64_t)(0.005 * NSEC_PER_SEC));
-                        });
+                            CFRelease(src);
+                            if (cgImages.count == 0) return;
 
-                        dispatch_resume(timer);
-                        objc_setAssociatedObject(animSub, &kS7TVDisplayLink,
-                            [[S7TVTimerWrapper alloc] initWithTimer:timer],
-                            OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                            NSArray<UIImage *>  *imgsFinal   = [cgImages copy];
+                            NSArray<NSNumber *> *delaysFinal = [delays copy];
+                            NSInteger totalFrames = (NSInteger)imgsFinal.count;
 
-                        [animMgr log:@"🎬 Overlay démarré: emote=%@ frames=%ld",
-                         emoteID, (long)totalFrames];
+                            // Revenir sur le main thread pour créer le layer et démarrer le timer
+                            dispatch_async(dispatch_get_main_queue(), ^{
+                                CALayer *el  = weakEmoteLayerBG;
+                                CALayer *sub = weakAnimSubBG;
+                                if (!el || !sub) return;
+                                // Guard : si le layer a déjà été recyclé (overlay déjà posé)
+                                CALayer *existingOverlay = objc_getAssociatedObject(sub, &kS7TVOverlayLayer);
+                                if (existingOverlay && existingOverlay.superlayer == el) return;
+
+                                // Recalculer la frame au moment de l'affichage (layout peut avoir changé)
+                                CGRect finalFrame = sub.frame;
+                                if (finalFrame.size.width <= 0 || finalFrame.size.height <= 0) {
+                                    finalFrame = frameCopy; // fallback sur la valeur capturée
+                                }
+                                if (finalFrame.size.width <= 0 || finalFrame.size.height <= 0) {
+                                    finalFrame = el.bounds;
+                                }
+
+                                CALayer *overlay = [CALayer layer];
+                                overlay.frame           = finalFrame;
+                                overlay.contentsGravity = kCAGravityResizeAspect;
+                                overlay.contentsScale   = [UIScreen mainScreen].scale;
+                                overlay.contents        = (__bridge id)[imgsFinal[0] CGImage];
+                                [el addSublayer:overlay];
+
+                                objc_setAssociatedObject(sub, &kS7TVOverlayLayer, overlay,
+                                                         OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+                                __block NSInteger frameIdx = 1 % totalFrames;
+                                __weak CALayer *weakOverlay = overlay;
+                                __weak CALayer *weakEl      = el;
+
+                                CGFloat firstDelay = [delaysFinal[0] floatValue];
+                                dispatch_source_t timer = dispatch_source_create(
+                                    DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+                                dispatch_source_set_timer(timer,
+                                    dispatch_walltime(NULL, (int64_t)(firstDelay * NSEC_PER_SEC)),
+                                    (uint64_t)(firstDelay * NSEC_PER_SEC),
+                                    (uint64_t)(0.005 * NSEC_PER_SEC));
+
+                                dispatch_source_set_event_handler(timer, ^{
+                                    CALayer *ov = weakOverlay;
+                                    CALayer *parentEl = weakEl;
+                                    if (!ov || !parentEl || ov.superlayer != parentEl) {
+                                        dispatch_source_cancel(timer);
+                                        return;
+                                    }
+                                    NSInteger idx = frameIdx;
+                                    [CATransaction begin];
+                                    [CATransaction setDisableActions:YES];
+                                    ov.contents = (__bridge id)[imgsFinal[idx] CGImage];
+                                    [CATransaction commit];
+                                    NSInteger next = (idx + 1) % totalFrames;
+                                    frameIdx = next;
+                                    CGFloat nextDelay = [delaysFinal[next] floatValue];
+                                    dispatch_source_set_timer(timer,
+                                        dispatch_walltime(NULL, (int64_t)(nextDelay * NSEC_PER_SEC)),
+                                        (uint64_t)(nextDelay * NSEC_PER_SEC),
+                                        (uint64_t)(0.005 * NSEC_PER_SEC));
+                                });
+
+                                dispatch_resume(timer);
+                                objc_setAssociatedObject(sub, &kS7TVDisplayLink,
+                                    [[S7TVTimerWrapper alloc] initWithTimer:timer],
+                                    OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+                                [[SevenTVManager sharedManager] log:@"🎬 Overlay démarré: emote=%@ frames=%ld",
+                                 emoteIDCopy, (long)totalFrames];
+                            });
+                        }); // fin dispatch background
                     }
                     // ────────────────────────────────────────────────────────────────
                 });

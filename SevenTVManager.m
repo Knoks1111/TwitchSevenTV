@@ -1270,6 +1270,28 @@ static const CGFloat kS7TVMenuHeight = 520.0;
 
 
 // ============================================================
+// MARK: - currentEmotes (channel + global fusionnées)
+//
+// Utilisé par willDisplayCell comme fallback quand popEmoteSequenceForCount:
+// retourne nil (ring buffer miss ou count mismatch).
+// Thread-safe via dispatch_sync sur emoteQueue (file concurrent en lecture).
+// ============================================================
+
+- (NSArray<SevenTVEmote *> *)currentEmotes {
+    __block NSArray<SevenTVEmote *> *result = nil;
+    dispatch_sync(self.emoteQueue, ^{
+        NSMutableArray<SevenTVEmote *> *all = [NSMutableArray array];
+        if (self.channelEmotes.count > 0)
+            [all addObjectsFromArray:self.channelEmotes.allValues];
+        if (self.globalEmotes.count > 0)
+            [all addObjectsFromArray:self.globalEmotes.allValues];
+        result = [all copy];
+    });
+    return result;
+}
+
+
+// ============================================================
 // MARK: - Picker d'emotes 7TV
 //
 // Affiché au-dessus de la barre de saisie Twitch quand l'utilisateur
