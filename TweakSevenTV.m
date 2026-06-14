@@ -1362,7 +1362,7 @@ static void TwitchSevenTVInit(void) {
                         for (CALayer *sub in caLayer.sublayers) {
                             if ([NSStringFromClass(object_getClass(sub)) containsString:@"Animated"]) {
                                 if ([sub respondsToSelector:NSSelectorFromString(@"startAnimating")]) {
-                                    [sub performSelector:NSSelectorFromString(@"startAnimating")];
+                                    ((void (*)(id, SEL))objc_msgSend)(sub, NSSelectorFromString(@"startAnimating"));
                                 }
                             }
                         }
