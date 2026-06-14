@@ -125,19 +125,6 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
 @property (nonatomic, weak) UIView   *pickerHeaderSliderContent; // slider + label valeur
 @property (nonatomic, weak) UILabel  *pickerSizeValueLabel;
 
-// Ring buffer des emotes ordonnées par message IRC.
-// Chaque entrée est un NSArray<SevenTVEmote*> dans l'ordre d'apparition dans le message.
-// Alimenté par injectSevenTVEmotesIntoIRCMessage:, consommé par popEmoteSequenceForCount:.
-// Capacité max : 50 entrées (messages récents).
-// Protégé par @synchronized(self).
-// Chaque entrée : @{ @"seq": NSArray<SevenTVEmote*>, @"ts": NSNumber(timeInterval) }
-@property (nonatomic, strong) NSMutableArray<NSDictionary *> *recentEmoteSequences;
-
-// Cache global des frames WebP décodées { emoteID → NSArray<UIImage*> }.
-// NSCache libère automatiquement sous pression mémoire — zéro OOM.
-// Thread-safe nativement.
-@property (nonatomic, strong) NSCache *decodedFramesCache;
-
 
 @end
 
@@ -321,15 +308,8 @@ static const CGFloat kS7TVMenuHeight = 520.0;
 
 
         _logBuffer = [NSMutableArray arrayWithCapacity:256];
-        _emoteRatios = [NSMutableDictionary dictionary];
+    _emoteRatios = [NSMutableDictionary dictionary];
         _logLock   = [[NSLock alloc] init];
-        _recentEmoteSequences = [NSMutableArray arrayWithCapacity:50];
-
-        // Cache frames WebP : 60 MB max (NSCache évicte sous pression mémoire)
-        // 60 MB ≈ 15–20 emotes animées décodées simultanément en 4x.
-        _decodedFramesCache = [[NSCache alloc] init];
-        _decodedFramesCache.name = @"tv.s7tv.decoded-frames";
-        _decodedFramesCache.totalCostLimit = 60 * 1024 * 1024; // 60 MB
 
         _favoriteEmoteIDs        = [NSMutableSet set];
         _emotePickerFavoriteEmotes = @[];
@@ -1195,31 +1175,6 @@ static const CGFloat kS7TVMenuHeight = 520.0;
 
     if (entries.count == 0) return raw;
 
-    // ── Ring buffer : stocker les emotes dans l'ordre pour willDisplayCell ──
-    // On collecte les SevenTVEmote* dans l'ordre du message (même boucle que entries).
-    // willDisplayCell les retrouvera via popEmoteSequenceForCount:.
-    {
-        NSMutableArray<SevenTVEmote *> *seq = [NSMutableArray arrayWithCapacity:entries.count];
-        for (NSString *word in words) {
-            if (word.length > 0) {
-                SevenTVEmote *em = channel[word] ?: global[word];
-                if (em) [seq addObject:em];
-            }
-        }
-        if (seq.count > 0) {
-            @synchronized (self) {
-                [self.recentEmoteSequences addObject:@{
-                    @"seq": [seq copy],
-                    @"ts":  @([[NSDate date] timeIntervalSinceReferenceDate])
-                }];
-                // Capacité max 50 : retirer le plus ancien si dépassé
-                if (self.recentEmoteSequences.count > 50) {
-                    [self.recentEmoteSequences removeObjectAtIndex:0];
-                }
-            }
-        }
-    }
-
     NSString *emoteTag = [entries componentsJoinedByString:@"/"];
     [self log:@"💉 Injection: emotes=%@", emoteTag];
 
@@ -1250,78 +1205,6 @@ static const CGFloat kS7TVMenuHeight = 520.0;
         }
         return [NSString stringWithFormat:@"@emotes=%@ %@", emoteTag, raw];
     }
-}
-
-
-// ============================================================
-// MARK: - Ring buffer : popEmoteSequenceForCount:
-//
-// Cherche dans _recentEmoteSequences la première entrée dont le
-// nombre d'emotes correspond à `count` (= nombre d'emote layers
-// trouvés dans la cellule par willDisplayCell).
-// Retire et retourne cette entrée, ou nil si non trouvée.
-//
-// Stratégie FIFO avec match par count :
-//   - Les messages arrivent dans l'ordre IRC → la cellule la plus
-//     ancienne non encore consommée est en tête du tableau.
-//   - On recherche en partant du début pour respecter l'ordre.
-//   - On retire UNIQUEMENT la première occurrence correspondante,
-//     pas toutes (un message avec 2 emotes ne consomme pas le suivant).
-// ============================================================
-
-- (NSArray<SevenTVEmote *> *)popEmoteSequenceForCount:(NSUInteger)count {
-    if (count == 0) return nil;
-    NSTimeInterval now = [[NSDate date] timeIntervalSinceReferenceDate];
-    @synchronized (self) {
-        for (NSUInteger i = 0; i < self.recentEmoteSequences.count; ) {
-            NSDictionary *entry = self.recentEmoteSequences[i];
-            NSTimeInterval ts = [entry[@"ts"] doubleValue];
-            // Expirer les entrées de plus de 2000ms
-            if (now - ts > 2.0) {
-                [self.recentEmoteSequences removeObjectAtIndex:i];
-                continue;
-            }
-            NSArray<SevenTVEmote *> *seq = entry[@"seq"];
-            // FIX : accepter seq.count <= count pour gérer les cellules mixtes
-            // (emotes 7TV + emotes Twitch native dans le même message).
-            // emoteLayers.count = total des layers Animated (7TV + Twitch).
-            // seq.count = uniquement les emotes 7TV injectées via IRC.
-            // Exemple : 1 emote 7TV + 1 emote Twitch native → emoteLayers.count=2, seq.count=1.
-            // Avec == : miss systématique. Avec <= : on prend la bonne séquence.
-            if (seq.count <= count && seq.count > 0) {
-                [self.recentEmoteSequences removeObjectAtIndex:i];
-                return seq;
-            }
-            i++;
-        }
-    }
-    return nil;
-}
-
-
-// ============================================================
-// MARK: - currentEmotes (channel + global fusionnées)
-//
-// Utilisé par willDisplayCell comme fallback quand popEmoteSequenceForCount:
-// retourne nil (ring buffer miss ou count mismatch).
-// Thread-safe via dispatch_sync sur emoteQueue (file concurrent en lecture).
-// ============================================================
-
-- (NSArray<SevenTVEmote *> *)currentEmotes {
-    __block NSArray<SevenTVEmote *> *result = nil;
-    dispatch_sync(self.emoteQueue, ^{
-        NSMutableArray<SevenTVEmote *> *all = [NSMutableArray array];
-        if (self.channelEmotes.count > 0)
-            [all addObjectsFromArray:self.channelEmotes.allValues];
-        if (self.globalEmotes.count > 0)
-            [all addObjectsFromArray:self.globalEmotes.allValues];
-        result = [all copy];
-    });
-    return result;
-}
-
-- (NSCache *)decodedFramesCache {
-    return _decodedFramesCache;
 }
 
 
