@@ -1186,15 +1186,27 @@ static void TwitchSevenTVInit(void) {
 
                     if (emoteLayers.count == 0) return;
 
+                    // ── Filtre 7TV vs Twitch native ─────────────────────────────────────
+                    // Les emotes 7TV utilisent de faux IDs (7tv_XXX) qui 404 sur le CDN Twitch
+                    // → animSub.contents == nil à 100ms.
+                    // Les emotes Twitch native chargent depuis le cache local → contents setté
+                    // quasi-instantanément.
+                    // Ce filtre empêche les cellules Twitch native de consommer le ring buffer.
+                    NSMutableArray<CALayer *> *sevenTVLayers = [NSMutableArray array];
+                    for (CALayer *sub in emoteLayers) {
+                        if (sub.contents == nil) [sevenTVLayers addObject:sub];
+                    }
+                    if (sevenTVLayers.count == 0) return; // Que des emotes Twitch native, rien à faire
+                    emoteLayers = sevenTVLayers;
+
                     // ── Ring buffer : récupérer les emotes ordonnées ─────────────────
                     SevenTVManager *animMgr = [SevenTVManager sharedManager];
                     NSArray<SevenTVEmote *> *emoteSequence =
                         [animMgr popEmoteSequenceForCount:emoteLayers.count];
 
-                    // Ring buffer miss → cellule sans emote 7TV (Twitch native) ou entrée expirée.
-                    // On ne pose aucun overlay pour éviter les mauvaises emotes sur des cellules Twitch.
+                    // Ring buffer miss → entrée expirée ou count mismatch.
                     if (!emoteSequence || emoteSequence.count != emoteLayers.count) {
-                        [animMgr log:@"⚠️ Ring buffer miss (%lu layers) — skip", (unsigned long)emoteLayers.count];
+                        [animMgr log:@"⚠️ Ring buffer miss (%lu 7TV layers) — skip", (unsigned long)emoteLayers.count];
                         return;
                     }
 
