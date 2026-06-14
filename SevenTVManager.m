@@ -132,6 +132,11 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
 // Protégé par @synchronized(self).
 @property (nonatomic, strong) NSMutableArray<NSArray<SevenTVEmote *> *> *recentEmoteSequences;
 
+// Cache global des frames WebP décodées { emoteID → NSArray<UIImage*> }.
+// NSCache libère automatiquement sous pression mémoire — zéro OOM.
+// Thread-safe nativement.
+@property (nonatomic, strong) NSCache *decodedFramesCache;
+
 
 @end
 
@@ -318,6 +323,12 @@ static const CGFloat kS7TVMenuHeight = 520.0;
         _emoteRatios = [NSMutableDictionary dictionary];
         _logLock   = [[NSLock alloc] init];
         _recentEmoteSequences = [NSMutableArray arrayWithCapacity:50];
+
+        // Cache frames WebP : 60 MB max (NSCache évicte sous pression mémoire)
+        // 60 MB ≈ 15–20 emotes animées décodées simultanément en 4x.
+        _decodedFramesCache = [[NSCache alloc] init];
+        _decodedFramesCache.name = @"tv.s7tv.decoded-frames";
+        _decodedFramesCache.totalCostLimit = 60 * 1024 * 1024; // 60 MB
 
         _favoriteEmoteIDs        = [NSMutableSet set];
         _emotePickerFavoriteEmotes = @[];
@@ -1288,6 +1299,10 @@ static const CGFloat kS7TVMenuHeight = 520.0;
         result = [all copy];
     });
     return result;
+}
+
+- (NSCache *)decodedFramesCache {
+    return _decodedFramesCache;
 }
 
 
