@@ -1188,13 +1188,11 @@ static const CGFloat kS7TVMenuHeight = 520.0;
     // willDisplayCell les retrouvera via popEmoteSequenceForCount:.
     {
         NSMutableArray<SevenTVEmote *> *seq = [NSMutableArray arrayWithCapacity:entries.count];
-        NSUInteger p2 = 0;
         for (NSString *word in words) {
             if (word.length > 0) {
                 SevenTVEmote *em = channel[word] ?: global[word];
                 if (em) [seq addObject:em];
             }
-            p2 += word.length + 1;
         }
         if (seq.count > 0) {
             @synchronized (self) {
