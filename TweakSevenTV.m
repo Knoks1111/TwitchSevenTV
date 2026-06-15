@@ -1376,6 +1376,21 @@ static void s7tv_showOrientationToast(BOOL locked) {
 static void s7tv_hook_windowscene_setorientation(void) {
     Class wsCls = [UIWindowScene class];
 
+    // ── Dump runtime : trouver le bon sélecteur privé ────────────────────────
+    unsigned int count = 0;
+    Method *methods = class_copyMethodList(wsCls, &count);
+    NSMutableArray *found = [NSMutableArray array];
+    for (unsigned int i = 0; i < count; i++) {
+        NSString *name = NSStringFromSelector(method_getName(methods[i]));
+        if ([name containsString:@"rientation"] || [name containsString:@"otat"]) {
+            [found addObject:name];
+        }
+    }
+    free(methods);
+    [[SevenTVManager sharedManager] log:@"🔍 UIWindowScene méthodes orient/rotat: %@",
+        [found componentsJoinedByString:@" | "]];
+    // ─────────────────────────────────────────────────────────────────────────
+
     // Essai avec animated:
     SEL sel1 = NSSelectorFromString(@"_setInterfaceOrientation:animated:");
     Method m1 = class_getInstanceMethod(wsCls, sel1);
