@@ -1332,8 +1332,10 @@ static void s7tv_showOrientationToast(BOOL locked) {
                 s_lockedOrientationMask = UIInterfaceOrientationMaskPortrait; break;
         }
 
-        // Forcer immédiatement la géométrie + démarrer l'observer
-        s7tv_forceSceneOrientation(s_lockedOrientationMask);
+        // Le mask est posé — supportedInterfaceOrientationsForWindow: bloque dès maintenant.
+        // On n'appelle PAS requestGeometryUpdate ici : l'utilisateur est déjà dans la bonne
+        // orientation, un appel inutile ouvre une fenêtre où la première rotation physique
+        // peut passer avant que le cycle de géométrie soit stabilisé.
         s7tv_startOrientationObserver();
         [self log:@"🔒 Orientation verrouillée (orientation=%ld)", (long)current];
 
