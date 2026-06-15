@@ -1166,7 +1166,10 @@ static void s7tv_forceSceneOrientation(UIInterfaceOrientationMask mask) {
     }
 }
 
-// ── Démarre l'observer qui contre chaque rotation physique ───────────────────
+// ── Démarre l'observer qui journalise les rotations physiques ────────────────
+// Note : le blocage visuel est assuré par supportedInterfaceOrientationsForWindow:
+// On n'appelle plus requestGeometryUpdate ici — c'était lui qui causait le flash
+// "rotate puis snap back" en jouant une animation de retour inutile.
 static void s7tv_startOrientationObserver(void) {
     if (s_orientationObserver) return;
     [[UIDevice currentDevice] beginGeneratingDeviceOrientationNotifications];
@@ -1176,8 +1179,7 @@ static void s7tv_startOrientationObserver(void) {
                      queue:[NSOperationQueue mainQueue]
                 usingBlock:^(NSNotification *n) {
         if (!s_orientationLocked) return;
-        // Re-forcer la géométrie à chaque rotation physique
-        s7tv_forceSceneOrientation(s_lockedOrientationMask);
+        [[SevenTVManager sharedManager] log:@"🔒 Rotation physique bloquée (verrou actif)"];
     }];
 }
 
