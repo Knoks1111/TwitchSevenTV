@@ -1127,64 +1127,46 @@ static void s7tv_hook_network_image_requester(void) {
 
 // ────────────────────────────────────────────────────────────
 // MARK: - Verrou d'orientation (bouton Share hijacké)
+// Approche : on ment sur l'orientation au niveau des getters ObjC,
+// pas de transform → pas de rendu cassé avec SwiftUI.
+//
+//   UIWindowScene.interfaceOrientation  → chemin SwiftUI (layout)
+//   UIDevice.orientation                → chemin UIKit legacy
+//   shouldAutorotate + supportedInterfaceOrientations → bloque UIKit
 // ────────────────────────────────────────────────────────────
-
-// ── Clé associated object pour marquer le bouton déjà hijacké ── (déclarée en tête de fichier)
 
 // ── Orientation verrouillée capturée au moment du lock ───────────────────────
 static UIInterfaceOrientation s_lockedOrientation = UIInterfaceOrientationUnknown;
 
-// ── Applique la transform visuelle sur toutes les fenêtres ──────────────────
-static void s7tv_applyOrientationTransform(UIInterfaceOrientation targetOrientation) {
-    CGFloat angle = 0.0;
-    CGSize screenSize = [UIScreen mainScreen].bounds.size;
+// ── IMPs originaux sauvegardés ───────────────────────────────────────────────
+static IMP s_origWindowSceneOrientationIMP = NULL;
+static IMP s_origDeviceOrientationIMP      = NULL;
 
-    switch (targetOrientation) {
-        case UIInterfaceOrientationLandscapeLeft:       angle = -M_PI_2; break;
-        case UIInterfaceOrientationLandscapeRight:      angle =  M_PI_2; break;
-        case UIInterfaceOrientationPortraitUpsideDown:  angle =  M_PI;   break;
-        default:                                        angle =  0.0;    break;
-    }
-
-    CGFloat w = MIN(screenSize.width, screenSize.height);
-    CGFloat h = MAX(screenSize.width, screenSize.height);
-
-    for (UIWindow *win in [UIApplication sharedApplication].windows) {
-        if ([NSStringFromClass([win class]) isEqualToString:@"SevenTVFloatingWindow"]) continue;
-
-        if (angle == 0.0) {
-            win.transform = CGAffineTransformIdentity;
-            win.frame     = CGRectMake(0, 0, screenSize.width, screenSize.height);
-            win.bounds    = CGRectMake(0, 0, screenSize.width, screenSize.height);
-        } else {
-            win.transform = CGAffineTransformMakeRotation(angle);
-            win.bounds    = CGRectMake(0, 0, h, w);
-            win.center    = CGPointMake(w / 2.0, h / 2.0);
-        }
+// ── Conversion UIInterfaceOrientation → UIDeviceOrientation ──────────────────
+// (sens inversés : device LandscapeLeft = interface LandscapeRight)
+static UIDeviceOrientation s7tv_interfaceToDeviceOrientation(UIInterfaceOrientation io) {
+    switch (io) {
+        case UIInterfaceOrientationLandscapeLeft:      return UIDeviceOrientationLandscapeRight;
+        case UIInterfaceOrientationLandscapeRight:     return UIDeviceOrientationLandscapeLeft;
+        case UIInterfaceOrientationPortraitUpsideDown: return UIDeviceOrientationPortraitUpsideDown;
+        default:                                        return UIDeviceOrientationPortrait;
     }
 }
 
-// ── Observer rotations physiques pour maintenir le verrou ────────────────────
-static id s_orientationObserver = nil;
-
-static void s7tv_startOrientationObserver(void) {
-    if (s_orientationObserver) return;
-    [[UIDevice currentDevice] beginGeneratingDeviceOrientationNotifications];
-    s_orientationObserver = [[NSNotificationCenter defaultCenter]
-        addObserverForName:UIDeviceOrientationDidChangeNotification
-                    object:nil
-                     queue:[NSOperationQueue mainQueue]
-                usingBlock:^(NSNotification *n) {
-        if (!s_orientationLocked) return;
-        s7tv_applyOrientationTransform(s_lockedOrientation);
-    }];
+// ── Getter UIWindowScene.interfaceOrientation (chemin SwiftUI) ───────────────
+static UIInterfaceOrientation s7tv_windowScene_interfaceOrientation(id self, SEL _cmd) {
+    if (s_orientationLocked && s_lockedOrientation != UIInterfaceOrientationUnknown) {
+        return s_lockedOrientation;
+    }
+    return ((UIInterfaceOrientation(*)(id, SEL))s_origWindowSceneOrientationIMP)(self, _cmd);
 }
 
-static void s7tv_stopOrientationObserver(void) {
-    if (!s_orientationObserver) return;
-    [[NSNotificationCenter defaultCenter] removeObserver:s_orientationObserver];
-    s_orientationObserver = nil;
-    [[UIDevice currentDevice] endGeneratingDeviceOrientationNotifications];
+// ── Getter UIDevice.orientation (chemin UIKit legacy) ────────────────────────
+static UIDeviceOrientation s7tv_device_orientation(id self, SEL _cmd) {
+    if (s_orientationLocked && s_lockedOrientation != UIInterfaceOrientationUnknown) {
+        return s7tv_interfaceToDeviceOrientation(s_lockedOrientation);
+    }
+    return ((UIDeviceOrientation(*)(id, SEL))s_origDeviceOrientationIMP)(self, _cmd);
 }
 
 // ── Toast ─────────────────────────────────────────────────────────────────────
@@ -1293,7 +1275,7 @@ static void s7tv_showOrientationToast(BOOL locked) {
     s_orientationLocked = !s_orientationLocked;
 
     if (s_orientationLocked) {
-        // Capturer l'orientation courante de la scène
+        // Capturer l'orientation courante AVANT que notre hook ne mente
         UIWindowScene *activeScene = nil;
         for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
             if ([scene isKindOfClass:[UIWindowScene class]] &&
@@ -1302,9 +1284,17 @@ static void s7tv_showOrientationToast(BOOL locked) {
                 break;
             }
         }
-        UIInterfaceOrientation current = activeScene
-            ? activeScene.interfaceOrientation
-            : UIInterfaceOrientationPortrait;
+
+        UIInterfaceOrientation current;
+        if (s_origWindowSceneOrientationIMP && activeScene) {
+            // Lire via l'IMP original pour éviter de lire notre propre hook
+            current = ((UIInterfaceOrientation(*)(id, SEL))s_origWindowSceneOrientationIMP)(
+                activeScene, @selector(interfaceOrientation));
+        } else {
+            current = activeScene
+                ? activeScene.interfaceOrientation
+                : UIInterfaceOrientationPortrait;
+        }
 
         s_lockedOrientation = current;
 
@@ -1319,24 +1309,14 @@ static void s7tv_showOrientationToast(BOOL locked) {
                 s_lockedOrientationMask = UIInterfaceOrientationMaskPortrait; break;
         }
 
-        // Appliquer la transform visuelle immédiatement + démarrer l'observer
-        [UIView animateWithDuration:0.25 animations:^{
-            s7tv_applyOrientationTransform(s_lockedOrientation);
-        }];
-        s7tv_startOrientationObserver();
-
+        // Pas de transform : les getters mentent déjà → SwiftUI ne recalcule pas le layout
         [self log:@"🔒 Orientation verrouillée (orientation=%ld)", (long)current];
 
     } else {
         s_lockedOrientationMask = UIInterfaceOrientationMaskAll;
         s_lockedOrientation     = UIInterfaceOrientationUnknown;
 
-        s7tv_stopOrientationObserver();
-
-        [UIView animateWithDuration:0.25 animations:^{
-            s7tv_applyOrientationTransform(UIInterfaceOrientationUnknown); // angle=0 → reset
-        }];
-
+        // Laisser UIKit/SwiftUI se recaler sur l'orientation physique réelle
         [UIViewController attemptRotationToDeviceOrientation];
         [self log:@"🔓 Orientation déverrouillée"];
     }
@@ -1363,6 +1343,7 @@ static void s7tv_showOrientationToast(BOOL locked) {
 
 // ── Enregistrement des swizzles orientation ───────────────────────────────────
 static void s7tv_swizzle_orientation_lock(void) {
+    // ── UIViewController : blocage rotation UIKit ────────────────────────────
     s7tv_swizzle([UIViewController class],
                  [UIViewController class],
                  @selector(supportedInterfaceOrientations),
@@ -1372,6 +1353,28 @@ static void s7tv_swizzle_orientation_lock(void) {
                  [UIViewController class],
                  @selector(shouldAutorotate),
                  @selector(s7tv_shouldAutorotate));
+
+    // ── UIWindowScene.interfaceOrientation (chemin SwiftUI layout) ───────────
+    Class wsCls   = [UIWindowScene class];
+    Method wsMethod = class_getInstanceMethod(wsCls, @selector(interfaceOrientation));
+    if (wsMethod) {
+        s_origWindowSceneOrientationIMP = method_getImplementation(wsMethod);
+        method_setImplementation(wsMethod, (IMP)s7tv_windowScene_interfaceOrientation);
+        [[SevenTVManager sharedManager] log:@"✅ UIWindowScene.interfaceOrientation hooké"];
+    } else {
+        [[SevenTVManager sharedManager] log:@"⚠️ UIWindowScene.interfaceOrientation introuvable"];
+    }
+
+    // ── UIDevice.orientation (chemin UIKit legacy) ───────────────────────────
+    Class devCls    = [UIDevice class];
+    Method devMethod = class_getInstanceMethod(devCls, @selector(orientation));
+    if (devMethod) {
+        s_origDeviceOrientationIMP = method_getImplementation(devMethod);
+        method_setImplementation(devMethod, (IMP)s7tv_device_orientation);
+        [[SevenTVManager sharedManager] log:@"✅ UIDevice.orientation hooké"];
+    } else {
+        [[SevenTVManager sharedManager] log:@"⚠️ UIDevice.orientation introuvable"];
+    }
 
     [[SevenTVManager sharedManager] log:@"✅ Swizzles verrou orientation enregistrés"];
 }
