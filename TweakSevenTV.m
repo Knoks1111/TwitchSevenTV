@@ -1262,7 +1262,19 @@ static void s7tv_showOrientationToast(BOOL locked) {
     });
 }
 
-// ── Fallback UIKit : supportedInterfaceOrientations ──────────────────────────
+// ── Hook principal : UIApplication.supportedInterfaceOrientationsForWindow: ──
+// C'est le check système qui prime sur toutes les overrides Twitch dans les VCs.
+@interface UIApplication (S7TVOrientationLock)
+- (UIInterfaceOrientationMask)s7tv_supportedInterfaceOrientationsForWindow:(UIWindow *)window;
+@end
+@implementation UIApplication (S7TVOrientationLock)
+- (UIInterfaceOrientationMask)s7tv_supportedInterfaceOrientationsForWindow:(UIWindow *)window {
+    if (s_orientationLocked) return s_lockedOrientationMask;
+    return [self s7tv_supportedInterfaceOrientationsForWindow:window];
+}
+@end
+
+// ── Garde UIViewController au cas où (certains chemins UIKit passent par là) ──
 @interface UIViewController (S7TVOrientationLock)
 - (UIInterfaceOrientationMask)s7tv_supportedInterfaceOrientations;
 @end
@@ -1273,7 +1285,6 @@ static void s7tv_showOrientationToast(BOOL locked) {
 }
 @end
 
-// ── Fallback UIKit : shouldAutorotate ─────────────────────────────────────────
 @interface UIViewController (S7TVAutorotate)
 - (BOOL)s7tv_shouldAutorotate;
 @end
@@ -1356,7 +1367,13 @@ static void s7tv_showOrientationToast(BOOL locked) {
 
 // ── Enregistrement des swizzles orientation ───────────────────────────────────
 static void s7tv_swizzle_orientation_lock(void) {
-    // shouldAutorotate + supportedInterfaceOrientations : bloque le chemin UIKit
+    // UIApplication : check système, priorité maximale, ignoré par Twitch
+    s7tv_swizzle([UIApplication class],
+                 [UIApplication class],
+                 @selector(supportedInterfaceOrientationsForWindow:),
+                 NSSelectorFromString(@"s7tv_supportedInterfaceOrientationsForWindow:"));
+
+    // UIViewController : chemins UIKit secondaires
     s7tv_swizzle([UIViewController class],
                  [UIViewController class],
                  @selector(supportedInterfaceOrientations),
