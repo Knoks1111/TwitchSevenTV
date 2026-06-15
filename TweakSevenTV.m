@@ -1306,10 +1306,32 @@ static void s7tv_showOrientationToast(BOOL locked) {
 @end
 @implementation SevenTVManager (OrientationLock)
 
+static void s7tv_install_orientation_swizzles(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        s7tv_swizzle([UIApplication class],
+                     [UIApplication class],
+                     @selector(supportedInterfaceOrientationsForWindow:),
+                     NSSelectorFromString(@"s7tv_supportedInterfaceOrientationsForWindow:"));
+        s7tv_swizzle([UIViewController class],
+                     [UIViewController class],
+                     @selector(supportedInterfaceOrientations),
+                     @selector(s7tv_supportedInterfaceOrientations));
+        s7tv_swizzle([UIViewController class],
+                     [UIViewController class],
+                     @selector(shouldAutorotate),
+                     @selector(s7tv_shouldAutorotate));
+        [[SevenTVManager sharedManager] log:@"✅ Swizzles verrou orientation installés (premier lock)"];
+    });
+}
+
 - (void)s7tv_toggleOrientationLock:(UIButton *)sender {
     s_orientationLocked = !s_orientationLocked;
 
     if (s_orientationLocked) {
+        // Installer les swizzles seulement maintenant, pas au lancement
+        s7tv_install_orientation_swizzles();
+
         // Capturer l'orientation courante de la scène
         UIWindowScene *activeScene = nil;
         for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
@@ -1373,24 +1395,7 @@ static void s7tv_showOrientationToast(BOOL locked) {
 @end
 
 static void s7tv_swizzle_orientation_lock(void) {
-    // UIApplication : check système, priorité maximale, ignoré par Twitch
-    s7tv_swizzle([UIApplication class],
-                 [UIApplication class],
-                 @selector(supportedInterfaceOrientationsForWindow:),
-                 NSSelectorFromString(@"s7tv_supportedInterfaceOrientationsForWindow:"));
-
-    // UIViewController : chemins UIKit secondaires
-    s7tv_swizzle([UIViewController class],
-                 [UIViewController class],
-                 @selector(supportedInterfaceOrientations),
-                 @selector(s7tv_supportedInterfaceOrientations));
-
-    s7tv_swizzle([UIViewController class],
-                 [UIViewController class],
-                 @selector(shouldAutorotate),
-                 @selector(s7tv_shouldAutorotate));
-
-    [[SevenTVManager sharedManager] log:@"✅ Swizzles verrou orientation enregistrés"];
+    // Swizzles installés à la demande au premier lock, pas au lancement.
 }
 
 
