@@ -1369,8 +1369,55 @@ static void s7tv_showOrientationToast(BOOL locked) {
 
 @end
 
-// ── Enregistrement des swizzles orientation ───────────────────────────────────
+// ── Hook privé UIWindowScene._setInterfaceOrientation:animated: ──────────────
+// C'est ici que l'animation de rotation est déclenchée, avant même que
+// supportedInterfaceOrientationsForWindow: puisse la bloquer visuellement.
+// En interceptant à ce niveau on coupe la rotation au tout premier frame.
+static void s7tv_hook_windowscene_setorientation(void) {
+    Class wsCls = [UIWindowScene class];
+
+    // Essai avec animated:
+    SEL sel1 = NSSelectorFromString(@"_setInterfaceOrientation:animated:");
+    Method m1 = class_getInstanceMethod(wsCls, sel1);
+    if (m1) {
+        IMP orig = method_getImplementation(m1);
+        method_setImplementation(m1, imp_implementationWithBlock(
+            ^(id self_, UIInterfaceOrientation orientation, BOOL animated) {
+                if (s_orientationLocked && orientation != s_lockedOrientation) {
+                    [[SevenTVManager sharedManager]
+                        log:@"🔒 _setInterfaceOrientation:animated: bloqué (%ld)", (long)orientation];
+                    return;
+                }
+                ((void(*)(id,SEL,UIInterfaceOrientation,BOOL))orig)(self_, sel1, orientation, animated);
+            }));
+        [[SevenTVManager sharedManager] log:@"✅ _setInterfaceOrientation:animated: hooké"];
+        return;
+    }
+
+    // Fallback sans animated:
+    SEL sel2 = NSSelectorFromString(@"_setInterfaceOrientation:");
+    Method m2 = class_getInstanceMethod(wsCls, sel2);
+    if (m2) {
+        IMP orig = method_getImplementation(m2);
+        method_setImplementation(m2, imp_implementationWithBlock(
+            ^(id self_, UIInterfaceOrientation orientation) {
+                if (s_orientationLocked && orientation != s_lockedOrientation) {
+                    [[SevenTVManager sharedManager]
+                        log:@"🔒 _setInterfaceOrientation: bloqué (%ld)", (long)orientation];
+                    return;
+                }
+                ((void(*)(id,SEL,UIInterfaceOrientation))orig)(self_, sel2, orientation);
+            }));
+        [[SevenTVManager sharedManager] log:@"✅ _setInterfaceOrientation: hooké"];
+        return;
+    }
+
+    [[SevenTVManager sharedManager] log:@"⚠️ _setInterfaceOrientation(:animated:) introuvable sur UIWindowScene"];
+}
 static void s7tv_swizzle_orientation_lock(void) {
+    // Hook privé UIWindowScene : bloque la rotation avant l'animation (premier frame)
+    s7tv_hook_windowscene_setorientation();
+
     // UIApplication : check système, priorité maximale, ignoré par Twitch
     s7tv_swizzle([UIApplication class],
                  [UIApplication class],
