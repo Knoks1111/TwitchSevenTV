@@ -1304,6 +1304,27 @@ static void s7tv_showOrientationToast(BOOL locked) {
 @implementation SevenTVManager (OrientationLock)
 
 - (void)s7tv_toggleOrientationLock:(UIButton *)sender {
+
+    // ── Dump hiérarchie vues Twitch (pour trouver la vue player) ──────────────
+    [self log:@"🔍 DUMP vues Twitch.*  ──────────────────────────"];
+    for (UIWindow *win in [UIApplication sharedApplication].windows) {
+        NSMutableArray *stack = [NSMutableArray arrayWithObject:win];
+        while (stack.count) {
+            UIView *v = stack[0]; [stack removeObjectAtIndex:0];
+            NSString *cn = NSStringFromClass([v class]);
+            if ([cn hasPrefix:@"Twitch."]) {
+                [self log:@"  📦 %@  frame=(%.0f,%.0f,%.0f,%.0f)  accID='%@'",
+                 cn,
+                 v.frame.origin.x, v.frame.origin.y,
+                 v.frame.size.width, v.frame.size.height,
+                 v.accessibilityIdentifier ?: @""];
+            }
+            [stack addObjectsFromArray:v.subviews];
+        }
+    }
+    [self log:@"🔍 FIN DUMP ─────────────────────────────────────"];
+    // ──────────────────────────────────────────────────────────────────────────
+
     s_orientationLocked = !s_orientationLocked;
 
     if (s_orientationLocked) {
