@@ -33,8 +33,9 @@ static const char kS7TVBitsHijacked    = 6;
 static const char kS7TVOrigSectionCount = 7;
 static const char kS7TVShareHijacked   = 8;   // verrou orientation
 
-// État global verrou d'orientation (visuel uniquement — aucun swizzle système)
-static BOOL s_orientationLocked = NO;
+// État global verrou d'orientation
+static BOOL s_orientationLocked             = NO;
+static UIInterfaceOrientationMask s_lockedOrientationMask = UIInterfaceOrientationMaskAll;
 
 
 // ────────────────────────────────────────────────────────────
@@ -132,9 +133,8 @@ static void s7tvLogResponds(id obj, NSArray<NSString *> *selectors, NSInteger sa
     NSString *selfClass = NSStringFromClass([self class]);
 
     // ── Hijack bouton Share → verrou orientation ──────────────────────────────
-    // Uniquement dans la TheaterPlayerControlsView du player plein écran,
-    // PAS dans celle du feed (page d'accueil) — on distingue via la classe
-    // de la fenêtre parente : PictureInPictureWindow pour le vrai theater.
+    // Guard : uniquement dans la PictureInPictureWindow (player theater),
+    // pas dans les TheaterPlayerControlsView du feed page d'accueil.
     if ([selfClass isEqualToString:@"Twitch.TheaterPlayerControlsView"] && self.window &&
         [NSStringFromClass([self.window class]) isEqualToString:@"Twitch.PictureInPictureWindow"]) {
         if (!objc_getAssociatedObject(self, &kS7TVShareHijacked)) {
@@ -1130,11 +1130,68 @@ static void s7tv_hook_network_image_requester(void) {
 
 // ────────────────────────────────────────────────────────────
 // MARK: - Verrou d'orientation (bouton Share hijacké)
-// Approche visuelle : aucun swizzle système, aucune interférence
-// avec la rotation native de Twitch. Le bouton est un toggle
-// cosmétique (icône + toast) — la fausse rotation sur TheaterView
-// sera appliquée ici quand le stream est ouvert.
+// Approche : requestGeometryUpdate (iOS 16+) pour forcer l'orientation
+// de la scène au niveau système — c'est la seule API qui contrôle
+// réellement la rotation visuelle sur les apps SwiftUI modernes.
+// Combiné avec shouldAutorotate=NO pour bloquer UIKit en parallèle.
 // ────────────────────────────────────────────────────────────
+
+// ── Orientation verrouillée capturée au moment du lock ───────────────────────
+static UIInterfaceOrientation s_lockedOrientation = UIInterfaceOrientationUnknown;
+
+// ── Observer rotation physique ───────────────────────────────────────────────
+static id s_orientationObserver = nil;
+
+// ── Force la géométrie de toutes les scènes actives ─────────────────────────
+static void s7tv_forceSceneOrientation(UIInterfaceOrientationMask mask) {
+    // iOS 16+ : UIWindowScene requestGeometryUpdate:errorHandler:
+    // Appelé via objc_msgSend pour éviter les erreurs de header manquant dans le SDK Theos
+    SEL reqSel   = NSSelectorFromString(@"requestGeometryUpdate:errorHandler:");
+    Class prefsCls = NSClassFromString(@"UIWindowSceneGeometryPreferencesIOS");
+
+    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+        UIWindowScene *ws = (UIWindowScene *)scene;
+
+        if (prefsCls && [ws respondsToSelector:reqSel]) {
+            id prefs = [[prefsCls alloc] initWithInterfaceOrientations:mask];
+            ((void(*)(id, SEL, id, id))objc_msgSend)(ws, reqSel, prefs, nil);
+        } else {
+            // Fallback iOS < 16 : setStatusBarOrientation:animated: (déprécié)
+            UIInterfaceOrientation target = UIInterfaceOrientationPortrait;
+            if (mask == UIInterfaceOrientationMaskLandscapeLeft)               target = UIInterfaceOrientationLandscapeLeft;
+            else if (mask == UIInterfaceOrientationMaskLandscapeRight)         target = UIInterfaceOrientationLandscapeRight;
+            else if (mask == UIInterfaceOrientationMaskPortraitUpsideDown)     target = UIInterfaceOrientationPortraitUpsideDown;
+            SEL fbSel = NSSelectorFromString(@"setStatusBarOrientation:animated:");
+            ((void(*)(id, SEL, UIInterfaceOrientation, BOOL))objc_msgSend)(
+                [UIApplication sharedApplication], fbSel, target, NO);
+        }
+    }
+}
+
+// ── Démarre l'observer qui journalise les rotations physiques ────────────────
+// Note : le blocage visuel est assuré par supportedInterfaceOrientationsForWindow:
+// On n'appelle plus requestGeometryUpdate ici — c'était lui qui causait le flash
+// "rotate puis snap back" en jouant une animation de retour inutile.
+static void s7tv_startOrientationObserver(void) {
+    if (s_orientationObserver) return;
+    [[UIDevice currentDevice] beginGeneratingDeviceOrientationNotifications];
+    s_orientationObserver = [[NSNotificationCenter defaultCenter]
+        addObserverForName:UIDeviceOrientationDidChangeNotification
+                    object:nil
+                     queue:[NSOperationQueue mainQueue]
+                usingBlock:^(NSNotification *n) {
+        if (!s_orientationLocked) return;
+        [[SevenTVManager sharedManager] log:@"🔒 Rotation physique bloquée (verrou actif)"];
+    }];
+}
+
+static void s7tv_stopOrientationObserver(void) {
+    if (!s_orientationObserver) return;
+    [[NSNotificationCenter defaultCenter] removeObserver:s_orientationObserver];
+    s_orientationObserver = nil;
+    [[UIDevice currentDevice] endGeneratingDeviceOrientationNotifications];
+}
 
 // ── Toast ─────────────────────────────────────────────────────────────────────
 static void s7tv_showOrientationToast(BOOL locked) {
@@ -1210,6 +1267,39 @@ static void s7tv_showOrientationToast(BOOL locked) {
     });
 }
 
+// ── Hook principal : UIApplication.supportedInterfaceOrientationsForWindow: ──
+// C'est le check système qui prime sur toutes les overrides Twitch dans les VCs.
+@interface UIApplication (S7TVOrientationLock)
+- (UIInterfaceOrientationMask)s7tv_supportedInterfaceOrientationsForWindow:(UIWindow *)window;
+@end
+@implementation UIApplication (S7TVOrientationLock)
+- (UIInterfaceOrientationMask)s7tv_supportedInterfaceOrientationsForWindow:(UIWindow *)window {
+    if (s_orientationLocked) return s_lockedOrientationMask;
+    return [self s7tv_supportedInterfaceOrientationsForWindow:window];
+}
+@end
+
+// ── Garde UIViewController au cas où (certains chemins UIKit passent par là) ──
+@interface UIViewController (S7TVOrientationLock)
+- (UIInterfaceOrientationMask)s7tv_supportedInterfaceOrientations;
+@end
+@implementation UIViewController (S7TVOrientationLock)
+- (UIInterfaceOrientationMask)s7tv_supportedInterfaceOrientations {
+    if (s_orientationLocked) return s_lockedOrientationMask;
+    return [self s7tv_supportedInterfaceOrientations];
+}
+@end
+
+@interface UIViewController (S7TVAutorotate)
+- (BOOL)s7tv_shouldAutorotate;
+@end
+@implementation UIViewController (S7TVAutorotate)
+- (BOOL)s7tv_shouldAutorotate {
+    if (s_orientationLocked) return NO;
+    return [self s7tv_shouldAutorotate];
+}
+@end
+
 // ── Action toggle ─────────────────────────────────────────────────────────────
 @interface SevenTVManager (OrientationLock)
 - (void)s7tv_toggleOrientationLock:(UIButton *)sender;
@@ -1219,54 +1309,48 @@ static void s7tv_showOrientationToast(BOOL locked) {
 - (void)s7tv_toggleOrientationLock:(UIButton *)sender {
     s_orientationLocked = !s_orientationLocked;
 
-    // ── Fausse rotation visuelle sur TheaterView ──────────────────────────────
-    // On cherche TheaterView (accID=theater-view) dans la PictureInPictureWindow.
-    // On lui applique un CGAffineTransform rotation -90° pour simuler le landscape
-    // sans toucher à l'orientation système → zéro glitch, zéro interférence.
-    UIView *theaterView = nil;
-    for (UIWindow *win in [UIApplication sharedApplication].windows) {
-        if (![NSStringFromClass([win class]) isEqualToString:@"Twitch.PictureInPictureWindow"]) continue;
-        NSMutableArray *stack = [NSMutableArray arrayWithObject:win];
-        while (stack.count) {
-            UIView *v = stack[0]; [stack removeObjectAtIndex:0];
-            if ([[v accessibilityIdentifier] isEqualToString:@"theater-view"]) {
-                theaterView = v; break;
+    if (s_orientationLocked) {
+        // Capturer l'orientation courante de la scène
+        UIWindowScene *activeScene = nil;
+        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+            if ([scene isKindOfClass:[UIWindowScene class]] &&
+                scene.activationState == UISceneActivationStateForegroundActive) {
+                activeScene = (UIWindowScene *)scene;
+                break;
             }
-            [stack addObjectsFromArray:v.subviews];
         }
-        if (theaterView) break;
-    }
+        UIInterfaceOrientation current = activeScene
+            ? activeScene.interfaceOrientation
+            : UIInterfaceOrientationPortrait;
 
-    if (theaterView) {
-        if (s_orientationLocked) {
-            // TheaterView est nativement 844×390 (landscape dans sa fenêtre).
-            // L'écran est en portrait 390×844.
-            // Rotation -π/2 : la vue pivote pour remplir l'écran portrait.
-            CGRect screen = [UIScreen mainScreen].bounds;
-            CGFloat screenW = MIN(screen.size.width, screen.size.height); // 390
-            CGFloat screenH = MAX(screen.size.width, screen.size.height); // 844
-            CGFloat tvW = theaterView.bounds.size.width  ?: screenH;
-            CGFloat tvH = theaterView.bounds.size.height ?: screenW;
-            CGFloat scale = MIN(screenH / tvW, screenW / tvH);
-            CGAffineTransform t = CGAffineTransformMakeRotation(-M_PI_2);
-            t = CGAffineTransformScale(t, scale, scale);
-            [UIView animateWithDuration:0.3
-                                  delay:0
-                                options:UIViewAnimationOptionCurveEaseInOut
-                             animations:^{ theaterView.transform = t; }
-                             completion:nil];
-        } else {
-            [UIView animateWithDuration:0.3
-                                  delay:0
-                                options:UIViewAnimationOptionCurveEaseInOut
-                             animations:^{ theaterView.transform = CGAffineTransformIdentity; }
-                             completion:nil];
+        s_lockedOrientation = current;
+        switch (current) {
+            case UIInterfaceOrientationLandscapeLeft:
+                s_lockedOrientationMask = UIInterfaceOrientationMaskLandscapeLeft;  break;
+            case UIInterfaceOrientationLandscapeRight:
+                s_lockedOrientationMask = UIInterfaceOrientationMaskLandscapeRight; break;
+            case UIInterfaceOrientationPortraitUpsideDown:
+                s_lockedOrientationMask = UIInterfaceOrientationMaskPortraitUpsideDown; break;
+            default:
+                s_lockedOrientationMask = UIInterfaceOrientationMaskPortrait; break;
         }
-        [self log:@"%@ fausse rotation TheaterView", s_orientationLocked ? @"🔒" : @"🔓"];
+
+        // Le mask est posé — supportedInterfaceOrientationsForWindow: bloque dès maintenant.
+        // On n'appelle PAS requestGeometryUpdate ici : l'utilisateur est déjà dans la bonne
+        // orientation, un appel inutile ouvre une fenêtre où la première rotation physique
+        // peut passer avant que le cycle de géométrie soit stabilisé.
+        s7tv_startOrientationObserver();
+        [self log:@"🔒 Orientation verrouillée (orientation=%ld)", (long)current];
+
     } else {
-        [self log:@"⚠️ TheaterView introuvable (stream ouvert ?)"];
+        s_lockedOrientationMask = UIInterfaceOrientationMaskAll;
+        s_lockedOrientation     = UIInterfaceOrientationUnknown;
+        s7tv_stopOrientationObserver();
+        // Libérer toutes les orientations → iOS reprend la main
+        s7tv_forceSceneOrientation(UIInterfaceOrientationMaskAll);
+        [UIViewController attemptRotationToDeviceOrientation];
+        [self log:@"🔓 Orientation déverrouillée"];
     }
-    // ─────────────────────────────────────────────────────────────────────────
 
     // Mettre à jour l'icône du bouton
     UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration
@@ -1289,7 +1373,24 @@ static void s7tv_showOrientationToast(BOOL locked) {
 @end
 
 static void s7tv_swizzle_orientation_lock(void) {
-    [[SevenTVManager sharedManager] log:@"✅ Verrou orientation initialisé (mode visuel)"];
+    // UIApplication : check système, priorité maximale, ignoré par Twitch
+    s7tv_swizzle([UIApplication class],
+                 [UIApplication class],
+                 @selector(supportedInterfaceOrientationsForWindow:),
+                 NSSelectorFromString(@"s7tv_supportedInterfaceOrientationsForWindow:"));
+
+    // UIViewController : chemins UIKit secondaires
+    s7tv_swizzle([UIViewController class],
+                 [UIViewController class],
+                 @selector(supportedInterfaceOrientations),
+                 @selector(s7tv_supportedInterfaceOrientations));
+
+    s7tv_swizzle([UIViewController class],
+                 [UIViewController class],
+                 @selector(shouldAutorotate),
+                 @selector(s7tv_shouldAutorotate));
+
+    [[SevenTVManager sharedManager] log:@"✅ Swizzles verrou orientation enregistrés"];
 }
 
 
