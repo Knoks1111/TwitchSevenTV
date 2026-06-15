@@ -132,7 +132,11 @@ static void s7tvLogResponds(id obj, NSArray<NSString *> *selectors, NSInteger sa
     NSString *selfClass = NSStringFromClass([self class]);
 
     // ── Hijack bouton Share → verrou orientation ──────────────────────────────
-    if ([selfClass isEqualToString:@"Twitch.TheaterPlayerControlsView"] && self.window) {
+    // Uniquement dans la TheaterPlayerControlsView du player plein écran,
+    // PAS dans celle du feed (page d'accueil) — on distingue via la classe
+    // de la fenêtre parente : PictureInPictureWindow pour le vrai theater.
+    if ([selfClass isEqualToString:@"Twitch.TheaterPlayerControlsView"] && self.window &&
+        [NSStringFromClass([self.window class]) isEqualToString:@"Twitch.PictureInPictureWindow"]) {
         if (!objc_getAssociatedObject(self, &kS7TVShareHijacked)) {
             __weak UIView *weakSelf = self;
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)),
@@ -1215,11 +1219,54 @@ static void s7tv_showOrientationToast(BOOL locked) {
 - (void)s7tv_toggleOrientationLock:(UIButton *)sender {
     s_orientationLocked = !s_orientationLocked;
 
-    if (s_orientationLocked) {
-        [self log:@"🔒 Verrou activé (visuel uniquement)"];
-    } else {
-        [self log:@"🔓 Verrou désactivé"];
+    // ── Fausse rotation visuelle sur TheaterView ──────────────────────────────
+    // On cherche TheaterView (accID=theater-view) dans la PictureInPictureWindow.
+    // On lui applique un CGAffineTransform rotation -90° pour simuler le landscape
+    // sans toucher à l'orientation système → zéro glitch, zéro interférence.
+    UIView *theaterView = nil;
+    for (UIWindow *win in [UIApplication sharedApplication].windows) {
+        if (![NSStringFromClass([win class]) isEqualToString:@"Twitch.PictureInPictureWindow"]) continue;
+        NSMutableArray *stack = [NSMutableArray arrayWithObject:win];
+        while (stack.count) {
+            UIView *v = stack[0]; [stack removeObjectAtIndex:0];
+            if ([[v accessibilityIdentifier] isEqualToString:@"theater-view"]) {
+                theaterView = v; break;
+            }
+            [stack addObjectsFromArray:v.subviews];
+        }
+        if (theaterView) break;
     }
+
+    if (theaterView) {
+        if (s_orientationLocked) {
+            // TheaterView est nativement 844×390 (landscape dans sa fenêtre).
+            // L'écran est en portrait 390×844.
+            // Rotation -π/2 : la vue pivote pour remplir l'écran portrait.
+            CGRect screen = [UIScreen mainScreen].bounds;
+            CGFloat screenW = MIN(screen.size.width, screen.size.height); // 390
+            CGFloat screenH = MAX(screen.size.width, screen.size.height); // 844
+            CGFloat tvW = theaterView.bounds.size.width  ?: screenH;
+            CGFloat tvH = theaterView.bounds.size.height ?: screenW;
+            CGFloat scale = MIN(screenH / tvW, screenW / tvH);
+            CGAffineTransform t = CGAffineTransformMakeRotation(-M_PI_2);
+            t = CGAffineTransformScale(t, scale, scale);
+            [UIView animateWithDuration:0.3
+                                  delay:0
+                                options:UIViewAnimationOptionCurveEaseInOut
+                             animations:^{ theaterView.transform = t; }
+                             completion:nil];
+        } else {
+            [UIView animateWithDuration:0.3
+                                  delay:0
+                                options:UIViewAnimationOptionCurveEaseInOut
+                             animations:^{ theaterView.transform = CGAffineTransformIdentity; }
+                             completion:nil];
+        }
+        [self log:@"%@ fausse rotation TheaterView", s_orientationLocked ? @"🔒" : @"🔓"];
+    } else {
+        [self log:@"⚠️ TheaterView introuvable (stream ouvert ?)"];
+    }
+    // ─────────────────────────────────────────────────────────────────────────
 
     // Mettre à jour l'icône du bouton
     UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration
