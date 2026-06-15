@@ -31,6 +31,11 @@
 static const char kS7TVTextFieldTagged = 5;
 static const char kS7TVBitsHijacked    = 6;
 static const char kS7TVOrigSectionCount = 7;
+static const char kS7TVShareHijacked   = 8;   // verrou orientation
+
+// État global verrou d'orientation
+static BOOL s_orientationLocked             = NO;
+static UIInterfaceOrientationMask s_lockedOrientationMask = UIInterfaceOrientationMaskAll;
 
 
 // ────────────────────────────────────────────────────────────
@@ -126,6 +131,76 @@ static void s7tvLogResponds(id obj, NSArray<NSString *> *selectors, NSInteger sa
     [self s7tv_didMoveToWindow]; // appel original
 
     NSString *selfClass = NSStringFromClass([self class]);
+
+    // ── Hijack bouton Share → verrou orientation ──────────────────────────────
+    if ([selfClass isEqualToString:@"Twitch.TheaterPlayerControlsView"] && self.window) {
+        if (!objc_getAssociatedObject(self, &kS7TVShareHijacked)) {
+            __weak UIView *weakSelf = self;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                UIView *controls = weakSelf;
+                if (!controls || !controls.window) return;
+
+                // Trouver le bouton Share par accID
+                UIButton *shareBtn = nil;
+                NSMutableArray *q = [NSMutableArray arrayWithObject:controls];
+                while (q.count > 0) {
+                    UIView *v = q[0]; [q removeObjectAtIndex:0];
+                    if ([v isKindOfClass:[UIButton class]] &&
+                        [[v accessibilityIdentifier] isEqualToString:@"share_button"]) {
+                        shareBtn = (UIButton *)v;
+                        break;
+                    }
+                    [q addObjectsFromArray:v.subviews];
+                }
+                if (!shareBtn) {
+                    [[SevenTVManager sharedManager]
+                        log:@"⚠️ share_button introuvable dans TheaterPlayerControlsView"];
+                    return;
+                }
+
+                // Retirer shareButtonTapped original
+                NSSet *targets = [shareBtn allTargets];
+                for (id tgt in [targets allObjects]) {
+                    NSArray *actions = [shareBtn actionsForTarget:tgt
+                                            forControlEvent:UIControlEventTouchUpInside];
+                    for (NSString *action in actions) {
+                        [shareBtn removeTarget:tgt action:NSSelectorFromString(action)
+                              forControlEvents:UIControlEventTouchUpInside];
+                        [[SevenTVManager sharedManager]
+                            log:@"🔌 Share: action retirée — %@->%@",
+                            NSStringFromClass([tgt class]), action];
+                    }
+                }
+
+                // Icône cadenas
+                UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration
+                    configurationWithPointSize:20 weight:UIImageSymbolWeightMedium];
+                NSString *sym = s_orientationLocked ? @"lock.rotation" : @"lock.rotation.open";
+                UIImage *lockIcon = [UIImage systemImageNamed:sym withConfiguration:cfg];
+
+                for (NSNumber *st in @[@(UIControlStateNormal), @(UIControlStateHighlighted),
+                                        @(UIControlStateSelected), @(UIControlStateDisabled)]) {
+                    [shareBtn setImage:lockIcon forState:st.unsignedIntegerValue];
+                }
+                shareBtn.tintColor              = s_orientationLocked
+                    ? [UIColor colorWithRed:0.55 green:0.25 blue:0.95 alpha:1.0]
+                    : [UIColor whiteColor];
+                shareBtn.accessibilityLabel      = @"Verrouiller l'orientation";
+                shareBtn.accessibilityIdentifier = @"s7tv_lock_button";
+
+                [shareBtn addTarget:[SevenTVManager sharedManager]
+                             action:@selector(s7tv_toggleOrientationLock:)
+                   forControlEvents:UIControlEventTouchUpInside];
+
+                objc_setAssociatedObject(controls, &kS7TVShareHijacked, @YES,
+                                         OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+                [[SevenTVManager sharedManager]
+                    log:@"✅ Bouton Share hijacké → verrou orientation"];
+            });
+        }
+    }
 
     // ── Détection fermeture du stream ────────────────────────────────────────
     // Quand Twitch ferme le stream, ChatInputView quitte la fenêtre (window → nil).
@@ -1051,6 +1126,185 @@ static void s7tv_hook_network_image_requester(void) {
 
 
 // ────────────────────────────────────────────────────────────
+// MARK: - Verrou d'orientation (bouton Share hijacké)
+// ────────────────────────────────────────────────────────────
+
+// ── Clé associated object pour marquer le bouton déjà hijacké ── (déclarée en tête de fichier)
+
+// ── Toast propre (pas d'alert, juste un label centré qui disparaît) ──────────
+static void s7tv_showOrientationToast(BOOL locked) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIWindow *keyWindow = nil;
+        for (UIWindow *w in [UIApplication sharedApplication].windows) {
+            if (!w.isHidden && w.windowLevel == UIWindowLevelNormal) { keyWindow = w; break; }
+        }
+        if (!keyWindow) return;
+
+        // Icône + texte
+        NSString *symbol = locked ? @"lock.rotation"      : @"lock.rotation.open";
+        NSString *label  = locked ? @"Orientation verrouillée" : @"Orientation déverrouillée";
+
+        // Container arrondi style iOS
+        UIView *toast = [[UIView alloc] init];
+        toast.backgroundColor = [UIColor colorWithWhite:0.08 alpha:0.88];
+        toast.layer.cornerRadius = 18;
+        toast.layer.masksToBounds = YES;
+        toast.alpha = 0;
+        toast.translatesAutoresizingMaskIntoConstraints = NO;
+        [keyWindow addSubview:toast];
+
+        // Icône SF Symbol
+        UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration
+            configurationWithPointSize:22 weight:UIImageSymbolWeightMedium];
+        UIImage *icon = [UIImage systemImageNamed:symbol withConfiguration:cfg];
+        UIImageView *iconView = [[UIImageView alloc] initWithImage:icon];
+        iconView.tintColor   = locked
+            ? [UIColor colorWithRed:0.55 green:0.25 blue:0.95 alpha:1.0]
+            : [UIColor colorWithRed:0.6  green:0.6  blue:0.65 alpha:1.0];
+        iconView.contentMode = UIViewContentModeScaleAspectFit;
+        iconView.translatesAutoresizingMaskIntoConstraints = NO;
+        [toast addSubview:iconView];
+
+        // Label
+        UILabel *lbl = [[UILabel alloc] init];
+        lbl.text      = label;
+        lbl.font      = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+        lbl.textColor = [UIColor whiteColor];
+        lbl.translatesAutoresizingMaskIntoConstraints = NO;
+        [toast addSubview:lbl];
+
+        // Layout interne du toast
+        [NSLayoutConstraint activateConstraints:@[
+            [iconView.leadingAnchor  constraintEqualToAnchor:toast.leadingAnchor  constant:16],
+            [iconView.centerYAnchor  constraintEqualToAnchor:toast.centerYAnchor],
+            [iconView.widthAnchor    constraintEqualToConstant:26],
+            [iconView.heightAnchor   constraintEqualToConstant:26],
+            [lbl.leadingAnchor       constraintEqualToAnchor:iconView.trailingAnchor constant:10],
+            [lbl.trailingAnchor      constraintEqualToAnchor:toast.trailingAnchor    constant:-16],
+            [lbl.centerYAnchor       constraintEqualToAnchor:toast.centerYAnchor],
+            [toast.heightAnchor      constraintEqualToConstant:52],
+        ]];
+
+        // Position : centré horizontalement, 30% depuis le haut
+        [NSLayoutConstraint activateConstraints:@[
+            [toast.centerXAnchor constraintEqualToAnchor:keyWindow.centerXAnchor],
+            [toast.topAnchor     constraintEqualToAnchor:keyWindow.topAnchor
+                                                constant:keyWindow.bounds.size.height * 0.28],
+        ]];
+
+        // Forcer le layout pour avoir la bonne largeur
+        [keyWindow layoutIfNeeded];
+
+        // Apparition + disparition
+        [UIView animateWithDuration:0.25 animations:^{ toast.alpha = 1.0; } completion:^(BOOL f) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.6 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                [UIView animateWithDuration:0.3 animations:^{ toast.alpha = 0; }
+                                 completion:^(BOOL ff) { [toast removeFromSuperview]; }];
+            });
+        }];
+    });
+}
+
+// ── Hook supportedInterfaceOrientations sur UIViewController ─────────────────
+@interface UIViewController (S7TVOrientationLock)
+- (UIInterfaceOrientationMask)s7tv_supportedInterfaceOrientations;
+@end
+@implementation UIViewController (S7TVOrientationLock)
+- (UIInterfaceOrientationMask)s7tv_supportedInterfaceOrientations {
+    if (s_orientationLocked) return s_lockedOrientationMask;
+    return [self s7tv_supportedInterfaceOrientations]; // appel original
+}
+@end
+
+// ── Hook shouldAutorotate ────────────────────────────────────────────────────
+@interface UIViewController (S7TVAutorotate)
+- (BOOL)s7tv_shouldAutorotate;
+@end
+@implementation UIViewController (S7TVAutorotate)
+- (BOOL)s7tv_shouldAutorotate {
+    if (s_orientationLocked) return NO;
+    return [self s7tv_shouldAutorotate]; // appel original
+}
+@end
+
+
+// ── Action toggle (catégorie sur SevenTVManager) ─────────────────────────────
+@interface SevenTVManager (OrientationLock)
+- (void)s7tv_toggleOrientationLock:(UIButton *)sender;
+@end
+@implementation SevenTVManager (OrientationLock)
+
+- (void)s7tv_toggleOrientationLock:(UIButton *)sender {
+    s_orientationLocked = !s_orientationLocked;
+
+    if (s_orientationLocked) {
+        // Capturer l'orientation courante de l'interface
+        UIInterfaceOrientation current = [UIApplication sharedApplication].statusBarOrientation;
+        switch (current) {
+            case UIInterfaceOrientationLandscapeLeft:
+                s_lockedOrientationMask = UIInterfaceOrientationMaskLandscapeLeft;  break;
+            case UIInterfaceOrientationLandscapeRight:
+                s_lockedOrientationMask = UIInterfaceOrientationMaskLandscapeRight; break;
+            case UIInterfaceOrientationPortraitUpsideDown:
+                s_lockedOrientationMask = UIInterfaceOrientationMaskPortraitUpsideDown; break;
+            default:
+                s_lockedOrientationMask = UIInterfaceOrientationMaskPortrait;       break;
+        }
+        [self log:@"🔒 Orientation verrouillée (mask=%lu)", (unsigned long)s_lockedOrientationMask];
+    } else {
+        s_lockedOrientationMask = UIInterfaceOrientationMaskAll;
+        [self log:@"🔓 Orientation déverrouillée"];
+        // Forcer le recalcul de l'orientation
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [UIViewController attemptRotationToDeviceOrientation];
+        });
+    }
+
+    // Mettre à jour l'icône du bouton
+    UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration
+        configurationWithPointSize:20 weight:UIImageSymbolWeightMedium];
+    NSString *sym = s_orientationLocked ? @"lock.rotation" : @"lock.rotation.open";
+    UIImage *icon = [UIImage systemImageNamed:sym withConfiguration:cfg];
+    UIColor *tint = s_orientationLocked
+        ? [UIColor colorWithRed:0.55 green:0.25 blue:0.95 alpha:1.0] // violet 7TV si verrouillé
+        : [UIColor whiteColor];
+
+    for (NSNumber *st in @[@(UIControlStateNormal), @(UIControlStateHighlighted),
+                            @(UIControlStateSelected), @(UIControlStateDisabled)]) {
+        [sender setImage:icon forState:st.unsignedIntegerValue];
+    }
+    sender.tintColor = tint;
+
+    // Toast de confirmation
+    s7tv_showOrientationToast(s_orientationLocked);
+}
+
+@end
+
+// ── Enregistrement des swizzles orientation ───────────────────────────────────
+static void s7tv_swizzle_orientation_lock(void) {
+    // supportedInterfaceOrientations
+    s7tv_swizzle([UIViewController class],
+                 [UIViewController class],
+                 @selector(supportedInterfaceOrientations),
+                 @selector(s7tv_supportedInterfaceOrientations));
+
+    // shouldAutorotate
+    s7tv_swizzle([UIViewController class],
+                 [UIViewController class],
+                 @selector(shouldAutorotate),
+                 @selector(s7tv_shouldAutorotate));
+
+    // didMoveToWindow est déjà swizzlé vers s7tv_didMoveToWindow.
+    // La détection de TheaterPlayerControlsView est faite directement
+    // dans s7tv_didMoveToWindow (voir ci-dessous dans S7TVChatInputHook).
+
+    [[SevenTVManager sharedManager] log:@"✅ Swizzles verrou orientation enregistrés"];
+}
+
+
+// ────────────────────────────────────────────────────────────
 // MARK: - Point d'entrée __attribute__((constructor))
 // ────────────────────────────────────────────────────────────
 
@@ -1067,6 +1321,9 @@ static void TwitchSevenTVInit(void) {
                  [UIWindow class],
                  @selector(sendEvent:),
                  @selector(s7tv_sendEvent:));
+
+    // Verrou d'orientation (bouton Share hijacké)
+    s7tv_swizzle_orientation_lock();
 
     // Injection bouton dans ChatInputView
     s7tv_swizzle([UIView class],
