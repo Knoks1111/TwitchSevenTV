@@ -1357,30 +1357,29 @@ static void TwitchSevenTVInit(void) {
                     }
                     [CATransaction commit];
 
-                    // Dump méthodes de AnimatedImageAttachmentLayer (une seule fois)
-                    static BOOL s_animDumped = NO;
-                    for (CALayer *caLayer in emoteLayers) {
-                        for (CALayer *sub in caLayer.sublayers) {
-                            if ([NSStringFromClass(object_getClass(sub)) containsString:@"Animated"]) {
-                                if (!s_animDumped) {
-                                    s_animDumped = YES;
-                                    Class animCls = object_getClass(sub);
-                                    [[SevenTVManager sharedManager] log:@"🎞 AnimatedLayer classe: %@", NSStringFromClass(animCls)];
-                                    unsigned int mc = 0;
-                                    Method *methods = class_copyMethodList(animCls, &mc);
-                                    [[SevenTVManager sharedManager] log:@"🎞 méthodes (%u):", mc];
-                                    for (unsigned int i = 0; i < mc; i++) {
-                                        [[SevenTVManager sharedManager] log:@"🎞   %@", NSStringFromSelector(method_getName(methods[i]))];
+                    // Hook displayLayer: sur AnimatedImageAttachmentLayer
+                    // displayLayer: est appelé quand l'image est chargée et prête à être affichée
+                    // C'est le moment exact pour appeler startAnimating
+                    static BOOL s_displayLayerHooked = NO;
+                    if (!s_displayLayerHooked) {
+                        Class animCls = NSClassFromString(@"Twitch.AnimatedImageAttachmentLayer");
+                        if (animCls) {
+                            SEL displaySel = NSSelectorFromString(@"displayLayer:");
+                            Method displayMethod = class_getInstanceMethod(animCls, displaySel);
+                            if (displayMethod) {
+                                IMP origDisplayIMP = method_getImplementation(displayMethod);
+                                SEL startSel = NSSelectorFromString(@"startAnimating");
+                                method_setImplementation(displayMethod, imp_implementationWithBlock(
+                                    ^(id selfLayer, CALayer *layer) {
+                                        // Appel original d'abord
+                                        ((void (*)(id, SEL, CALayer *))origDisplayIMP)(selfLayer, displaySel, layer);
+                                        // Puis démarrer l'animation — l'image est maintenant chargée
+                                        if ([selfLayer respondsToSelector:startSel]) {
+                                            ((void (*)(id, SEL))objc_msgSend)(selfLayer, startSel);
+                                        }
                                     }
-                                    free(methods);
-                                    unsigned int ic = 0;
-                                    Ivar *ivars = class_copyIvarList(animCls, &ic);
-                                    [[SevenTVManager sharedManager] log:@"🎞 iVars (%u):", ic];
-                                    for (unsigned int i = 0; i < ic; i++) {
-                                        [[SevenTVManager sharedManager] log:@"🎞   %s", ivar_getName(ivars[i])];
-                                    }
-                                    free(ivars);
-                                }
+                                ));
+                                s_displayLayerHooked = YES;
                             }
                         }
                     }
