@@ -1141,27 +1141,28 @@ static id s_orientationObserver = nil;
 
 // ── Force la géométrie de toutes les scènes actives ─────────────────────────
 static void s7tv_forceSceneOrientation(UIInterfaceOrientationMask mask) {
-    if (@available(iOS 16.0, *)) {
-        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-            if (![scene isKindOfClass:[UIWindowScene class]]) continue;
-            UIWindowScene *ws = (UIWindowScene *)scene;
-            UIWindowSceneGeometryPreferencesIOS *prefs =
-                [[UIWindowSceneGeometryPreferencesIOS alloc] initWithInterfaceOrientations:mask];
-            [ws requestGeometryUpdate:prefs errorHandler:^(NSError *error) {
-                [[SevenTVManager sharedManager]
-                    log:@"⚠️ requestGeometryUpdate erreur: %@", error.localizedDescription];
-            }];
+    // iOS 16+ : UIWindowScene requestGeometryUpdate:errorHandler:
+    // Appelé via objc_msgSend pour éviter les erreurs de header manquant dans le SDK Theos
+    SEL reqSel   = NSSelectorFromString(@"requestGeometryUpdate:errorHandler:");
+    Class prefsCls = NSClassFromString(@"UIWindowSceneGeometryPreferencesIOS");
+
+    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+        UIWindowScene *ws = (UIWindowScene *)scene;
+
+        if (prefsCls && [ws respondsToSelector:reqSel]) {
+            id prefs = [[prefsCls alloc] initWithInterfaceOrientations:mask];
+            ((void(*)(id, SEL, id, id))objc_msgSend)(ws, reqSel, prefs, nil);
+        } else {
+            // Fallback iOS < 16 : setStatusBarOrientation:animated: (déprécié)
+            UIInterfaceOrientation target = UIInterfaceOrientationPortrait;
+            if (mask == UIInterfaceOrientationMaskLandscapeLeft)               target = UIInterfaceOrientationLandscapeLeft;
+            else if (mask == UIInterfaceOrientationMaskLandscapeRight)         target = UIInterfaceOrientationLandscapeRight;
+            else if (mask == UIInterfaceOrientationMaskPortraitUpsideDown)     target = UIInterfaceOrientationPortraitUpsideDown;
+            SEL fbSel = NSSelectorFromString(@"setStatusBarOrientation:animated:");
+            ((void(*)(id, SEL, UIInterfaceOrientation, BOOL))objc_msgSend)(
+                [UIApplication sharedApplication], fbSel, target, NO);
         }
-    } else {
-        // Fallback iOS < 16 : forcer via setStatusBarOrientation (déprécié mais fonctionnel)
-        UIInterfaceOrientation target = UIInterfaceOrientationPortrait;
-        if (mask == UIInterfaceOrientationMaskLandscapeLeft)       target = UIInterfaceOrientationLandscapeLeft;
-        else if (mask == UIInterfaceOrientationMaskLandscapeRight) target = UIInterfaceOrientationLandscapeRight;
-        else if (mask == UIInterfaceOrientationMaskPortraitUpsideDown) target = UIInterfaceOrientationPortraitUpsideDown;
-        [[UIApplication sharedApplication]
-            performSelector:NSSelectorFromString(@"setStatusBarOrientation:animated:")
-                 withObject:@(target)
-                 withObject:@(NO)];
     }
 }
 
