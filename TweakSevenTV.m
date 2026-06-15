@@ -1273,12 +1273,14 @@ static void s7tv_showOrientationToast(BOOL locked) {
         }
 
         // Forcer la scène à rester dans cette orientation (iOS 16+)
-        if (activeScene && [activeScene respondsToSelector:NSSelectorFromString(@"requestGeometryUpdateWithPreferences:errorHandler:")]) {
-            UIWindowSceneGeometryPreferencesIOS *prefs =
-                [[UIWindowSceneGeometryPreferencesIOS alloc] initWithInterfaceOrientations:s_lockedOrientationMask];
-            [activeScene requestGeometryUpdateWithPreferences:prefs errorHandler:^(NSError *err) {
-                [[SevenTVManager sharedManager] log:@"⚠️ requestGeometryUpdate erreur: %@", err.localizedDescription];
-            }];
+        if (@available(iOS 16.0, *)) {
+            if (activeScene) {
+                UIWindowSceneGeometryPreferencesIOS *prefs =
+                    [[UIWindowSceneGeometryPreferencesIOS alloc] initWithInterfaceOrientations:s_lockedOrientationMask];
+                [activeScene requestGeometryUpdateWithPreferences:prefs errorHandler:^(NSError *err) {
+                    [[SevenTVManager sharedManager] log:@"⚠️ requestGeometryUpdate erreur: %@", err.localizedDescription];
+                }];
+            }
         }
 
         [self log:@"🔒 Orientation verrouillée (mask=%lu)", (unsigned long)s_lockedOrientationMask];
@@ -1286,10 +1288,12 @@ static void s7tv_showOrientationToast(BOOL locked) {
         s_lockedOrientationMask = UIInterfaceOrientationMaskAll;
 
         // Déverrouiller : laisser toutes les orientations
-        if (activeScene && [activeScene respondsToSelector:NSSelectorFromString(@"requestGeometryUpdateWithPreferences:errorHandler:")]) {
-            UIWindowSceneGeometryPreferencesIOS *prefs =
-                [[UIWindowSceneGeometryPreferencesIOS alloc] initWithInterfaceOrientations:UIInterfaceOrientationMaskAll];
-            [activeScene requestGeometryUpdateWithPreferences:prefs errorHandler:nil];
+        if (@available(iOS 16.0, *)) {
+            if (activeScene) {
+                UIWindowSceneGeometryPreferencesIOS *prefs =
+                    [[UIWindowSceneGeometryPreferencesIOS alloc] initWithInterfaceOrientations:UIInterfaceOrientationMaskAll];
+                [activeScene requestGeometryUpdateWithPreferences:prefs errorHandler:nil];
+            }
         }
 
         [UIViewController attemptRotationToDeviceOrientation];
