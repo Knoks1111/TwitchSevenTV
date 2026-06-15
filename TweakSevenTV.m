@@ -133,16 +133,18 @@ static void s7tvLogResponds(id obj, NSArray<NSString *> *selectors, NSInteger sa
     NSString *selfClass = NSStringFromClass([self class]);
 
     // ── Hijack bouton Share → verrou orientation ──────────────────────────────
-    // Guard : uniquement dans la PictureInPictureWindow (player theater),
-    // pas dans les TheaterPlayerControlsView du feed page d'accueil.
-    if ([selfClass isEqualToString:@"Twitch.TheaterPlayerControlsView"] && self.window &&
-        [NSStringFromClass([self.window class]) isEqualToString:@"Twitch.PictureInPictureWindow"]) {
+    if ([selfClass isEqualToString:@"Twitch.TheaterPlayerControlsView"] && self.window) {
         if (!objc_getAssociatedObject(self, &kS7TVShareHijacked)) {
             __weak UIView *weakSelf = self;
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{
                 UIView *controls = weakSelf;
                 if (!controls || !controls.window) return;
+
+                // Guard : uniquement dans la PictureInPictureWindow (player theater),
+                // pas dans le feed de la page d'accueil.
+                if (![NSStringFromClass([controls.window class])
+                        isEqualToString:@"Twitch.PictureInPictureWindow"]) return;
 
                 // Trouver le bouton Share par accID
                 UIButton *shareBtn = nil;
