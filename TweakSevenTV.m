@@ -1135,8 +1135,15 @@ static void s7tv_hook_network_image_requester(void) {
 static void s7tv_showOrientationToast(BOOL locked) {
     dispatch_async(dispatch_get_main_queue(), ^{
         UIWindow *keyWindow = nil;
-        for (UIWindow *w in [UIApplication sharedApplication].windows) {
-            if (!w.isHidden && w.windowLevel == UIWindowLevelNormal) { keyWindow = w; break; }
+        for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
+            if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+            if (scene.activationState != UISceneActivationStateForegroundActive) continue;
+            for (UIWindow *w in scene.windows) {
+                if (!w.isHidden && w.windowLevel == UIWindowLevelNormal) {
+                    keyWindow = w; break;
+                }
+            }
+            if (keyWindow) break;
         }
         if (!keyWindow) return;
 
@@ -1238,15 +1245,22 @@ static void s7tv_showOrientationToast(BOOL locked) {
 - (void)s7tv_toggleOrientationLock:(UIButton *)sender {
     s_orientationLocked = !s_orientationLocked;
 
-    if (s_orientationLocked) {
-        // Capturer l'orientation courante de l'interface
-        UIInterfaceOrientation current = UIInterfaceOrientationPortrait;
-        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-            if ([scene isKindOfClass:[UIWindowScene class]]) {
-                current = ((UIWindowScene *)scene).interfaceOrientation;
-                break;
-            }
+    // Trouver la UIWindowScene active
+    UIWindowScene *activeScene = nil;
+    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+        if ([scene isKindOfClass:[UIWindowScene class]] &&
+            scene.activationState == UISceneActivationStateForegroundActive) {
+            activeScene = (UIWindowScene *)scene;
+            break;
         }
+    }
+
+    if (s_orientationLocked) {
+        // Capturer l'orientation courante
+        UIInterfaceOrientation current = activeScene
+            ? activeScene.interfaceOrientation
+            : UIInterfaceOrientationPortrait;
+
         switch (current) {
             case UIInterfaceOrientationLandscapeLeft:
                 s_lockedOrientationMask = UIInterfaceOrientationMaskLandscapeLeft;  break;
@@ -1255,16 +1269,31 @@ static void s7tv_showOrientationToast(BOOL locked) {
             case UIInterfaceOrientationPortraitUpsideDown:
                 s_lockedOrientationMask = UIInterfaceOrientationMaskPortraitUpsideDown; break;
             default:
-                s_lockedOrientationMask = UIInterfaceOrientationMaskPortrait;       break;
+                s_lockedOrientationMask = UIInterfaceOrientationMaskPortrait; break;
         }
+
+        // Forcer la scène à rester dans cette orientation (iOS 16+)
+        if (activeScene && [activeScene respondsToSelector:NSSelectorFromString(@"requestGeometryUpdateWithPreferences:errorHandler:")]) {
+            UIWindowSceneGeometryPreferencesIOS *prefs =
+                [[UIWindowSceneGeometryPreferencesIOS alloc] initWithInterfaceOrientations:s_lockedOrientationMask];
+            [activeScene requestGeometryUpdateWithPreferences:prefs errorHandler:^(NSError *err) {
+                [[SevenTVManager sharedManager] log:@"⚠️ requestGeometryUpdate erreur: %@", err.localizedDescription];
+            }];
+        }
+
         [self log:@"🔒 Orientation verrouillée (mask=%lu)", (unsigned long)s_lockedOrientationMask];
     } else {
         s_lockedOrientationMask = UIInterfaceOrientationMaskAll;
+
+        // Déverrouiller : laisser toutes les orientations
+        if (activeScene && [activeScene respondsToSelector:NSSelectorFromString(@"requestGeometryUpdateWithPreferences:errorHandler:")]) {
+            UIWindowSceneGeometryPreferencesIOS *prefs =
+                [[UIWindowSceneGeometryPreferencesIOS alloc] initWithInterfaceOrientations:UIInterfaceOrientationMaskAll];
+            [activeScene requestGeometryUpdateWithPreferences:prefs errorHandler:nil];
+        }
+
+        [UIViewController attemptRotationToDeviceOrientation];
         [self log:@"🔓 Orientation déverrouillée"];
-        // Forcer le recalcul de l'orientation
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [UIViewController attemptRotationToDeviceOrientation];
-        });
     }
 
     // Mettre à jour l'icône du bouton
@@ -1273,7 +1302,7 @@ static void s7tv_showOrientationToast(BOOL locked) {
     NSString *sym = s_orientationLocked ? @"lock.rotation" : @"lock.rotation.open";
     UIImage *icon = [UIImage systemImageNamed:sym withConfiguration:cfg];
     UIColor *tint = s_orientationLocked
-        ? [UIColor colorWithRed:0.55 green:0.25 blue:0.95 alpha:1.0] // violet 7TV si verrouillé
+        ? [UIColor colorWithRed:0.55 green:0.25 blue:0.95 alpha:1.0]
         : [UIColor whiteColor];
 
     for (NSNumber *st in @[@(UIControlStateNormal), @(UIControlStateHighlighted),
