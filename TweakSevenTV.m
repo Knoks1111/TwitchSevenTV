@@ -1240,7 +1240,13 @@ static void s7tv_showOrientationToast(BOOL locked) {
 
     if (s_orientationLocked) {
         // Capturer l'orientation courante de l'interface
-        UIInterfaceOrientation current = [UIApplication sharedApplication].statusBarOrientation;
+        UIInterfaceOrientation current = UIInterfaceOrientationPortrait;
+        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+            if ([scene isKindOfClass:[UIWindowScene class]]) {
+                current = ((UIWindowScene *)scene).interfaceOrientation;
+                break;
+            }
+        }
         switch (current) {
             case UIInterfaceOrientationLandscapeLeft:
                 s_lockedOrientationMask = UIInterfaceOrientationMaskLandscapeLeft;  break;
