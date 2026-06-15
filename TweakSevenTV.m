@@ -1297,6 +1297,71 @@ static void s7tv_showOrientationToast(BOOL locked) {
 }
 @end
 
+// ── Fausse rotation visuelle de TheaterView ───────────────────────────────────
+//
+// Approche : on ne touche PAS à l'orientation système.
+// TheaterView (accID=theater-view) vit dans PictureInPictureWindow (844×390).
+// En portrait, l'écran fait 390×844. On applique un CGAffineTransform :
+//   - rotation de -π/2 (landscape left) ou +π/2 (landscape right)
+//   - scale pour que la vue remplisse exactement l'écran portrait
+// Le système ne voit rien, zéro glitch de rotation.
+//
+// État "pseudo-landscape" : TheaterView remplit l'écran en simulant le landscape.
+// État "portrait normal"  : on remet le transform à identity.
+// ─────────────────────────────────────────────────────────────────────────────
+
+static BOOL s_fakeRotationActive = NO;
+
+// Trouve TheaterView dans toutes les fenêtres
+static UIView *s7tv_findTheaterView(void) {
+    for (UIWindow *win in [UIApplication sharedApplication].windows) {
+        NSMutableArray *stack = [NSMutableArray arrayWithObject:win];
+        while (stack.count) {
+            UIView *v = stack[0]; [stack removeObjectAtIndex:0];
+            if ([[v accessibilityIdentifier] isEqualToString:@"theater-view"])
+                return v;
+            [stack addObjectsFromArray:v.subviews];
+        }
+    }
+    return nil;
+}
+
+static void s7tv_applyFakeRotation(UIView *theaterView, BOOL activate) {
+    // Taille écran portrait (toujours portrait côté système)
+    CGRect screenBounds = [UIScreen mainScreen].bounds;
+    CGFloat screenW = MIN(screenBounds.size.width, screenBounds.size.height); // ex: 390
+    CGFloat screenH = MAX(screenBounds.size.width, screenBounds.size.height); // ex: 844
+
+    if (activate) {
+        // TheaterView fait nativement 844×390 (landscape dans sa fenêtre).
+        // On veut qu'elle remplisse 390×844 (portrait écran).
+        // Rotation -π/2 + scale pour adapter.
+        CGFloat tvW = theaterView.bounds.size.width;   // 844
+        CGFloat tvH = theaterView.bounds.size.height;  // 390
+        if (tvW <= 0 || tvH <= 0) { tvW = screenH; tvH = screenW; }
+
+        CGFloat scaleX = screenH / tvW; // 844/844 = 1.0
+        CGFloat scaleY = screenW / tvH; // 390/390 = 1.0
+        // Généralement 1.0 car TheaterView est déjà aux bonnes dimensions,
+        // mais on garde le scale au cas où les dimensions diffèrent.
+        CGFloat scale = MIN(scaleX, scaleY);
+
+        CGAffineTransform t = CGAffineTransformMakeRotation(-M_PI_2);
+        t = CGAffineTransformScale(t, scale, scale);
+        [UIView animateWithDuration:0.3
+                              delay:0
+                            options:UIViewAnimationOptionCurveEaseInOut
+                         animations:^{ theaterView.transform = t; }
+                         completion:nil];
+    } else {
+        [UIView animateWithDuration:0.3
+                              delay:0
+                            options:UIViewAnimationOptionCurveEaseInOut
+                         animations:^{ theaterView.transform = CGAffineTransformIdentity; }
+                         completion:nil];
+    }
+}
+
 // ── Action toggle ─────────────────────────────────────────────────────────────
 @interface SevenTVManager (OrientationLock)
 - (void)s7tv_toggleOrientationLock:(UIButton *)sender;
@@ -1304,78 +1369,37 @@ static void s7tv_showOrientationToast(BOOL locked) {
 @implementation SevenTVManager (OrientationLock)
 
 - (void)s7tv_toggleOrientationLock:(UIButton *)sender {
+    s_fakeRotationActive = !s_fakeRotationActive;
+    // Mettre à jour le flag système aussi (bloque toujours la rotation physique)
+    s_orientationLocked      = s_fakeRotationActive;
+    s_lockedOrientationMask  = s_fakeRotationActive
+        ? UIInterfaceOrientationMaskPortrait
+        : UIInterfaceOrientationMaskAll;
+    s_lockedOrientation      = s_fakeRotationActive
+        ? UIInterfaceOrientationPortrait
+        : UIInterfaceOrientationUnknown;
 
-    // ── Dump hiérarchie vues Twitch (pour trouver la vue player) ──────────────
-    [self log:@"🔍 DUMP vues Twitch.*  ──────────────────────────"];
-    for (UIWindow *win in [UIApplication sharedApplication].windows) {
-        NSMutableArray *stack = [NSMutableArray arrayWithObject:win];
-        while (stack.count) {
-            UIView *v = stack[0]; [stack removeObjectAtIndex:0];
-            NSString *cn = NSStringFromClass([v class]);
-            if ([cn hasPrefix:@"Twitch."]) {
-                [self log:@"  📦 %@  frame=(%.0f,%.0f,%.0f,%.0f)  accID='%@'",
-                 cn,
-                 v.frame.origin.x, v.frame.origin.y,
-                 v.frame.size.width, v.frame.size.height,
-                 v.accessibilityIdentifier ?: @""];
-            }
-            [stack addObjectsFromArray:v.subviews];
-        }
-    }
-    [self log:@"🔍 FIN DUMP ─────────────────────────────────────"];
-    // ──────────────────────────────────────────────────────────────────────────
-
-    s_orientationLocked = !s_orientationLocked;
-
-    if (s_orientationLocked) {
-        // Capturer l'orientation courante de la scène
-        UIWindowScene *activeScene = nil;
-        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-            if ([scene isKindOfClass:[UIWindowScene class]] &&
-                scene.activationState == UISceneActivationStateForegroundActive) {
-                activeScene = (UIWindowScene *)scene;
-                break;
-            }
-        }
-        UIInterfaceOrientation current = activeScene
-            ? activeScene.interfaceOrientation
-            : UIInterfaceOrientationPortrait;
-
-        s_lockedOrientation = current;
-        switch (current) {
-            case UIInterfaceOrientationLandscapeLeft:
-                s_lockedOrientationMask = UIInterfaceOrientationMaskLandscapeLeft;  break;
-            case UIInterfaceOrientationLandscapeRight:
-                s_lockedOrientationMask = UIInterfaceOrientationMaskLandscapeRight; break;
-            case UIInterfaceOrientationPortraitUpsideDown:
-                s_lockedOrientationMask = UIInterfaceOrientationMaskPortraitUpsideDown; break;
-            default:
-                s_lockedOrientationMask = UIInterfaceOrientationMaskPortrait; break;
-        }
-
-        // Le mask est posé — supportedInterfaceOrientationsForWindow: bloque dès maintenant.
-        // On n'appelle PAS requestGeometryUpdate ici : l'utilisateur est déjà dans la bonne
-        // orientation, un appel inutile ouvre une fenêtre où la première rotation physique
-        // peut passer avant que le cycle de géométrie soit stabilisé.
-        s7tv_startOrientationObserver();
-        [self log:@"🔒 Orientation verrouillée (orientation=%ld)", (long)current];
-
+    UIView *theaterView = s7tv_findTheaterView();
+    if (theaterView) {
+        s7tv_applyFakeRotation(theaterView, s_fakeRotationActive);
+        [self log:@"%@ fausse rotation TheaterView",
+         s_fakeRotationActive ? @"🔒 Activé" : @"🔓 Désactivé"];
     } else {
-        s_lockedOrientationMask = UIInterfaceOrientationMaskAll;
-        s_lockedOrientation     = UIInterfaceOrientationUnknown;
+        [self log:@"⚠️ TheaterView introuvable — stream ouvert ?"];
+    }
+
+    if (s_fakeRotationActive) {
+        s7tv_startOrientationObserver();
+    } else {
         s7tv_stopOrientationObserver();
-        // Libérer toutes les orientations → iOS reprend la main
-        s7tv_forceSceneOrientation(UIInterfaceOrientationMaskAll);
-        [UIViewController attemptRotationToDeviceOrientation];
-        [self log:@"🔓 Orientation déverrouillée"];
     }
 
     // Mettre à jour l'icône du bouton
     UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration
         configurationWithPointSize:20 weight:UIImageSymbolWeightMedium];
-    NSString *sym = s_orientationLocked ? @"lock.rotation" : @"lock.rotation.open";
+    NSString *sym = s_fakeRotationActive ? @"lock.rotation" : @"lock.rotation.open";
     UIImage *icon = [UIImage systemImageNamed:sym withConfiguration:cfg];
-    UIColor *tint = s_orientationLocked
+    UIColor *tint = s_fakeRotationActive
         ? [UIColor colorWithRed:0.55 green:0.25 blue:0.95 alpha:1.0]
         : [UIColor whiteColor];
 
@@ -1385,7 +1409,7 @@ static void s7tv_showOrientationToast(BOOL locked) {
     }
     sender.tintColor = tint;
 
-    s7tv_showOrientationToast(s_orientationLocked);
+    s7tv_showOrientationToast(s_fakeRotationActive);
 }
 
 @end
