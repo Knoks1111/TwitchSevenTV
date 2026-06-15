@@ -1376,58 +1376,43 @@ static void s7tv_showOrientationToast(BOOL locked) {
 static void s7tv_hook_windowscene_setorientation(void) {
     Class wsCls = [UIWindowScene class];
 
-    // ── Dump runtime : trouver le bon sélecteur privé ────────────────────────
-    unsigned int count = 0;
-    Method *methods = class_copyMethodList(wsCls, &count);
-    NSMutableArray *found = [NSMutableArray array];
-    for (unsigned int i = 0; i < count; i++) {
-        NSString *name = NSStringFromSelector(method_getName(methods[i]));
-        if ([name containsString:@"rientation"] || [name containsString:@"otat"]) {
-            [found addObject:name];
-        }
+    // ── Hook 1 : _currentlySupportedInterfaceOrientations ────────────────────
+    // UIWindowScene consulte ça pour décider si la rotation est autorisée.
+    // En retournant le mask verrouillé, iOS ne déclenche même pas l'animation.
+    SEL selSupported = NSSelectorFromString(@"_currentlySupportedInterfaceOrientations");
+    Method mSupported = class_getInstanceMethod(wsCls, selSupported);
+    if (mSupported) {
+        IMP orig = method_getImplementation(mSupported);
+        method_setImplementation(mSupported, imp_implementationWithBlock(
+            ^UIInterfaceOrientationMask(id self_) {
+                if (s_orientationLocked) return s_lockedOrientationMask;
+                return ((UIInterfaceOrientationMask(*)(id,SEL))orig)(self_, selSupported);
+            }));
+        [[SevenTVManager sharedManager] log:@"✅ _currentlySupportedInterfaceOrientations hooké"];
+    } else {
+        [[SevenTVManager sharedManager] log:@"⚠️ _currentlySupportedInterfaceOrientations introuvable"];
     }
-    free(methods);
-    [[SevenTVManager sharedManager] log:@"🔍 UIWindowScene méthodes orient/rotat: %@",
-        [found componentsJoinedByString:@" | "]];
-    // ─────────────────────────────────────────────────────────────────────────
 
-    // Essai avec animated:
-    SEL sel1 = NSSelectorFromString(@"_setInterfaceOrientation:animated:");
-    Method m1 = class_getInstanceMethod(wsCls, sel1);
-    if (m1) {
-        IMP orig = method_getImplementation(m1);
-        method_setImplementation(m1, imp_implementationWithBlock(
-            ^(id self_, UIInterfaceOrientation orientation, BOOL animated) {
+    // ── Hook 2 : _updateClientSettingsToInterfaceOrientation:withAnimationDuration: ──
+    // C'est ici que l'animation de rotation est physiquement déclenchée.
+    // On bloque si l'orientation demandée ≠ orientation verrouillée.
+    SEL selUpdate = NSSelectorFromString(@"_updateClientSettingsToInterfaceOrientation:withAnimationDuration:");
+    Method mUpdate = class_getInstanceMethod(wsCls, selUpdate);
+    if (mUpdate) {
+        IMP orig = method_getImplementation(mUpdate);
+        method_setImplementation(mUpdate, imp_implementationWithBlock(
+            ^(id self_, UIInterfaceOrientation orientation, double duration) {
                 if (s_orientationLocked && orientation != s_lockedOrientation) {
                     [[SevenTVManager sharedManager]
-                        log:@"🔒 _setInterfaceOrientation:animated: bloqué (%ld)", (long)orientation];
+                        log:@"🔒 _updateClientSettings bloqué (orientation=%ld)", (long)orientation];
                     return;
                 }
-                ((void(*)(id,SEL,UIInterfaceOrientation,BOOL))orig)(self_, sel1, orientation, animated);
+                ((void(*)(id,SEL,UIInterfaceOrientation,double))orig)(self_, selUpdate, orientation, duration);
             }));
-        [[SevenTVManager sharedManager] log:@"✅ _setInterfaceOrientation:animated: hooké"];
-        return;
+        [[SevenTVManager sharedManager] log:@"✅ _updateClientSettingsToInterfaceOrientation: hooké"];
+    } else {
+        [[SevenTVManager sharedManager] log:@"⚠️ _updateClientSettingsToInterfaceOrientation: introuvable"];
     }
-
-    // Fallback sans animated:
-    SEL sel2 = NSSelectorFromString(@"_setInterfaceOrientation:");
-    Method m2 = class_getInstanceMethod(wsCls, sel2);
-    if (m2) {
-        IMP orig = method_getImplementation(m2);
-        method_setImplementation(m2, imp_implementationWithBlock(
-            ^(id self_, UIInterfaceOrientation orientation) {
-                if (s_orientationLocked && orientation != s_lockedOrientation) {
-                    [[SevenTVManager sharedManager]
-                        log:@"🔒 _setInterfaceOrientation: bloqué (%ld)", (long)orientation];
-                    return;
-                }
-                ((void(*)(id,SEL,UIInterfaceOrientation))orig)(self_, sel2, orientation);
-            }));
-        [[SevenTVManager sharedManager] log:@"✅ _setInterfaceOrientation: hooké"];
-        return;
-    }
-
-    [[SevenTVManager sharedManager] log:@"⚠️ _setInterfaceOrientation(:animated:) introuvable sur UIWindowScene"];
 }
 static void s7tv_swizzle_orientation_lock(void) {
     // Hook privé UIWindowScene : bloque la rotation avant l'animation (premier frame)
