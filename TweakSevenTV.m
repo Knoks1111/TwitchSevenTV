@@ -1131,14 +1131,70 @@ static void s7tv_hook_network_image_requester(void) {
 
 // ── Clé associated object pour marquer le bouton déjà hijacké ── (déclarée en tête de fichier)
 
-// ── Toast propre (pas d'alert, juste un label centré qui disparaît) ──────────
+// ── Orientation verrouillée capturée au moment du lock ───────────────────────
+static UIInterfaceOrientation s_lockedOrientation = UIInterfaceOrientationUnknown;
+
+// ── Applique la transform visuelle sur toutes les fenêtres ──────────────────
+static void s7tv_applyOrientationTransform(UIInterfaceOrientation targetOrientation) {
+    CGFloat angle = 0.0;
+    CGSize screenSize = [UIScreen mainScreen].bounds.size;
+
+    switch (targetOrientation) {
+        case UIInterfaceOrientationLandscapeLeft:       angle = -M_PI_2; break;
+        case UIInterfaceOrientationLandscapeRight:      angle =  M_PI_2; break;
+        case UIInterfaceOrientationPortraitUpsideDown:  angle =  M_PI;   break;
+        default:                                        angle =  0.0;    break;
+    }
+
+    CGFloat w = MIN(screenSize.width, screenSize.height);
+    CGFloat h = MAX(screenSize.width, screenSize.height);
+
+    for (UIWindow *win in [UIApplication sharedApplication].windows) {
+        if ([NSStringFromClass([win class]) isEqualToString:@"SevenTVFloatingWindow"]) continue;
+
+        if (angle == 0.0) {
+            win.transform = CGAffineTransformIdentity;
+            win.frame     = CGRectMake(0, 0, screenSize.width, screenSize.height);
+            win.bounds    = CGRectMake(0, 0, screenSize.width, screenSize.height);
+        } else {
+            win.transform = CGAffineTransformMakeRotation(angle);
+            win.bounds    = CGRectMake(0, 0, h, w);
+            win.center    = CGPointMake(w / 2.0, h / 2.0);
+        }
+    }
+}
+
+// ── Observer rotations physiques pour maintenir le verrou ────────────────────
+static id s_orientationObserver = nil;
+
+static void s7tv_startOrientationObserver(void) {
+    if (s_orientationObserver) return;
+    [[UIDevice currentDevice] beginGeneratingDeviceOrientationNotifications];
+    s_orientationObserver = [[NSNotificationCenter defaultCenter]
+        addObserverForName:UIDeviceOrientationDidChangeNotification
+                    object:nil
+                     queue:[NSOperationQueue mainQueue]
+                usingBlock:^(NSNotification *n) {
+        if (!s_orientationLocked) return;
+        s7tv_applyOrientationTransform(s_lockedOrientation);
+    }];
+}
+
+static void s7tv_stopOrientationObserver(void) {
+    if (!s_orientationObserver) return;
+    [[NSNotificationCenter defaultCenter] removeObserver:s_orientationObserver];
+    s_orientationObserver = nil;
+    [[UIDevice currentDevice] endGeneratingDeviceOrientationNotifications];
+}
+
+// ── Toast ─────────────────────────────────────────────────────────────────────
 static void s7tv_showOrientationToast(BOOL locked) {
     dispatch_async(dispatch_get_main_queue(), ^{
         UIWindow *keyWindow = nil;
-        for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
+        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
             if (![scene isKindOfClass:[UIWindowScene class]]) continue;
             if (scene.activationState != UISceneActivationStateForegroundActive) continue;
-            for (UIWindow *w in scene.windows) {
+            for (UIWindow *w in ((UIWindowScene *)scene).windows) {
                 if (!w.isHidden && w.windowLevel == UIWindowLevelNormal) {
                     keyWindow = w; break;
                 }
@@ -1147,11 +1203,9 @@ static void s7tv_showOrientationToast(BOOL locked) {
         }
         if (!keyWindow) return;
 
-        // Icône + texte
         NSString *symbol = locked ? @"lock.rotation"      : @"lock.rotation.open";
         NSString *label  = locked ? @"Orientation verrouillée" : @"Orientation déverrouillée";
 
-        // Container arrondi style iOS
         UIView *toast = [[UIView alloc] init];
         toast.backgroundColor = [UIColor colorWithWhite:0.08 alpha:0.88];
         toast.layer.cornerRadius = 18;
@@ -1160,7 +1214,6 @@ static void s7tv_showOrientationToast(BOOL locked) {
         toast.translatesAutoresizingMaskIntoConstraints = NO;
         [keyWindow addSubview:toast];
 
-        // Icône SF Symbol
         UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration
             configurationWithPointSize:22 weight:UIImageSymbolWeightMedium];
         UIImage *icon = [UIImage systemImageNamed:symbol withConfiguration:cfg];
@@ -1172,7 +1225,6 @@ static void s7tv_showOrientationToast(BOOL locked) {
         iconView.translatesAutoresizingMaskIntoConstraints = NO;
         [toast addSubview:iconView];
 
-        // Label
         UILabel *lbl = [[UILabel alloc] init];
         lbl.text      = label;
         lbl.font      = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
@@ -1180,7 +1232,10 @@ static void s7tv_showOrientationToast(BOOL locked) {
         lbl.translatesAutoresizingMaskIntoConstraints = NO;
         [toast addSubview:lbl];
 
-        // Layout interne du toast
+        // Le toast doit être en coordonnées de fenêtre, pas rotées
+        CGFloat winW = keyWindow.bounds.size.width;
+        CGFloat winH = keyWindow.bounds.size.height;
+
         [NSLayoutConstraint activateConstraints:@[
             [iconView.leadingAnchor  constraintEqualToAnchor:toast.leadingAnchor  constant:16],
             [iconView.centerYAnchor  constraintEqualToAnchor:toast.centerYAnchor],
@@ -1190,19 +1245,12 @@ static void s7tv_showOrientationToast(BOOL locked) {
             [lbl.trailingAnchor      constraintEqualToAnchor:toast.trailingAnchor    constant:-16],
             [lbl.centerYAnchor       constraintEqualToAnchor:toast.centerYAnchor],
             [toast.heightAnchor      constraintEqualToConstant:52],
+            [toast.centerXAnchor     constraintEqualToAnchor:keyWindow.centerXAnchor],
+            [toast.topAnchor         constraintEqualToAnchor:keyWindow.topAnchor constant:winH * 0.28],
         ]];
 
-        // Position : centré horizontalement, 30% depuis le haut
-        [NSLayoutConstraint activateConstraints:@[
-            [toast.centerXAnchor constraintEqualToAnchor:keyWindow.centerXAnchor],
-            [toast.topAnchor     constraintEqualToAnchor:keyWindow.topAnchor
-                                                constant:keyWindow.bounds.size.height * 0.28],
-        ]];
-
-        // Forcer le layout pour avoir la bonne largeur
         [keyWindow layoutIfNeeded];
 
-        // Apparition + disparition
         [UIView animateWithDuration:0.25 animations:^{ toast.alpha = 1.0; } completion:^(BOOL f) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.6 * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{
@@ -1213,30 +1261,29 @@ static void s7tv_showOrientationToast(BOOL locked) {
     });
 }
 
-// ── Hook supportedInterfaceOrientations sur UIViewController ─────────────────
+// ── Fallback UIKit : supportedInterfaceOrientations ──────────────────────────
 @interface UIViewController (S7TVOrientationLock)
 - (UIInterfaceOrientationMask)s7tv_supportedInterfaceOrientations;
 @end
 @implementation UIViewController (S7TVOrientationLock)
 - (UIInterfaceOrientationMask)s7tv_supportedInterfaceOrientations {
     if (s_orientationLocked) return s_lockedOrientationMask;
-    return [self s7tv_supportedInterfaceOrientations]; // appel original
+    return [self s7tv_supportedInterfaceOrientations];
 }
 @end
 
-// ── Hook shouldAutorotate ────────────────────────────────────────────────────
+// ── Fallback UIKit : shouldAutorotate ─────────────────────────────────────────
 @interface UIViewController (S7TVAutorotate)
 - (BOOL)s7tv_shouldAutorotate;
 @end
 @implementation UIViewController (S7TVAutorotate)
 - (BOOL)s7tv_shouldAutorotate {
     if (s_orientationLocked) return NO;
-    return [self s7tv_shouldAutorotate]; // appel original
+    return [self s7tv_shouldAutorotate];
 }
 @end
 
-
-// ── Action toggle (catégorie sur SevenTVManager) ─────────────────────────────
+// ── Action toggle ─────────────────────────────────────────────────────────────
 @interface SevenTVManager (OrientationLock)
 - (void)s7tv_toggleOrientationLock:(UIButton *)sender;
 @end
@@ -1245,21 +1292,21 @@ static void s7tv_showOrientationToast(BOOL locked) {
 - (void)s7tv_toggleOrientationLock:(UIButton *)sender {
     s_orientationLocked = !s_orientationLocked;
 
-    // Trouver la UIWindowScene active
-    UIWindowScene *activeScene = nil;
-    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-        if ([scene isKindOfClass:[UIWindowScene class]] &&
-            scene.activationState == UISceneActivationStateForegroundActive) {
-            activeScene = (UIWindowScene *)scene;
-            break;
-        }
-    }
-
     if (s_orientationLocked) {
-        // Capturer l'orientation courante
+        // Capturer l'orientation courante de la scène
+        UIWindowScene *activeScene = nil;
+        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+            if ([scene isKindOfClass:[UIWindowScene class]] &&
+                scene.activationState == UISceneActivationStateForegroundActive) {
+                activeScene = (UIWindowScene *)scene;
+                break;
+            }
+        }
         UIInterfaceOrientation current = activeScene
             ? activeScene.interfaceOrientation
             : UIInterfaceOrientationPortrait;
+
+        s_lockedOrientation = current;
 
         switch (current) {
             case UIInterfaceOrientationLandscapeLeft:
@@ -1272,29 +1319,23 @@ static void s7tv_showOrientationToast(BOOL locked) {
                 s_lockedOrientationMask = UIInterfaceOrientationMaskPortrait; break;
         }
 
-        // Forcer la scène à rester dans cette orientation (iOS 16+)
-        if (@available(iOS 16.0, *)) {
-            if (activeScene) {
-                UIWindowSceneGeometryPreferencesIOS *prefs =
-                    [[UIWindowSceneGeometryPreferencesIOS alloc] initWithInterfaceOrientations:s_lockedOrientationMask];
-                [activeScene requestGeometryUpdateWithPreferences:prefs errorHandler:^(NSError *err) {
-                    [[SevenTVManager sharedManager] log:@"⚠️ requestGeometryUpdate erreur: %@", err.localizedDescription];
-                }];
-            }
-        }
+        // Appliquer la transform visuelle immédiatement + démarrer l'observer
+        [UIView animateWithDuration:0.25 animations:^{
+            s7tv_applyOrientationTransform(s_lockedOrientation);
+        }];
+        s7tv_startOrientationObserver();
 
-        [self log:@"🔒 Orientation verrouillée (mask=%lu)", (unsigned long)s_lockedOrientationMask];
+        [self log:@"🔒 Orientation verrouillée (orientation=%ld)", (long)current];
+
     } else {
         s_lockedOrientationMask = UIInterfaceOrientationMaskAll;
+        s_lockedOrientation     = UIInterfaceOrientationUnknown;
 
-        // Déverrouiller : laisser toutes les orientations
-        if (@available(iOS 16.0, *)) {
-            if (activeScene) {
-                UIWindowSceneGeometryPreferencesIOS *prefs =
-                    [[UIWindowSceneGeometryPreferencesIOS alloc] initWithInterfaceOrientations:UIInterfaceOrientationMaskAll];
-                [activeScene requestGeometryUpdateWithPreferences:prefs errorHandler:nil];
-            }
-        }
+        s7tv_stopOrientationObserver();
+
+        [UIView animateWithDuration:0.25 animations:^{
+            s7tv_applyOrientationTransform(UIInterfaceOrientationUnknown); // angle=0 → reset
+        }];
 
         [UIViewController attemptRotationToDeviceOrientation];
         [self log:@"🔓 Orientation déverrouillée"];
@@ -1315,7 +1356,6 @@ static void s7tv_showOrientationToast(BOOL locked) {
     }
     sender.tintColor = tint;
 
-    // Toast de confirmation
     s7tv_showOrientationToast(s_orientationLocked);
 }
 
@@ -1323,21 +1363,15 @@ static void s7tv_showOrientationToast(BOOL locked) {
 
 // ── Enregistrement des swizzles orientation ───────────────────────────────────
 static void s7tv_swizzle_orientation_lock(void) {
-    // supportedInterfaceOrientations
     s7tv_swizzle([UIViewController class],
                  [UIViewController class],
                  @selector(supportedInterfaceOrientations),
                  @selector(s7tv_supportedInterfaceOrientations));
 
-    // shouldAutorotate
     s7tv_swizzle([UIViewController class],
                  [UIViewController class],
                  @selector(shouldAutorotate),
                  @selector(s7tv_shouldAutorotate));
-
-    // didMoveToWindow est déjà swizzlé vers s7tv_didMoveToWindow.
-    // La détection de TheaterPlayerControlsView est faite directement
-    // dans s7tv_didMoveToWindow (voir ci-dessous dans S7TVChatInputHook).
 
     [[SevenTVManager sharedManager] log:@"✅ Swizzles verrou orientation enregistrés"];
 }
