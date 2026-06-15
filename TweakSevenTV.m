@@ -1187,156 +1187,31 @@ static void TwitchSevenTVInit(void) {
 
                     if (emoteLayers.count == 0) return;
 
-                    // ── Dump MULTI-ÉCHANTILLONS AnimatedImageAttachmentLayer (max 5) ──
-                    static NSInteger s_animSampleCount = 0;
-                    static const NSInteger kS7TVAnimMaxSamples = 5;
-                    static BOOL s_displayLayerSwizzled = NO;
-                    static NSMutableDictionary *s_displayCounts = nil;
-                    static BOOL s_initFPSSwizzled = NO;
-                    if (s_animSampleCount < kS7TVAnimMaxSamples && emoteLayers.count > 0) {
-                        s_animSampleCount++;
-                        NSInteger sampleIdx = s_animSampleCount;
-                        SevenTVManager *mgr = [SevenTVManager sharedManager];
-                        CALayer *sample = emoteLayers.firstObject;
-
-                        // 1. Classe + frame du layer parent (ImageAttachmentLayer)
-                        Class parentClass = object_getClass(sample);
-                        [mgr log:@"🎞[%ld] parent: %@  frame=(%.1f,%.1f,%.1f,%.1f)",
-                         (long)sampleIdx, NSStringFromClass(parentClass),
-                         sample.frame.origin.x, sample.frame.origin.y,
-                         sample.frame.size.width, sample.frame.size.height];
-
-                        // 2. iVars du parent + encodages (pour repérer "content")
-                        unsigned int pic = 0;
-                        Ivar *piv = class_copyIvarList(parentClass, &pic);
-                        for (unsigned int i = 0; i < pic; i++) {
-                            const char *enc = ivar_getTypeEncoding(piv[i]);
-                            [mgr log:@"🎞[%ld]   parent iVar: %s (%s)",
-                             (long)sampleIdx, ivar_getName(piv[i]), enc ?: "?"];
-                        }
-                        free(piv);
-
-                        // 3. Quelles méthodes le parent expose-t-il vraiment ? (sans rien lire)
-                        s7tvLogResponds(sample, @[
-                            @"content", @"setContent:",
-                            @"currentDisplayMode", @"setCurrentDisplayMode:",
-                            @"animatedImageLayer", @"setAnimatedImageLayer:",
-                            @"staticImageLayer", @"setStaticImageLayer:",
-                            @"currentImageLayer", @"setCurrentImageLayer:",
-                            @"networkImageRequester", @"setNetworkImageRequester:"
-                        ], sampleIdx, @"parent");
-
-                        // 4. Sublayers (AnimatedImageAttachmentLayer) — via API publique
-                        for (CALayer *sub in sample.sublayers) {
-                            Class sc = object_getClass(sub);
-                            [mgr log:@"🎞[%ld] sublayer: %@  bounds=(%.1fx%.1f)",
-                             (long)sampleIdx, NSStringFromClass(sc),
-                             sub.bounds.size.width, sub.bounds.size.height];
-
-                            // iVars + encodages
-                            unsigned int ic = 0;
-                            Ivar *iv = class_copyIvarList(sc, &ic);
-                            for (unsigned int i = 0; i < ic; i++) {
-                                const char *enc = ivar_getTypeEncoding(iv[i]);
-                                [mgr log:@"🎞[%ld]   iVar: %s (%s)",
-                                 (long)sampleIdx, ivar_getName(iv[i]), enc ?: "?"];
-                            }
-                            free(iv);
-
-                            // Méthodes + encodages (notamment initWithFPS: et displayLayer:)
-                            unsigned int mc = 0;
-                            Method *mv = class_copyMethodList(sc, &mc);
-                            for (unsigned int i = 0; i < mc; i++) {
-                                const char *enc = method_getTypeEncoding(mv[i]);
-                                [mgr log:@"🎞[%ld]   method: %@ (%s)",
-                                 (long)sampleIdx, NSStringFromSelector(method_getName(mv[i])), enc ?: "?"];
-                            }
-
-                            // 5. Swizzle displayLayer: (une seule fois, toutes instances confondues)
-                            //    — uniquement si l'encodage correspond au pattern attendu
-                            //    (void return, 1 argument objet), pour éviter tout mismatch d'ABI.
-                            if (!s_displayLayerSwizzled) {
-                                SEL displaySel = NSSelectorFromString(@"displayLayer:");
-                                Method dm = class_getInstanceMethod(sc, displaySel);
-                                if (dm) {
-                                    const char *denc = method_getTypeEncoding(dm);
-                                    if (denc && denc[0] == 'v' && strchr(denc, '@') != NULL) {
-                                        s_displayLayerSwizzled = YES;
-                                        s_displayCounts = [NSMutableDictionary dictionary];
-                                        IMP origIMP = method_getImplementation(dm);
-                                        IMP newIMP = imp_implementationWithBlock(^(id self_, id layerArg){
-                                            @try {
-                                                NSValue *key = [NSValue valueWithNonretainedObject:self_];
-                                                @synchronized (s_displayCounts) {
-                                                    NSNumber *c = s_displayCounts[key];
-                                                    s_displayCounts[key] = @(c.integerValue + 1);
-                                                }
-                                            } @catch (__unused NSException *e) {}
-                                            @try {
-                                                ((void(*)(id,SEL,id))origIMP)(self_, displaySel, layerArg);
-                                            } @catch (__unused NSException *e) {}
-                                        });
-                                        method_setImplementation(dm, newIMP);
-                                        [mgr log:@"🎞 displayLayer: swizzlé pour comptage (encoding=%s)", denc];
-                                    } else {
-                                        [mgr log:@"🎞 displayLayer: encoding inattendu (%s), pas de swizzle", denc ?: "?"];
+                    // Hook displayLayer: sur CALayer (superclasse) en filtrant AnimatedImageAttachmentLayer
+                    // displayLayer: est dispatché par CALayer, pas par AnimatedImageAttachmentLayer lui-même
+                    static BOOL s_displayLayerHooked = NO;
+                    if (!s_displayLayerHooked) {
+                        Class calayerCls = [CALayer class];
+                        SEL displaySel = NSSelectorFromString(@"displayLayer:");
+                        Method dm = class_getInstanceMethod(calayerCls, displaySel);
+                        if (dm) {
+                            IMP origIMP = method_getImplementation(dm);
+                            SEL startSel = NSSelectorFromString(@"startAnimating");
+                            method_setImplementation(dm, imp_implementationWithBlock(^(id selfObj, id layerArg) {
+                                @try { ((void(*)(id,SEL,id))origIMP)(selfObj, displaySel, layerArg); } @catch(...) {}
+                                // Appeler startAnimating seulement sur AnimatedImageAttachmentLayer
+                                @try {
+                                    if ([NSStringFromClass(object_getClass(layerArg)) containsString:@"AnimatedImage"]) {
+                                        if ([layerArg respondsToSelector:startSel]) {
+                                            ((void(*)(id,SEL))objc_msgSend)(layerArg, startSel);
+                                        }
                                     }
-                                }
-                            }
-                            free(mv);
-
-                            // 5b. Swizzle initWithFPS: (encodage @24@0:8q16 = instancetype(int64_t))
-                            //     — confirmé sur l'échantillon précédent, donc safe à hooker.
-                            if (!s_initFPSSwizzled) {
-                                SEL fpsSel = NSSelectorFromString(@"initWithFPS:");
-                                Method fm = class_getInstanceMethod(sc, fpsSel);
-                                if (fm) {
-                                    const char *fenc = method_getTypeEncoding(fm);
-                                    if (fenc && fenc[0] == '@' && strchr(fenc, 'q') != NULL) {
-                                        s_initFPSSwizzled = YES;
-                                        IMP origFPSIMP = method_getImplementation(fm);
-                                        IMP newFPSIMP = imp_implementationWithBlock(^id(id self_, int64_t fps){
-                                            [[SevenTVManager sharedManager] log:@"🎞 initWithFPS: fps=%lld classe=%@",
-                                             (long long)fps, NSStringFromClass(object_getClass(self_))];
-                                            @try {
-                                                return ((id(*)(id,SEL,int64_t))origFPSIMP)(self_, fpsSel, fps);
-                                            } @catch (__unused NSException *e) {
-                                                return self_;
-                                            }
-                                        });
-                                        method_setImplementation(fm, newFPSIMP);
-                                        [mgr log:@"🎞 initWithFPS: swizzlé pour log (encoding=%s)", fenc];
-                                    } else {
-                                        [mgr log:@"🎞 initWithFPS: encoding inattendu (%s), pas de swizzle", fenc ?: "?"];
-                                    }
-                                }
-                            }
-                            // 5c. Quelles méthodes le sublayer animé expose-t-il vraiment ?
-                            s7tvLogResponds(sub, @[
-                                @"invalidationToken", @"setInvalidationToken:",
-                                @"networkImageRequester", @"setNetworkImageRequester:",
-                                @"startAnimating", @"stopAnimating", @"play", @"pause",
-                                @"setFps:", @"fps", @"setPaused:", @"isPaused",
-                                @"currentFrame", @"setCurrentFrame:"
-                            ], sampleIdx, @"sublayer");
-
-                            // 6. Après 3s : compteur displayLayer:
-                            __weak CALayer *weakSub = sub;
-                            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
-                                           dispatch_get_main_queue(), ^{
-                                CALayer *strongSub = weakSub;
-                                NSInteger count = 0;
-                                if (strongSub && s_displayCounts) {
-                                    NSValue *key = [NSValue valueWithNonretainedObject:strongSub];
-                                    @synchronized (s_displayCounts) {
-                                        count = [s_displayCounts[key] integerValue];
-                                    }
-                                }
-                                [[SevenTVManager sharedManager] log:@"🎞[%ld] displayLayer: appelé %ld fois en 3s",
-                                 (long)sampleIdx, (long)count];
-                            });
+                                } @catch(...) {}
+                            }));
+                            s_displayLayerHooked = YES;
                         }
                     }
+
                     // ─────────────────────────────────────────────────────────────
 
                     NSInteger emoteIndex = 0;
@@ -1357,32 +1232,7 @@ static void TwitchSevenTVInit(void) {
                     }
                     [CATransaction commit];
 
-                    // Hook displayLayer: sur AnimatedImageAttachmentLayer
-                    // displayLayer: est appelé quand l'image est chargée et prête à être affichée
-                    // C'est le moment exact pour appeler startAnimating
-                    static BOOL s_displayLayerHooked = NO;
-                    if (!s_displayLayerHooked) {
-                        Class animCls = NSClassFromString(@"Twitch.AnimatedImageAttachmentLayer");
-                        if (animCls) {
-                            SEL displaySel = NSSelectorFromString(@"displayLayer:");
-                            Method displayMethod = class_getInstanceMethod(animCls, displaySel);
-                            if (displayMethod) {
-                                IMP origDisplayIMP = method_getImplementation(displayMethod);
-                                SEL startSel = NSSelectorFromString(@"startAnimating");
-                                method_setImplementation(displayMethod, imp_implementationWithBlock(
-                                    ^(id selfLayer, CALayer *layer) {
-                                        // Appel original d'abord
-                                        ((void (*)(id, SEL, CALayer *))origDisplayIMP)(selfLayer, displaySel, layer);
-                                        // Puis démarrer l'animation — l'image est maintenant chargée
-                                        if ([selfLayer respondsToSelector:startSel]) {
-                                            ((void (*)(id, SEL))objc_msgSend)(selfLayer, startSel);
-                                        }
-                                    }
-                                ));
-                                s_displayLayerHooked = YES;
-                            }
-                        }
-                    }
+
                 });
             });
 
