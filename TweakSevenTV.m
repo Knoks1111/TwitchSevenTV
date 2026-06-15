@@ -1357,12 +1357,29 @@ static void TwitchSevenTVInit(void) {
                     }
                     [CATransaction commit];
 
-                    // Démarrer l'animation sur chaque AnimatedImageAttachmentLayer
+                    // Dump méthodes de AnimatedImageAttachmentLayer (une seule fois)
+                    static BOOL s_animDumped = NO;
                     for (CALayer *caLayer in emoteLayers) {
                         for (CALayer *sub in caLayer.sublayers) {
                             if ([NSStringFromClass(object_getClass(sub)) containsString:@"Animated"]) {
-                                if ([sub respondsToSelector:NSSelectorFromString(@"startAnimating")]) {
-                                    ((void (*)(id, SEL))objc_msgSend)(sub, NSSelectorFromString(@"startAnimating"));
+                                if (!s_animDumped) {
+                                    s_animDumped = YES;
+                                    Class animCls = object_getClass(sub);
+                                    [[SevenTVManager sharedManager] log:@"🎞 AnimatedLayer classe: %@", NSStringFromClass(animCls)];
+                                    unsigned int mc = 0;
+                                    Method *methods = class_copyMethodList(animCls, &mc);
+                                    [[SevenTVManager sharedManager] log:@"🎞 méthodes (%u):", mc];
+                                    for (unsigned int i = 0; i < mc; i++) {
+                                        [[SevenTVManager sharedManager] log:@"🎞   %@", NSStringFromSelector(method_getName(methods[i]))];
+                                    }
+                                    free(methods);
+                                    unsigned int ic = 0;
+                                    Ivar *ivars = class_copyIvarList(animCls, &ic);
+                                    [[SevenTVManager sharedManager] log:@"🎞 iVars (%u):", ic];
+                                    for (unsigned int i = 0; i < ic; i++) {
+                                        [[SevenTVManager sharedManager] log:@"🎞   %s", ivar_getName(ivars[i])];
+                                    }
+                                    free(ivars);
                                 }
                             }
                         }
