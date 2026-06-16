@@ -133,27 +133,28 @@ static void s7tvLogResponds(id obj, NSArray<NSString *> *selectors, NSInteger sa
     NSString *selfClass = NSStringFromClass([self class]);
 
     // ── Hijack bouton Share → verrou orientation ──────────────────────────────
+    // On vérifie que la vue est bien dans le contexte theater (ancêtre accID=theater-view)
+    // et pas dans le feed de la page d'accueil, avant même de lancer le dispatch_after.
     if ([selfClass isEqualToString:@"Twitch.TheaterPlayerControlsView"] && self.window) {
-        if (!objc_getAssociatedObject(self, &kS7TVShareHijacked)) {
-            objc_setAssociatedObject(self, &kS7TVShareHijacked, @YES,
-                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        BOOL inTheater = NO;
+        UIView *ancestor = self.superview;
+        while (ancestor) {
+            if ([[ancestor accessibilityIdentifier] isEqualToString:@"theater-view"]) {
+                inTheater = YES; break;
+            }
+            ancestor = ancestor.superview;
+        }
+        if (inTheater && !objc_getAssociatedObject(self, &kS7TVShareHijacked)) {
             __weak UIView *weakSelf = self;
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{
                 UIView *controls = weakSelf;
                 if (!controls || !controls.window) return;
 
-                [[SevenTVManager sharedManager]
-                    log:@"🪟 TheaterPlayerControlsView window: %@",
-                    NSStringFromClass([controls.window class])];
-
-                // Guard : uniquement dans la PictureInPictureWindow (player theater),
-                // pas dans le feed de la page d'accueil.
-                if (![NSStringFromClass([controls.window class])
-                        isEqualToString:@"Twitch.PictureInPictureWindow"]) {
-                    [[SevenTVManager sharedManager] log:@"⛔ Guard fenêtre → skip"];
-                    return;
-                }
+                // Poser le flag ici seulement, après le guard
+                if (objc_getAssociatedObject(controls, &kS7TVShareHijacked)) return;
+                objc_setAssociatedObject(controls, &kS7TVShareHijacked, @YES,
+                                         OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
                 // Trouver le bouton Share par accID
                 UIButton *shareBtn = nil;
