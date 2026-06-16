@@ -143,10 +143,17 @@ static void s7tvLogResponds(id obj, NSArray<NSString *> *selectors, NSInteger sa
                 UIView *controls = weakSelf;
                 if (!controls || !controls.window) return;
 
+                [[SevenTVManager sharedManager]
+                    log:@"🪟 TheaterPlayerControlsView window: %@",
+                    NSStringFromClass([controls.window class])];
+
                 // Guard : uniquement dans la PictureInPictureWindow (player theater),
                 // pas dans le feed de la page d'accueil.
                 if (![NSStringFromClass([controls.window class])
-                        isEqualToString:@"Twitch.PictureInPictureWindow"]) return;
+                        isEqualToString:@"Twitch.PictureInPictureWindow"]) {
+                    [[SevenTVManager sharedManager] log:@"⛔ Guard fenêtre → skip"];
+                    return;
+                }
 
                 // Trouver le bouton Share par accID
                 UIButton *shareBtn = nil;
