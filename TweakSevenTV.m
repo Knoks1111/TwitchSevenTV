@@ -135,6 +135,8 @@ static void s7tvLogResponds(id obj, NSArray<NSString *> *selectors, NSInteger sa
     // ── Hijack bouton Share → verrou orientation ──────────────────────────────
     if ([selfClass isEqualToString:@"Twitch.TheaterPlayerControlsView"] && self.window) {
         if (!objc_getAssociatedObject(self, &kS7TVShareHijacked)) {
+            objc_setAssociatedObject(self, &kS7TVShareHijacked, @YES,
+                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             __weak UIView *weakSelf = self;
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{
@@ -197,9 +199,6 @@ static void s7tvLogResponds(id obj, NSArray<NSString *> *selectors, NSInteger sa
                 [shareBtn addTarget:[SevenTVManager sharedManager]
                              action:@selector(s7tv_toggleOrientationLock:)
                    forControlEvents:UIControlEventTouchUpInside];
-
-                objc_setAssociatedObject(controls, &kS7TVShareHijacked, @YES,
-                                         OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
                 [[SevenTVManager sharedManager]
                     log:@"✅ Bouton Share hijacké → verrou orientation"];
