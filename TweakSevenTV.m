@@ -132,45 +132,78 @@ static void s7tvLogResponds(id obj, NSArray<NSString *> *selectors, NSInteger sa
 
     NSString *selfClass = NSStringFromClass([self class]);
 
-    // ── Bouton cadenas flottant dans PictureInPictureWindow ──────────────────
-    // On injecte directement dans la fenêtre theater quand elle apparaît,
-    // sans toucher aux boutons natifs de Twitch.
-    if ([selfClass isEqualToString:@"Twitch.TheaterView"] && self.window &&
-        [NSStringFromClass([self.window class]) isEqualToString:@"Twitch.PictureInPictureWindow"]) {
+    // ── Hijack bouton Share → verrou orientation ──────────────────────────────
+    if ([selfClass isEqualToString:@"Twitch.TheaterPlayerControlsView"] && self.window) {
         if (!objc_getAssociatedObject(self, &kS7TVShareHijacked)) {
-            objc_setAssociatedObject(self, &kS7TVShareHijacked, @YES,
-                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             __weak UIView *weakSelf = self;
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{
-                UIView *theaterView = weakSelf;
-                if (!theaterView || !theaterView.window) return;
+                UIView *controls = weakSelf;
+                if (!controls || !controls.window) return;
 
-                // Éviter double injection
-                for (UIView *sub in theaterView.subviews) {
-                    if (sub.tag == 0x7778) return;
+                // Guard : uniquement dans la PictureInPictureWindow (player theater)
+                if (![NSStringFromClass([controls.window class])
+                        isEqualToString:@"Twitch.PictureInPictureWindow"]) return;
+
+                // Flag posé ICI, après le guard — pas avant
+                if (objc_getAssociatedObject(controls, &kS7TVShareHijacked)) return;
+                objc_setAssociatedObject(controls, &kS7TVShareHijacked, @YES,
+                                         OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+                // Trouver le bouton Share par accID
+                UIButton *shareBtn = nil;
+                NSMutableArray *q = [NSMutableArray arrayWithObject:controls];
+                while (q.count > 0) {
+                    UIView *v = q[0]; [q removeObjectAtIndex:0];
+                    if ([v isKindOfClass:[UIButton class]] &&
+                        [[v accessibilityIdentifier] isEqualToString:@"share_button"]) {
+                        shareBtn = (UIButton *)v;
+                        break;
+                    }
+                    [q addObjectsFromArray:v.subviews];
+                }
+                if (!shareBtn) {
+                    [[SevenTVManager sharedManager]
+                        log:@"⚠️ share_button introuvable dans TheaterPlayerControlsView"];
+                    return;
                 }
 
+                // Retirer shareButtonTapped original
+                NSSet *targets = [shareBtn allTargets];
+                for (id tgt in [targets allObjects]) {
+                    NSArray *actions = [shareBtn actionsForTarget:tgt
+                                            forControlEvent:UIControlEventTouchUpInside];
+                    for (NSString *action in actions) {
+                        [shareBtn removeTarget:tgt action:NSSelectorFromString(action)
+                              forControlEvents:UIControlEventTouchUpInside];
+                        [[SevenTVManager sharedManager]
+                            log:@"🔌 Share: action retirée — %@->%@",
+                            NSStringFromClass([tgt class]), action];
+                    }
+                }
+
+                // Icône cadenas
                 UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration
                     configurationWithPointSize:20 weight:UIImageSymbolWeightMedium];
-                UIImage *icon = [UIImage systemImageNamed:@"lock.rotation.open"
-                                           withConfiguration:cfg];
+                NSString *sym = s_orientationLocked ? @"lock.rotation" : @"lock.rotation.open";
+                UIImage *lockIcon = [UIImage systemImageNamed:sym withConfiguration:cfg];
 
-                UIButton *lockBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-                lockBtn.tag = 0x7778;
-                [lockBtn setImage:icon forState:UIControlStateNormal];
-                lockBtn.tintColor = [UIColor whiteColor];
-                lockBtn.frame = CGRectMake(theaterView.bounds.size.width - 50, 8, 36, 36);
-                lockBtn.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
-                lockBtn.accessibilityIdentifier = @"s7tv_lock_button";
+                for (NSNumber *st in @[@(UIControlStateNormal), @(UIControlStateHighlighted),
+                                        @(UIControlStateSelected), @(UIControlStateDisabled)]) {
+                    [shareBtn setImage:lockIcon forState:st.unsignedIntegerValue];
+                }
+                shareBtn.tintColor              = s_orientationLocked
+                    ? [UIColor colorWithRed:0.55 green:0.25 blue:0.95 alpha:1.0]
+                    : [UIColor whiteColor];
+                shareBtn.accessibilityLabel      = @"Verrouiller l'orientation";
+                shareBtn.accessibilityIdentifier = @"s7tv_lock_button";
 
-                [lockBtn addTarget:[SevenTVManager sharedManager]
-                            action:@selector(s7tv_toggleOrientationLock:)
-                  forControlEvents:UIControlEventTouchUpInside];
+                [shareBtn addTarget:[SevenTVManager sharedManager]
+                             action:@selector(s7tv_toggleOrientationLock:)
+                   forControlEvents:UIControlEventTouchUpInside];
 
-                [theaterView addSubview:lockBtn];
-
-                [[SevenTVManager sharedManager] log:@"✅ Bouton cadenas injecté dans TheaterView"];
+                [[SevenTVManager sharedManager]
+                    log:@"✅ Bouton Share hijacké → verrou orientation"];
             });
         }
     }
@@ -1166,32 +1199,32 @@ static void s7tv_stopOrientationObserver(void) {
 // ── Toast ─────────────────────────────────────────────────────────────────────
 static void s7tv_showOrientationToast(BOOL locked) {
     dispatch_async(dispatch_get_main_queue(), ^{
-        // Cherche la PictureInPictureWindow pour afficher le toast sur le stream
-        UIWindow *targetWindow = nil;
+        UIWindow *keyWindow = nil;
         for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
             if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+            if (scene.activationState != UISceneActivationStateForegroundActive) continue;
             for (UIWindow *w in ((UIWindowScene *)scene).windows) {
-                if ([NSStringFromClass([w class]) isEqualToString:@"Twitch.PictureInPictureWindow"]) {
-                    targetWindow = w; break;
+                if (!w.isHidden && w.windowLevel == UIWindowLevelNormal) {
+                    keyWindow = w; break;
                 }
             }
-            if (targetWindow) break;
+            if (keyWindow) break;
         }
-        if (!targetWindow) return;
+        if (!keyWindow) return;
 
-        NSString *symbol = locked ? @"lock.rotation" : @"lock.rotation.open";
-        NSString *label  = locked ? @"Verrouillé" : @"Déverrouillé";
+        NSString *symbol = locked ? @"lock.rotation"      : @"lock.rotation.open";
+        NSString *label  = locked ? @"Orientation verrouillée" : @"Orientation déverrouillée";
 
         UIView *toast = [[UIView alloc] init];
-        toast.backgroundColor = [UIColor colorWithWhite:0.08 alpha:0.85];
-        toast.layer.cornerRadius = 12;
+        toast.backgroundColor = [UIColor colorWithWhite:0.08 alpha:0.88];
+        toast.layer.cornerRadius = 18;
         toast.layer.masksToBounds = YES;
         toast.alpha = 0;
         toast.translatesAutoresizingMaskIntoConstraints = NO;
-        [targetWindow addSubview:toast];
+        [keyWindow addSubview:toast];
 
         UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration
-            configurationWithPointSize:14 weight:UIImageSymbolWeightMedium];
+            configurationWithPointSize:22 weight:UIImageSymbolWeightMedium];
         UIImage *icon = [UIImage systemImageNamed:symbol withConfiguration:cfg];
         UIImageView *iconView = [[UIImageView alloc] initWithImage:icon];
         iconView.tintColor   = locked
@@ -1203,30 +1236,34 @@ static void s7tv_showOrientationToast(BOOL locked) {
 
         UILabel *lbl = [[UILabel alloc] init];
         lbl.text      = label;
-        lbl.font      = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
+        lbl.font      = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
         lbl.textColor = [UIColor whiteColor];
         lbl.translatesAutoresizingMaskIntoConstraints = NO;
         [toast addSubview:lbl];
 
+        // Le toast doit être en coordonnées de fenêtre, pas rotées
+        CGFloat winW = keyWindow.bounds.size.width;
+        CGFloat winH = keyWindow.bounds.size.height;
+
         [NSLayoutConstraint activateConstraints:@[
-            [iconView.leadingAnchor  constraintEqualToAnchor:toast.leadingAnchor  constant:10],
+            [iconView.leadingAnchor  constraintEqualToAnchor:toast.leadingAnchor  constant:16],
             [iconView.centerYAnchor  constraintEqualToAnchor:toast.centerYAnchor],
-            [iconView.widthAnchor    constraintEqualToConstant:18],
-            [iconView.heightAnchor   constraintEqualToConstant:18],
-            [lbl.leadingAnchor       constraintEqualToAnchor:iconView.trailingAnchor constant:7],
-            [lbl.trailingAnchor      constraintEqualToAnchor:toast.trailingAnchor    constant:-10],
+            [iconView.widthAnchor    constraintEqualToConstant:26],
+            [iconView.heightAnchor   constraintEqualToConstant:26],
+            [lbl.leadingAnchor       constraintEqualToAnchor:iconView.trailingAnchor constant:10],
+            [lbl.trailingAnchor      constraintEqualToAnchor:toast.trailingAnchor    constant:-16],
             [lbl.centerYAnchor       constraintEqualToAnchor:toast.centerYAnchor],
-            [toast.heightAnchor      constraintEqualToConstant:36],
-            [toast.centerXAnchor     constraintEqualToAnchor:targetWindow.centerXAnchor],
-            [toast.topAnchor         constraintEqualToAnchor:targetWindow.topAnchor constant:20],
+            [toast.heightAnchor      constraintEqualToConstant:52],
+            [toast.centerXAnchor     constraintEqualToAnchor:keyWindow.centerXAnchor],
+            [toast.topAnchor         constraintEqualToAnchor:keyWindow.topAnchor constant:winH * 0.28],
         ]];
 
-        [targetWindow layoutIfNeeded];
+        [keyWindow layoutIfNeeded];
 
-        [UIView animateWithDuration:0.2 animations:^{ toast.alpha = 1.0; } completion:^(BOOL f) {
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.4 * NSEC_PER_SEC)),
+        [UIView animateWithDuration:0.25 animations:^{ toast.alpha = 1.0; } completion:^(BOOL f) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.6 * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{
-                [UIView animateWithDuration:0.25 animations:^{ toast.alpha = 0; }
+                [UIView animateWithDuration:0.3 animations:^{ toast.alpha = 0; }
                                  completion:^(BOOL ff) { [toast removeFromSuperview]; }];
             });
         }];
