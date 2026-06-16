@@ -1424,11 +1424,10 @@ static void TwitchSevenTVInit(void) {
     s7tv_swizzle_orientation_lock();
 
     // Injection bouton dans ChatInputView
-    // TEST : didMoveToWindow commenté pour isoler le bug rotation
-    // s7tv_swizzle([UIView class],
-    //              [UIView class],
-    //              @selector(didMoveToWindow),
-    //              @selector(s7tv_didMoveToWindow));
+    s7tv_swizzle([UIView class],
+                 [UIView class],
+                 @selector(didMoveToWindow),
+                 @selector(s7tv_didMoveToWindow));
 
     // URLProtocol (redirection CDN 7TV)
     s7tv_swizzle_protocol_classes();
