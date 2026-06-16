@@ -31,11 +31,6 @@
 static const char kS7TVTextFieldTagged = 5;
 static const char kS7TVBitsHijacked    = 6;
 static const char kS7TVOrigSectionCount = 7;
-static const char kS7TVShareHijacked   = 8;   // verrou orientation
-
-// État global verrou d'orientation
-static BOOL s_orientationLocked             = NO;
-static UIInterfaceOrientationMask s_lockedOrientationMask = UIInterfaceOrientationMaskAll;
 
 
 // ────────────────────────────────────────────────────────────
@@ -131,82 +126,6 @@ static void s7tvLogResponds(id obj, NSArray<NSString *> *selectors, NSInteger sa
     [self s7tv_didMoveToWindow]; // appel original
 
     NSString *selfClass = NSStringFromClass([self class]);
-
-    // ── Hijack bouton Share → verrou orientation ──────────────────────────────
-    if ([selfClass isEqualToString:@"Twitch.TheaterPlayerControlsView"] && self.window) {
-        if (!objc_getAssociatedObject(self, &kS7TVShareHijacked)) {
-            __weak UIView *weakSelf = self;
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)),
-                           dispatch_get_main_queue(), ^{
-                UIView *controls = weakSelf;
-                if (!controls || !controls.window) return;
-
-                // Guard : uniquement dans la PictureInPictureWindow (player theater)
-                if (![NSStringFromClass([controls.window class])
-                        isEqualToString:@"Twitch.PictureInPictureWindow"]) return;
-
-                // Flag posé ICI, après le guard — pas avant
-                if (objc_getAssociatedObject(controls, &kS7TVShareHijacked)) return;
-                objc_setAssociatedObject(controls, &kS7TVShareHijacked, @YES,
-                                         OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-
-                // Trouver le bouton Share par accID
-                UIButton *shareBtn = nil;
-                NSMutableArray *q = [NSMutableArray arrayWithObject:controls];
-                while (q.count > 0) {
-                    UIView *v = q[0]; [q removeObjectAtIndex:0];
-                    if ([v isKindOfClass:[UIButton class]] &&
-                        [[v accessibilityIdentifier] isEqualToString:@"share_button"]) {
-                        shareBtn = (UIButton *)v;
-                        break;
-                    }
-                    [q addObjectsFromArray:v.subviews];
-                }
-                if (!shareBtn) {
-                    [[SevenTVManager sharedManager]
-                        log:@"⚠️ share_button introuvable dans TheaterPlayerControlsView"];
-                    return;
-                }
-
-                // Retirer shareButtonTapped original
-                NSSet *targets = [shareBtn allTargets];
-                for (id tgt in [targets allObjects]) {
-                    NSArray *actions = [shareBtn actionsForTarget:tgt
-                                            forControlEvent:UIControlEventTouchUpInside];
-                    for (NSString *action in actions) {
-                        [shareBtn removeTarget:tgt action:NSSelectorFromString(action)
-                              forControlEvents:UIControlEventTouchUpInside];
-                        [[SevenTVManager sharedManager]
-                            log:@"🔌 Share: action retirée — %@->%@",
-                            NSStringFromClass([tgt class]), action];
-                    }
-                }
-
-                // Icône cadenas
-                UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration
-                    configurationWithPointSize:20 weight:UIImageSymbolWeightMedium];
-                NSString *sym = s_orientationLocked ? @"lock.rotation" : @"lock.rotation.open";
-                UIImage *lockIcon = [UIImage systemImageNamed:sym withConfiguration:cfg];
-
-                for (NSNumber *st in @[@(UIControlStateNormal), @(UIControlStateHighlighted),
-                                        @(UIControlStateSelected), @(UIControlStateDisabled)]) {
-                    [shareBtn setImage:lockIcon forState:st.unsignedIntegerValue];
-                }
-                shareBtn.tintColor              = s_orientationLocked
-                    ? [UIColor colorWithRed:0.55 green:0.25 blue:0.95 alpha:1.0]
-                    : [UIColor whiteColor];
-                shareBtn.accessibilityLabel      = @"Verrouiller l'orientation";
-                shareBtn.accessibilityIdentifier = @"s7tv_lock_button";
-
-                [shareBtn addTarget:[SevenTVManager sharedManager]
-                             action:@selector(s7tv_toggleOrientationLock:)
-                   forControlEvents:UIControlEventTouchUpInside];
-
-                [[SevenTVManager sharedManager]
-                    log:@"✅ Bouton Share hijacké → verrou orientation"];
-            });
-        }
-    }
 
     // ── Détection fermeture du stream ────────────────────────────────────────
     // Quand Twitch ferme le stream, ChatInputView quitte la fenêtre (window → nil).
@@ -1132,277 +1051,6 @@ static void s7tv_hook_network_image_requester(void) {
 
 
 // ────────────────────────────────────────────────────────────
-// MARK: - Verrou d'orientation (bouton Share hijacké)
-// Approche : requestGeometryUpdate (iOS 16+) pour forcer l'orientation
-// de la scène au niveau système — c'est la seule API qui contrôle
-// réellement la rotation visuelle sur les apps SwiftUI modernes.
-// Combiné avec shouldAutorotate=NO pour bloquer UIKit en parallèle.
-// ────────────────────────────────────────────────────────────
-
-// ── Orientation verrouillée capturée au moment du lock ───────────────────────
-static UIInterfaceOrientation s_lockedOrientation = UIInterfaceOrientationUnknown;
-
-// ── Observer rotation physique ───────────────────────────────────────────────
-static id s_orientationObserver = nil;
-
-// ── Force la géométrie de toutes les scènes actives ─────────────────────────
-static void s7tv_forceSceneOrientation(UIInterfaceOrientationMask mask) {
-    // iOS 16+ : UIWindowScene requestGeometryUpdate:errorHandler:
-    // Appelé via objc_msgSend pour éviter les erreurs de header manquant dans le SDK Theos
-    SEL reqSel   = NSSelectorFromString(@"requestGeometryUpdate:errorHandler:");
-    Class prefsCls = NSClassFromString(@"UIWindowSceneGeometryPreferencesIOS");
-
-    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
-        UIWindowScene *ws = (UIWindowScene *)scene;
-
-        if (prefsCls && [ws respondsToSelector:reqSel]) {
-            id prefs = [[prefsCls alloc] initWithInterfaceOrientations:mask];
-            ((void(*)(id, SEL, id, id))objc_msgSend)(ws, reqSel, prefs, nil);
-        } else {
-            // Fallback iOS < 16 : setStatusBarOrientation:animated: (déprécié)
-            UIInterfaceOrientation target = UIInterfaceOrientationPortrait;
-            if (mask == UIInterfaceOrientationMaskLandscapeLeft)               target = UIInterfaceOrientationLandscapeLeft;
-            else if (mask == UIInterfaceOrientationMaskLandscapeRight)         target = UIInterfaceOrientationLandscapeRight;
-            else if (mask == UIInterfaceOrientationMaskPortraitUpsideDown)     target = UIInterfaceOrientationPortraitUpsideDown;
-            SEL fbSel = NSSelectorFromString(@"setStatusBarOrientation:animated:");
-            ((void(*)(id, SEL, UIInterfaceOrientation, BOOL))objc_msgSend)(
-                [UIApplication sharedApplication], fbSel, target, NO);
-        }
-    }
-}
-
-// ── Démarre l'observer qui journalise les rotations physiques ────────────────
-// Note : le blocage visuel est assuré par supportedInterfaceOrientationsForWindow:
-// On n'appelle plus requestGeometryUpdate ici — c'était lui qui causait le flash
-// "rotate puis snap back" en jouant une animation de retour inutile.
-static void s7tv_startOrientationObserver(void) {
-    if (s_orientationObserver) return;
-    [[UIDevice currentDevice] beginGeneratingDeviceOrientationNotifications];
-    s_orientationObserver = [[NSNotificationCenter defaultCenter]
-        addObserverForName:UIDeviceOrientationDidChangeNotification
-                    object:nil
-                     queue:[NSOperationQueue mainQueue]
-                usingBlock:^(NSNotification *n) {
-        if (!s_orientationLocked) return;
-        [[SevenTVManager sharedManager] log:@"🔒 Rotation physique bloquée (verrou actif)"];
-    }];
-}
-
-static void s7tv_stopOrientationObserver(void) {
-    if (!s_orientationObserver) return;
-    [[NSNotificationCenter defaultCenter] removeObserver:s_orientationObserver];
-    s_orientationObserver = nil;
-    [[UIDevice currentDevice] endGeneratingDeviceOrientationNotifications];
-}
-
-// ── Toast ─────────────────────────────────────────────────────────────────────
-static void s7tv_showOrientationToast(BOOL locked) {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        UIWindow *keyWindow = nil;
-        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-            if (![scene isKindOfClass:[UIWindowScene class]]) continue;
-            if (scene.activationState != UISceneActivationStateForegroundActive) continue;
-            for (UIWindow *w in ((UIWindowScene *)scene).windows) {
-                if (!w.isHidden && w.windowLevel == UIWindowLevelNormal) {
-                    keyWindow = w; break;
-                }
-            }
-            if (keyWindow) break;
-        }
-        if (!keyWindow) return;
-
-        NSString *symbol = locked ? @"lock.rotation"      : @"lock.rotation.open";
-        NSString *label  = locked ? @"Orientation verrouillée" : @"Orientation déverrouillée";
-
-        UIView *toast = [[UIView alloc] init];
-        toast.backgroundColor = [UIColor colorWithWhite:0.08 alpha:0.88];
-        toast.layer.cornerRadius = 18;
-        toast.layer.masksToBounds = YES;
-        toast.alpha = 0;
-        toast.translatesAutoresizingMaskIntoConstraints = NO;
-        [keyWindow addSubview:toast];
-
-        UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration
-            configurationWithPointSize:22 weight:UIImageSymbolWeightMedium];
-        UIImage *icon = [UIImage systemImageNamed:symbol withConfiguration:cfg];
-        UIImageView *iconView = [[UIImageView alloc] initWithImage:icon];
-        iconView.tintColor   = locked
-            ? [UIColor colorWithRed:0.55 green:0.25 blue:0.95 alpha:1.0]
-            : [UIColor colorWithRed:0.6  green:0.6  blue:0.65 alpha:1.0];
-        iconView.contentMode = UIViewContentModeScaleAspectFit;
-        iconView.translatesAutoresizingMaskIntoConstraints = NO;
-        [toast addSubview:iconView];
-
-        UILabel *lbl = [[UILabel alloc] init];
-        lbl.text      = label;
-        lbl.font      = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
-        lbl.textColor = [UIColor whiteColor];
-        lbl.translatesAutoresizingMaskIntoConstraints = NO;
-        [toast addSubview:lbl];
-
-        // Le toast doit être en coordonnées de fenêtre, pas rotées
-        CGFloat winW = keyWindow.bounds.size.width;
-        CGFloat winH = keyWindow.bounds.size.height;
-
-        [NSLayoutConstraint activateConstraints:@[
-            [iconView.leadingAnchor  constraintEqualToAnchor:toast.leadingAnchor  constant:16],
-            [iconView.centerYAnchor  constraintEqualToAnchor:toast.centerYAnchor],
-            [iconView.widthAnchor    constraintEqualToConstant:26],
-            [iconView.heightAnchor   constraintEqualToConstant:26],
-            [lbl.leadingAnchor       constraintEqualToAnchor:iconView.trailingAnchor constant:10],
-            [lbl.trailingAnchor      constraintEqualToAnchor:toast.trailingAnchor    constant:-16],
-            [lbl.centerYAnchor       constraintEqualToAnchor:toast.centerYAnchor],
-            [toast.heightAnchor      constraintEqualToConstant:52],
-            [toast.centerXAnchor     constraintEqualToAnchor:keyWindow.centerXAnchor],
-            [toast.topAnchor         constraintEqualToAnchor:keyWindow.topAnchor constant:winH * 0.28],
-        ]];
-
-        [keyWindow layoutIfNeeded];
-
-        [UIView animateWithDuration:0.25 animations:^{ toast.alpha = 1.0; } completion:^(BOOL f) {
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.6 * NSEC_PER_SEC)),
-                           dispatch_get_main_queue(), ^{
-                [UIView animateWithDuration:0.3 animations:^{ toast.alpha = 0; }
-                                 completion:^(BOOL ff) { [toast removeFromSuperview]; }];
-            });
-        }];
-    });
-}
-
-// ── Hook principal : UIApplication.supportedInterfaceOrientationsForWindow: ──
-// C'est le check système qui prime sur toutes les overrides Twitch dans les VCs.
-@interface UIApplication (S7TVOrientationLock)
-- (UIInterfaceOrientationMask)s7tv_supportedInterfaceOrientationsForWindow:(UIWindow *)window;
-@end
-@implementation UIApplication (S7TVOrientationLock)
-- (UIInterfaceOrientationMask)s7tv_supportedInterfaceOrientationsForWindow:(UIWindow *)window {
-    if (s_orientationLocked) return s_lockedOrientationMask;
-    return [self s7tv_supportedInterfaceOrientationsForWindow:window];
-}
-@end
-
-// ── Garde UIViewController au cas où (certains chemins UIKit passent par là) ──
-@interface UIViewController (S7TVOrientationLock)
-- (UIInterfaceOrientationMask)s7tv_supportedInterfaceOrientations;
-@end
-@implementation UIViewController (S7TVOrientationLock)
-- (UIInterfaceOrientationMask)s7tv_supportedInterfaceOrientations {
-    if (s_orientationLocked) return s_lockedOrientationMask;
-    return [self s7tv_supportedInterfaceOrientations];
-}
-@end
-
-@interface UIViewController (S7TVAutorotate)
-- (BOOL)s7tv_shouldAutorotate;
-@end
-@implementation UIViewController (S7TVAutorotate)
-- (BOOL)s7tv_shouldAutorotate {
-    if (s_orientationLocked) return NO;
-    return [self s7tv_shouldAutorotate];
-}
-@end
-
-// ── Action toggle ─────────────────────────────────────────────────────────────
-@interface SevenTVManager (OrientationLock)
-- (void)s7tv_toggleOrientationLock:(UIButton *)sender;
-@end
-@implementation SevenTVManager (OrientationLock)
-
-static void s7tv_install_orientation_swizzles(void) {
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        s7tv_swizzle([UIApplication class],
-                     [UIApplication class],
-                     @selector(supportedInterfaceOrientationsForWindow:),
-                     NSSelectorFromString(@"s7tv_supportedInterfaceOrientationsForWindow:"));
-        s7tv_swizzle([UIViewController class],
-                     [UIViewController class],
-                     @selector(supportedInterfaceOrientations),
-                     @selector(s7tv_supportedInterfaceOrientations));
-        s7tv_swizzle([UIViewController class],
-                     [UIViewController class],
-                     @selector(shouldAutorotate),
-                     @selector(s7tv_shouldAutorotate));
-        [[SevenTVManager sharedManager] log:@"✅ Swizzles verrou orientation installés (premier lock)"];
-    });
-}
-
-- (void)s7tv_toggleOrientationLock:(UIButton *)sender {
-    s_orientationLocked = !s_orientationLocked;
-
-    if (s_orientationLocked) {
-        // Installer les swizzles seulement maintenant, pas au lancement
-        s7tv_install_orientation_swizzles();
-
-        // Capturer l'orientation courante de la scène
-        UIWindowScene *activeScene = nil;
-        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-            if ([scene isKindOfClass:[UIWindowScene class]] &&
-                scene.activationState == UISceneActivationStateForegroundActive) {
-                activeScene = (UIWindowScene *)scene;
-                break;
-            }
-        }
-        UIInterfaceOrientation current = activeScene
-            ? activeScene.interfaceOrientation
-            : UIInterfaceOrientationPortrait;
-
-        s_lockedOrientation = current;
-        switch (current) {
-            case UIInterfaceOrientationLandscapeLeft:
-                s_lockedOrientationMask = UIInterfaceOrientationMaskLandscapeLeft;  break;
-            case UIInterfaceOrientationLandscapeRight:
-                s_lockedOrientationMask = UIInterfaceOrientationMaskLandscapeRight; break;
-            case UIInterfaceOrientationPortraitUpsideDown:
-                s_lockedOrientationMask = UIInterfaceOrientationMaskPortraitUpsideDown; break;
-            default:
-                s_lockedOrientationMask = UIInterfaceOrientationMaskPortrait; break;
-        }
-
-        // Le mask est posé — supportedInterfaceOrientationsForWindow: bloque dès maintenant.
-        // On n'appelle PAS requestGeometryUpdate ici : l'utilisateur est déjà dans la bonne
-        // orientation, un appel inutile ouvre une fenêtre où la première rotation physique
-        // peut passer avant que le cycle de géométrie soit stabilisé.
-        s7tv_startOrientationObserver();
-        [self log:@"🔒 Orientation verrouillée (orientation=%ld)", (long)current];
-
-    } else {
-        s_lockedOrientationMask = UIInterfaceOrientationMaskAll;
-        s_lockedOrientation     = UIInterfaceOrientationUnknown;
-        s7tv_stopOrientationObserver();
-        // Libérer toutes les orientations → iOS reprend la main
-        s7tv_forceSceneOrientation(UIInterfaceOrientationMaskAll);
-        [UIViewController attemptRotationToDeviceOrientation];
-        [self log:@"🔓 Orientation déverrouillée"];
-    }
-
-    // Mettre à jour l'icône du bouton
-    UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration
-        configurationWithPointSize:20 weight:UIImageSymbolWeightMedium];
-    NSString *sym = s_orientationLocked ? @"lock.rotation" : @"lock.rotation.open";
-    UIImage *icon = [UIImage systemImageNamed:sym withConfiguration:cfg];
-    UIColor *tint = s_orientationLocked
-        ? [UIColor colorWithRed:0.55 green:0.25 blue:0.95 alpha:1.0]
-        : [UIColor whiteColor];
-
-    for (NSNumber *st in @[@(UIControlStateNormal), @(UIControlStateHighlighted),
-                            @(UIControlStateSelected), @(UIControlStateDisabled)]) {
-        [sender setImage:icon forState:st.unsignedIntegerValue];
-    }
-    sender.tintColor = tint;
-
-    s7tv_showOrientationToast(s_orientationLocked);
-}
-
-@end
-
-static void s7tv_swizzle_orientation_lock(void) {
-    // Swizzles installés à la demande au premier lock, pas au lancement.
-}
-
-
-// ────────────────────────────────────────────────────────────
 // MARK: - Point d'entrée __attribute__((constructor))
 // ────────────────────────────────────────────────────────────
 
@@ -1419,9 +1067,6 @@ static void TwitchSevenTVInit(void) {
                  [UIWindow class],
                  @selector(sendEvent:),
                  @selector(s7tv_sendEvent:));
-
-    // Verrou d'orientation (bouton Share hijacké)
-    s7tv_swizzle_orientation_lock();
 
     // Injection bouton dans ChatInputView
     s7tv_swizzle([UIView class],
@@ -1542,31 +1187,156 @@ static void TwitchSevenTVInit(void) {
 
                     if (emoteLayers.count == 0) return;
 
-                    // Hook displayLayer: sur CALayer (superclasse) en filtrant AnimatedImageAttachmentLayer
-                    // displayLayer: est dispatché par CALayer, pas par AnimatedImageAttachmentLayer lui-même
-                    static BOOL s_displayLayerHooked = NO;
-                    if (!s_displayLayerHooked) {
-                        Class calayerCls = [CALayer class];
-                        SEL displaySel = NSSelectorFromString(@"displayLayer:");
-                        Method dm = class_getInstanceMethod(calayerCls, displaySel);
-                        if (dm) {
-                            IMP origIMP = method_getImplementation(dm);
-                            SEL startSel = NSSelectorFromString(@"startAnimating");
-                            method_setImplementation(dm, imp_implementationWithBlock(^(id selfObj, id layerArg) {
-                                @try { ((void(*)(id,SEL,id))origIMP)(selfObj, displaySel, layerArg); } @catch(...) {}
-                                // Appeler startAnimating seulement sur AnimatedImageAttachmentLayer
-                                @try {
-                                    if ([NSStringFromClass(object_getClass(layerArg)) containsString:@"AnimatedImage"]) {
-                                        if ([layerArg respondsToSelector:startSel]) {
-                                            ((void(*)(id,SEL))objc_msgSend)(layerArg, startSel);
-                                        }
+                    // ── Dump MULTI-ÉCHANTILLONS AnimatedImageAttachmentLayer (max 5) ──
+                    static NSInteger s_animSampleCount = 0;
+                    static const NSInteger kS7TVAnimMaxSamples = 5;
+                    static BOOL s_displayLayerSwizzled = NO;
+                    static NSMutableDictionary *s_displayCounts = nil;
+                    static BOOL s_initFPSSwizzled = NO;
+                    if (s_animSampleCount < kS7TVAnimMaxSamples && emoteLayers.count > 0) {
+                        s_animSampleCount++;
+                        NSInteger sampleIdx = s_animSampleCount;
+                        SevenTVManager *mgr = [SevenTVManager sharedManager];
+                        CALayer *sample = emoteLayers.firstObject;
+
+                        // 1. Classe + frame du layer parent (ImageAttachmentLayer)
+                        Class parentClass = object_getClass(sample);
+                        [mgr log:@"🎞[%ld] parent: %@  frame=(%.1f,%.1f,%.1f,%.1f)",
+                         (long)sampleIdx, NSStringFromClass(parentClass),
+                         sample.frame.origin.x, sample.frame.origin.y,
+                         sample.frame.size.width, sample.frame.size.height];
+
+                        // 2. iVars du parent + encodages (pour repérer "content")
+                        unsigned int pic = 0;
+                        Ivar *piv = class_copyIvarList(parentClass, &pic);
+                        for (unsigned int i = 0; i < pic; i++) {
+                            const char *enc = ivar_getTypeEncoding(piv[i]);
+                            [mgr log:@"🎞[%ld]   parent iVar: %s (%s)",
+                             (long)sampleIdx, ivar_getName(piv[i]), enc ?: "?"];
+                        }
+                        free(piv);
+
+                        // 3. Quelles méthodes le parent expose-t-il vraiment ? (sans rien lire)
+                        s7tvLogResponds(sample, @[
+                            @"content", @"setContent:",
+                            @"currentDisplayMode", @"setCurrentDisplayMode:",
+                            @"animatedImageLayer", @"setAnimatedImageLayer:",
+                            @"staticImageLayer", @"setStaticImageLayer:",
+                            @"currentImageLayer", @"setCurrentImageLayer:",
+                            @"networkImageRequester", @"setNetworkImageRequester:"
+                        ], sampleIdx, @"parent");
+
+                        // 4. Sublayers (AnimatedImageAttachmentLayer) — via API publique
+                        for (CALayer *sub in sample.sublayers) {
+                            Class sc = object_getClass(sub);
+                            [mgr log:@"🎞[%ld] sublayer: %@  bounds=(%.1fx%.1f)",
+                             (long)sampleIdx, NSStringFromClass(sc),
+                             sub.bounds.size.width, sub.bounds.size.height];
+
+                            // iVars + encodages
+                            unsigned int ic = 0;
+                            Ivar *iv = class_copyIvarList(sc, &ic);
+                            for (unsigned int i = 0; i < ic; i++) {
+                                const char *enc = ivar_getTypeEncoding(iv[i]);
+                                [mgr log:@"🎞[%ld]   iVar: %s (%s)",
+                                 (long)sampleIdx, ivar_getName(iv[i]), enc ?: "?"];
+                            }
+                            free(iv);
+
+                            // Méthodes + encodages (notamment initWithFPS: et displayLayer:)
+                            unsigned int mc = 0;
+                            Method *mv = class_copyMethodList(sc, &mc);
+                            for (unsigned int i = 0; i < mc; i++) {
+                                const char *enc = method_getTypeEncoding(mv[i]);
+                                [mgr log:@"🎞[%ld]   method: %@ (%s)",
+                                 (long)sampleIdx, NSStringFromSelector(method_getName(mv[i])), enc ?: "?"];
+                            }
+
+                            // 5. Swizzle displayLayer: (une seule fois, toutes instances confondues)
+                            //    — uniquement si l'encodage correspond au pattern attendu
+                            //    (void return, 1 argument objet), pour éviter tout mismatch d'ABI.
+                            if (!s_displayLayerSwizzled) {
+                                SEL displaySel = NSSelectorFromString(@"displayLayer:");
+                                Method dm = class_getInstanceMethod(sc, displaySel);
+                                if (dm) {
+                                    const char *denc = method_getTypeEncoding(dm);
+                                    if (denc && denc[0] == 'v' && strchr(denc, '@') != NULL) {
+                                        s_displayLayerSwizzled = YES;
+                                        s_displayCounts = [NSMutableDictionary dictionary];
+                                        IMP origIMP = method_getImplementation(dm);
+                                        IMP newIMP = imp_implementationWithBlock(^(id self_, id layerArg){
+                                            @try {
+                                                NSValue *key = [NSValue valueWithNonretainedObject:self_];
+                                                @synchronized (s_displayCounts) {
+                                                    NSNumber *c = s_displayCounts[key];
+                                                    s_displayCounts[key] = @(c.integerValue + 1);
+                                                }
+                                            } @catch (__unused NSException *e) {}
+                                            @try {
+                                                ((void(*)(id,SEL,id))origIMP)(self_, displaySel, layerArg);
+                                            } @catch (__unused NSException *e) {}
+                                        });
+                                        method_setImplementation(dm, newIMP);
+                                        [mgr log:@"🎞 displayLayer: swizzlé pour comptage (encoding=%s)", denc];
+                                    } else {
+                                        [mgr log:@"🎞 displayLayer: encoding inattendu (%s), pas de swizzle", denc ?: "?"];
                                     }
-                                } @catch(...) {}
-                            }));
-                            s_displayLayerHooked = YES;
+                                }
+                            }
+                            free(mv);
+
+                            // 5b. Swizzle initWithFPS: (encodage @24@0:8q16 = instancetype(int64_t))
+                            //     — confirmé sur l'échantillon précédent, donc safe à hooker.
+                            if (!s_initFPSSwizzled) {
+                                SEL fpsSel = NSSelectorFromString(@"initWithFPS:");
+                                Method fm = class_getInstanceMethod(sc, fpsSel);
+                                if (fm) {
+                                    const char *fenc = method_getTypeEncoding(fm);
+                                    if (fenc && fenc[0] == '@' && strchr(fenc, 'q') != NULL) {
+                                        s_initFPSSwizzled = YES;
+                                        IMP origFPSIMP = method_getImplementation(fm);
+                                        IMP newFPSIMP = imp_implementationWithBlock(^id(id self_, int64_t fps){
+                                            [[SevenTVManager sharedManager] log:@"🎞 initWithFPS: fps=%lld classe=%@",
+                                             (long long)fps, NSStringFromClass(object_getClass(self_))];
+                                            @try {
+                                                return ((id(*)(id,SEL,int64_t))origFPSIMP)(self_, fpsSel, fps);
+                                            } @catch (__unused NSException *e) {
+                                                return self_;
+                                            }
+                                        });
+                                        method_setImplementation(fm, newFPSIMP);
+                                        [mgr log:@"🎞 initWithFPS: swizzlé pour log (encoding=%s)", fenc];
+                                    } else {
+                                        [mgr log:@"🎞 initWithFPS: encoding inattendu (%s), pas de swizzle", fenc ?: "?"];
+                                    }
+                                }
+                            }
+                            // 5c. Quelles méthodes le sublayer animé expose-t-il vraiment ?
+                            s7tvLogResponds(sub, @[
+                                @"invalidationToken", @"setInvalidationToken:",
+                                @"networkImageRequester", @"setNetworkImageRequester:",
+                                @"startAnimating", @"stopAnimating", @"play", @"pause",
+                                @"setFps:", @"fps", @"setPaused:", @"isPaused",
+                                @"currentFrame", @"setCurrentFrame:"
+                            ], sampleIdx, @"sublayer");
+
+                            // 6. Après 3s : compteur displayLayer:
+                            __weak CALayer *weakSub = sub;
+                            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
+                                           dispatch_get_main_queue(), ^{
+                                CALayer *strongSub = weakSub;
+                                NSInteger count = 0;
+                                if (strongSub && s_displayCounts) {
+                                    NSValue *key = [NSValue valueWithNonretainedObject:strongSub];
+                                    @synchronized (s_displayCounts) {
+                                        count = [s_displayCounts[key] integerValue];
+                                    }
+                                }
+                                [[SevenTVManager sharedManager] log:@"🎞[%ld] displayLayer: appelé %ld fois en 3s",
+                                 (long)sampleIdx, (long)count];
+                            });
                         }
                     }
-
                     // ─────────────────────────────────────────────────────────────
 
                     NSInteger emoteIndex = 0;
@@ -1586,8 +1356,6 @@ static void TwitchSevenTVInit(void) {
                                                     newWidth, targetSize);
                     }
                     [CATransaction commit];
-
-
                 });
             });
 
