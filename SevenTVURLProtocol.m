@@ -341,12 +341,15 @@ static NSURL *SevenTVCDNURLForEmoteID(NSString *emoteID) {
              emoteID, err.localizedDescription];
         }
         // Stockage manuel — NSURLSession ne stocke que si le CDN retourne les
-        // bons headers Cache-Control. On force le stockage ici pour garantir que
-        // cachedResponseForRequest: trouve l'image au moment de completion().
+        // bons headers Cache-Control. On utilise une requête propre (juste l'URL)
+        // pour que la clé de cache corresponde exactement à ce que startLoading
+        // lit via cachedResponseForRequest:, évitant un cache miss à cause de
+        // cachePolicy/timeoutInterval différents.
         if (data && resp && !err) {
             NSCachedURLResponse *toCache = [[NSCachedURLResponse alloc]
                 initWithResponse:resp data:data];
-            [SevenTVGetSharedCache() storeCachedResponse:toCache forRequest:req];
+            NSURLRequest *cacheKey = [NSURLRequest requestWithURL:url];
+            [SevenTVGetSharedCache() storeCachedResponse:toCache forRequest:cacheKey];
         }
         if (completion) completion();
     }] resume];
