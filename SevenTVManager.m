@@ -2472,27 +2472,31 @@ referenceSizeForHeaderInSection:(NSInteger)section {
         floatingWin.hidden          = NO;
 
         // rootViewController requis sous iOS 13+
-        // IMPORTANT : doit supporter toutes les orientations, sinon iOS bloque
-        // la rotation dans TOUTE l'app car il consulte toutes les fenêtres visibles.
+        // CRITICAL : doit retourner UIInterfaceOrientationMaskAll
+        // sinon iOS bloque la rotation dans TOUTE l'app car il consulte
+        // supportedInterfaceOrientations sur TOUTES les fenêtres visibles.
         UIViewController *rootVC = [[UIViewController alloc] init];
         rootVC.view.backgroundColor = [UIColor clearColor];
-        // Override supportedInterfaceOrientations via sous-classe anonyme
-        object_setClass(rootVC, ({
-            Class cls = objc_allocateClassPair([UIViewController class],
-                                              "SevenTVFloatingRootVC", 0);
-            class_addMethod(cls,
+
+        // Créer une sous-classe dynamique qui autorise toutes les orientations
+        static Class SevenTVFloatingRootVC = nil;
+        static dispatch_once_t onceVC;
+        dispatch_once(&onceVC, ^{
+            SevenTVFloatingRootVC = objc_allocateClassPair([UIViewController class],
+                                                           "SevenTVFloatingRootVC", 0);
+            class_addMethod(SevenTVFloatingRootVC,
                 @selector(supportedInterfaceOrientations),
-                imp_implementationWithBlock(^UIInterfaceOrientationMask(id _){ 
-                    return UIInterfaceOrientationMaskAll; 
-                }),
-                "I@:");
-            class_addMethod(cls,
+                imp_implementationWithBlock(^UIInterfaceOrientationMask(id _){
+                    return UIInterfaceOrientationMaskAll;
+                }), "I@:");
+            class_addMethod(SevenTVFloatingRootVC,
                 @selector(shouldAutorotate),
                 imp_implementationWithBlock(^BOOL(id _){ return YES; }),
                 "B@:");
-            objc_registerClassPair(cls);
-            cls;
-        }));
+            objc_registerClassPair(SevenTVFloatingRootVC);
+        });
+        object_setClass(rootVC, SevenTVFloatingRootVC);
+
         floatingWin.rootViewController = rootVC;
 
         self.floatingWindow = floatingWin;
@@ -2543,10 +2547,10 @@ referenceSizeForHeaderInSection:(NSInteger)section {
         menuWin.backgroundColor = [UIColor clearColor];
 
         // rootVC transparent — sert uniquement de présentateur
+        // Même fix : supporter toutes les orientations
         UIViewController *rootVC = [[UIViewController alloc] init];
         rootVC.view.backgroundColor = [UIColor clearColor];
-        // Même fix que floatingWindow : supporter toutes les orientations
-        object_setClass(rootVC, NSClassFromString(@"SevenTVFloatingRootVC") ?: [UIViewController class]);
+        object_setClass(rootVC, NSClassFromString(@"SevenTVFloatingRootVC"));
         menuWin.rootViewController = rootVC;
         menuWin.hidden = NO;
         self.menuWindow = menuWin; // retenu fortement jusqu'à la fermeture
