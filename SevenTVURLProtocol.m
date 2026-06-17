@@ -132,12 +132,11 @@ static NSURLSession *SevenTVGetUrgentSession(void) {
 }
 
 // ── URL CDN pour un emote ID ─────────────────────────────────────────────────
-// 1x.gif : aligné sur SevenTVManager.m cdnURLForEmote: (picker). Anciennement
-// 4x.webp — ce format n'anime pas via ce pipeline (header Content-Type:image/gif
-// spoofé mais bytes WebP réels). Le test confirmé "animations GIF visibles" du
-// récap a été fait avec un GIF réel ; ce fichier-ci n'avait pas suivi le switch.
+// 4x.gif : 1x.gif retiré — logs confirmés montrent un 404 quasi systématique
+// sur cette résolution (CDN 7TV n'a presque jamais de variante 1x). 4x.gif est
+// la résolution déjà confirmée disponible et fonctionnelle pour l'animation.
 static NSURL *SevenTVCDNURLForEmoteID(NSString *emoteID) {
-    NSString *str = [NSString stringWithFormat:@"https://cdn.7tv.app/emote/%@/1x.gif", emoteID];
+    NSString *str = [NSString stringWithFormat:@"https://cdn.7tv.app/emote/%@/4x.gif", emoteID];
     return [NSURL URLWithString:str];
 }
 
@@ -427,7 +426,7 @@ static BOOL SevenTVIsValidGIFResponse(NSURLResponse *response, NSData *data) {
 }
 
 + (void)prewarmCDNConnection {
-    NSURL *warmURL = [NSURL URLWithString:@"https://cdn.7tv.app/emote/01F6MSP3NV00001B6E/1x.webp"];
+    NSURL *warmURL = [NSURL URLWithString:@"https://cdn.7tv.app/emote/01F6MSP3NV00001B6E/4x.gif"];
     if (!warmURL) return;
 
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:warmURL];
