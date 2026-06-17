@@ -1261,6 +1261,12 @@ static void s7tv_hook_network_image_requester(void) {
 
     SevenTVManager *mgr = [SevenTVManager sharedManager];
 
+    // Marqueur de filtre — grep "🟢7TV" dans les logs pour savoir d'un coup
+    // si NetworkImageRequester est emprunté pour nos URLs cdn.7tv.app.
+    // Absence totale de 🟢7TV après affichage d'une emote 7TV dans le chat
+    // = ce pipeline n'est PAS utilisé pour ce chemin → piste à abandonner.
+    static NSString *const kS7TVMarker = @"cdn.7tv.app";
+
     // ── variante courte : imageAtURL:withScale:persistingFor: ──
     SEL selImg1 = NSSelectorFromString(@"imageAtURL:withScale:persistingFor:");
     Method mImg1 = class_getInstanceMethod(nic, selImg1);
@@ -1268,7 +1274,12 @@ static void s7tv_hook_network_image_requester(void) {
         IMP orig = method_getImplementation(mImg1);
         method_setImplementation(mImg1, imp_implementationWithBlock(
             ^id(id self_, NSURL *url, CGFloat scale, id persist) {
-                [mgr log:@"🖼A %@  scale=%.1f", url.absoluteString, scale];
+                NSString *urlStr = url.absoluteString ?: @"";
+                if ([urlStr containsString:kS7TVMarker]) {
+                    [mgr log:@"🟢7TV 🖼A %@  scale=%.1f", urlStr, scale];
+                } else {
+                    [mgr log:@"🖼A %@  scale=%.1f", urlStr, scale];
+                }
                 return ((id(*)(id,SEL,NSURL*,CGFloat,id))orig)(self_, selImg1, url, scale, persist);
             }));
         [mgr log:@"✅ Hook imageAtURL:withScale:persistingFor: OK"];
@@ -1281,7 +1292,12 @@ static void s7tv_hook_network_image_requester(void) {
         IMP orig = method_getImplementation(mImg2);
         method_setImplementation(mImg2, imp_implementationWithBlock(
             ^id(id self_, NSURL *url, CGFloat scale, id persist, BOOL mem, BOOL user) {
-                [mgr log:@"🖼B %@  scale=%.1f mem=%d user=%d", url.absoluteString, scale, mem, user];
+                NSString *urlStr = url.absoluteString ?: @"";
+                if ([urlStr containsString:kS7TVMarker]) {
+                    [mgr log:@"🟢7TV 🖼B %@  scale=%.1f mem=%d user=%d", urlStr, scale, mem, user];
+                } else {
+                    [mgr log:@"🖼B %@  scale=%.1f mem=%d user=%d", urlStr, scale, mem, user];
+                }
                 return ((id(*)(id,SEL,NSURL*,CGFloat,id,BOOL,BOOL))orig)(self_, selImg2, url, scale, persist, mem, user);
             }));
         [mgr log:@"✅ Hook imageAtURL:...:storeInMemoryCache:userInitiated: OK"];
@@ -1297,9 +1313,17 @@ static void s7tv_hook_network_image_requester(void) {
         IMP orig = method_getImplementation(mAnim1);
         method_setImplementation(mAnim1, imp_implementationWithBlock(
             ^id(id self_, NSURL *url, CGFloat scale, id persist) {
+                NSString *urlStr = url.absoluteString ?: @"";
+                BOOL isS7TV = [urlStr containsString:kS7TVMarker];
                 id result = ((id(*)(id,SEL,NSURL*,CGFloat,id))orig)(self_, selAnim1, url, scale, persist);
+                BOOL responds = result && [result respondsToSelector:startSel];
+                if (isS7TV) {
+                    [mgr log:@"🟢7TV animatedImageAtURL:withStaticScale:persistingFor: → %@  result=%@ respondsStartAnimating=%@",
+                        urlStr, result ? NSStringFromClass(object_getClass(result)) : @"nil",
+                        responds ? @"OUI" : @"NON"];
+                }
                 // Appeler startAnimating sur le résultat si disponible
-                if (result && [result respondsToSelector:startSel]) {
+                if (responds) {
                     ((void(*)(id,SEL))objc_msgSend)(result, startSel);
                 }
                 return result;
@@ -1314,9 +1338,17 @@ static void s7tv_hook_network_image_requester(void) {
         IMP orig = method_getImplementation(mAnim2);
         method_setImplementation(mAnim2, imp_implementationWithBlock(
             ^id(id self_, NSURL *url, CGFloat scale, id persist, BOOL user) {
+                NSString *urlStr = url.absoluteString ?: @"";
+                BOOL isS7TV = [urlStr containsString:kS7TVMarker];
                 id result = ((id(*)(id,SEL,NSURL*,CGFloat,id,BOOL))orig)(self_, selAnim2, url, scale, persist, user);
+                BOOL responds = result && [result respondsToSelector:startSel];
+                if (isS7TV) {
+                    [mgr log:@"🟢7TV animatedImageAtURL:...:userInitiated: → %@  result=%@ respondsStartAnimating=%@",
+                        urlStr, result ? NSStringFromClass(object_getClass(result)) : @"nil",
+                        responds ? @"OUI" : @"NON"];
+                }
                 // Appeler startAnimating sur le résultat si disponible
-                if (result && [result respondsToSelector:startSel]) {
+                if (responds) {
                     ((void(*)(id,SEL))objc_msgSend)(result, startSel);
                 }
                 return result;

@@ -132,8 +132,12 @@ static NSURLSession *SevenTVGetUrgentSession(void) {
 }
 
 // ── URL CDN pour un emote ID ─────────────────────────────────────────────────
+// 1x.gif : aligné sur SevenTVManager.m cdnURLForEmote: (picker). Anciennement
+// 4x.webp — ce format n'anime pas via ce pipeline (header Content-Type:image/gif
+// spoofé mais bytes WebP réels). Le test confirmé "animations GIF visibles" du
+// récap a été fait avec un GIF réel ; ce fichier-ci n'avait pas suivi le switch.
 static NSURL *SevenTVCDNURLForEmoteID(NSString *emoteID) {
-    NSString *str = [NSString stringWithFormat:@"https://cdn.7tv.app/emote/%@/4x.webp", emoteID];
+    NSString *str = [NSString stringWithFormat:@"https://cdn.7tv.app/emote/%@/1x.gif", emoteID];
     return [NSURL URLWithString:str];
 }
 
