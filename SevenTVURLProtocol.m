@@ -132,7 +132,7 @@ static NSURLSession *SevenTVGetUrgentSession(void) {
 
 // ── URL CDN pour un emote ID ─────────────────────────────────────────────────
 static NSURL *SevenTVCDNURLForEmoteID(NSString *emoteID) {
-    NSString *str = [NSString stringWithFormat:@"https://cdn.7tv.app/emote/%@/4x.webp", emoteID];
+    NSString *str = [NSString stringWithFormat:@"https://cdn.7tv.app/emote/%@/4x.gif", emoteID];
     return [NSURL URLWithString:str];
 }
 
@@ -216,7 +216,7 @@ static NSURL *SevenTVCDNURLForEmoteID(NSString *emoteID) {
             initWithURL:self.request.URL
             statusCode:200
            HTTPVersion:@"HTTP/1.1"
-          headerFields:@{@"Content-Type": @"image/webp"}];
+          headerFields:@{@"Content-Type": @"image/gif"}];
 
         [self.client URLProtocol:self
               didReceiveResponse:spoofed
@@ -254,7 +254,7 @@ static NSURL *SevenTVCDNURLForEmoteID(NSString *emoteID) {
                 initWithURL:strongSelf.request.URL
                 statusCode:http.statusCode
                HTTPVersion:@"HTTP/1.1"
-              headerFields:@{@"Content-Type": @"image/webp"}];
+              headerFields:@{@"Content-Type": @"image/gif"}];
 
             [strongSelf.client URLProtocol:strongSelf
                         didReceiveResponse:spoofed
