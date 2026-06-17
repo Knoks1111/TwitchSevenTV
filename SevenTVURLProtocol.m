@@ -132,7 +132,7 @@ static NSURLSession *SevenTVGetUrgentSession(void) {
 
 // ── URL CDN pour un emote ID ─────────────────────────────────────────────────
 static NSURL *SevenTVCDNURLForEmoteID(NSString *emoteID) {
-    NSString *str = [NSString stringWithFormat:@"https://cdn.7tv.app/emote/%@/4x.gif", emoteID];
+    NSString *str = [NSString stringWithFormat:@"https://cdn.7tv.app/emote/%@/1x.gif", emoteID];
     return [NSURL URLWithString:str];
 }
 
