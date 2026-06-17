@@ -130,7 +130,11 @@ static id s7tv_getObjectIvar(id obj, const char *ivarName) {
     Ivar iv = class_getInstanceVariable(object_getClass(obj), ivarName);
     if (!iv) return nil;
     const char *enc = ivar_getTypeEncoding(iv);
-    if (!enc || enc[0] != '@') return nil; // pas un type objet → on n'y touche pas
+    // Sur les classes Swift, l'encodage runtime est souvent une chaîne VIDE même
+    // pour de vrais ivars objet (CALayer, etc. — confirmé par dump : animatedImageLayer
+    // existe bien mais enc="" ). On ne rejette que si le runtime connaît EXPLICITEMENT
+    // un type non-objet (struct/scalar/etc.) — encodage vide = on tente quand même.
+    if (enc && enc[0] != '\0' && enc[0] != '@') return nil;
     return object_getIvar(obj, iv);
 }
 
@@ -138,11 +142,16 @@ static id s7tv_getObjectIvar(id obj, const char *ivarName) {
 // englobant, à intervalles réguliers (max ~1.5s), le temps que l'image GIF finisse
 // de charger en arrière-plan. Piste retenue à la place du hook sur
 // "imageLoadSubscriptions" (Combine), trop fragile à intercepter côté Swift.
-// Logge seulement la 1ère tentative (+ l'échec final) pour ne pas spammer.
+// Filet de sécurité complémentaire au hook displayLayer: — logs throttlés (5 max
+// de chaque type) maintenant que le comportement est confirmé.
 static void s7tv_retryStartAnimatingStep(CALayer *outerLayer, NSInteger attemptsLeft, NSInteger maxAttempts) {
+    static NSInteger s_exhaustedLogCount = 0;
     if (attemptsLeft <= 0) {
-        if (outerLayer) {
-            [[SevenTVManager sharedManager] log:@"🩻 retry startAnimating — épuisé sans confirmation de succès"];
+        if (outerLayer && s_exhaustedLogCount < 5) {
+            s_exhaustedLogCount++;
+            [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
+                @"🩻 retry startAnimating — épuisé sans confirmation de succès (log %ld/5)",
+                (long)s_exhaustedLogCount]];
         }
         return;
     }
@@ -159,14 +168,18 @@ static void s7tv_retryStartAnimatingStep(CALayer *outerLayer, NSInteger attempts
         SevenTVManager *mgr = [SevenTVManager sharedManager];
         NSInteger attemptNum = maxAttempts - attemptsLeft + 1;
 
-        if (attemptNum == 1) {
+        static NSInteger s_retry1LogCount = 0;
+        if (attemptNum == 1 && s_retry1LogCount < 5) {
+            s_retry1LogCount++;
             if (animLayer) {
                 [mgr log:[NSString stringWithFormat:
-                    @"🩻 retry#1 — ivar animatedImageLayer trouvé, classe=%@, répond startAnimating=%@",
+                    @"🩻 retry#1 — ivar animatedImageLayer trouvé, classe=%@, répond startAnimating=%@ (log %ld/5)",
                     NSStringFromClass(object_getClass(animLayer)),
-                    [animLayer respondsToSelector:startSel] ? @"OUI" : @"NON"]];
+                    [animLayer respondsToSelector:startSel] ? @"OUI" : @"NON", (long)s_retry1LogCount]];
             } else {
-                [mgr log:@"🩻 retry#1 — ivar animatedImageLayer INTROUVABLE (nil ou pas un objet)"];
+                [mgr log:[NSString stringWithFormat:
+                    @"🩻 retry#1 — ivar animatedImageLayer INTROUVABLE (nil ou pas un objet) (log %ld/5)",
+                    (long)s_retry1LogCount]];
             }
         }
 
@@ -1712,9 +1725,16 @@ static void TwitchSevenTVInit(void) {
                                     // self est ici l'AnimatedImageAttachmentLayer lui-même
                                     @try {
                                         BOOL responds = [selfObj respondsToSelector:startSel];
-                                        [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
-                                            @"🩻 displayLayer: déclenché sur %@ — répond à startAnimating: %@",
-                                            NSStringFromClass(object_getClass(selfObj)), responds ? @"OUI" : @"NON"]];
+                                        // Throttle : on logge seulement les 5 premiers appels, le
+                                        // comportement est confirmé stable, plus la peine de spammer.
+                                        static NSInteger s_displayLayerLogCount = 0;
+                                        if (s_displayLayerLogCount < 5) {
+                                            s_displayLayerLogCount++;
+                                            [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
+                                                @"🩻 displayLayer: déclenché sur %@ — répond à startAnimating: %@ (log %ld/5)",
+                                                NSStringFromClass(object_getClass(selfObj)), responds ? @"OUI" : @"NON",
+                                                (long)s_displayLayerLogCount]];
+                                        }
                                         if (responds) {
                                             ((void(*)(id,SEL))objc_msgSend)(selfObj, startSel);
                                         }
