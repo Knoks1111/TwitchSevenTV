@@ -138,8 +138,16 @@ static id s7tv_getObjectIvar(id obj, const char *ivarName) {
 // englobant, à intervalles réguliers (max ~1.5s), le temps que l'image GIF finisse
 // de charger en arrière-plan. Piste retenue à la place du hook sur
 // "imageLoadSubscriptions" (Combine), trop fragile à intercepter côté Swift.
-static void s7tv_retryStartAnimating(CALayer *outerLayer, NSInteger attemptsLeft) {
-    if (attemptsLeft <= 0 || !outerLayer) return;
+// Logge seulement la 1ère tentative (+ l'échec final) pour ne pas spammer.
+static void s7tv_retryStartAnimatingStep(CALayer *outerLayer, NSInteger attemptsLeft, NSInteger maxAttempts) {
+    if (attemptsLeft <= 0) {
+        if (outerLayer) {
+            [[SevenTVManager sharedManager] log:@"🩻 retry startAnimating — épuisé sans confirmation de succès"];
+        }
+        return;
+    }
+    if (!outerLayer) return;
+
     __weak CALayer *weakLayer = outerLayer;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
@@ -148,11 +156,100 @@ static void s7tv_retryStartAnimating(CALayer *outerLayer, NSInteger attemptsLeft
 
         id animLayer = s7tv_getObjectIvar(layer, "animatedImageLayer");
         SEL startSel = NSSelectorFromString(@"startAnimating");
+        SevenTVManager *mgr = [SevenTVManager sharedManager];
+        NSInteger attemptNum = maxAttempts - attemptsLeft + 1;
+
+        if (attemptNum == 1) {
+            if (animLayer) {
+                [mgr log:[NSString stringWithFormat:
+                    @"🩻 retry#1 — ivar animatedImageLayer trouvé, classe=%@, répond startAnimating=%@",
+                    NSStringFromClass(object_getClass(animLayer)),
+                    [animLayer respondsToSelector:startSel] ? @"OUI" : @"NON"]];
+            } else {
+                [mgr log:@"🩻 retry#1 — ivar animatedImageLayer INTROUVABLE (nil ou pas un objet)"];
+            }
+        }
+
         if (animLayer && [animLayer respondsToSelector:startSel]) {
             @try { ((void(*)(id,SEL))objc_msgSend)(animLayer, startSel); } @catch(...) {}
         }
-        s7tv_retryStartAnimating(layer, attemptsLeft - 1);
+        s7tv_retryStartAnimatingStep(layer, attemptsLeft - 1, maxAttempts);
     });
+}
+
+static void s7tv_retryStartAnimating(CALayer *outerLayer, NSInteger attempts) {
+    s7tv_retryStartAnimatingStep(outerLayer, attempts, attempts);
+}
+
+
+// ────────────────────────────────────────────────────────────
+// MARK: - Dump diagnostic ivars/méthodes (debug animation GIF)
+// Tourne UNE SEULE FOIS (premier emote 7TV affiché) pour vérifier que
+// les noms d'ivars/classes supposés (animatedImageLayer, etc.) sont
+// corrects dans CETTE version de l'app, sans spammer les logs ensuite.
+// ────────────────────────────────────────────────────────────
+
+static void s7tv_dumpIvars(Class cls, NSString *label) {
+    SevenTVManager *mgr = [SevenTVManager sharedManager];
+    if (!cls) { [mgr log:[NSString stringWithFormat:@"🩻 %@ : classe nil", label]]; return; }
+    unsigned int count = 0;
+    Ivar *ivars = class_copyIvarList(cls, &count);
+    [mgr log:[NSString stringWithFormat:@"🩻 %@ (%@) — %u ivars:", label, NSStringFromClass(cls), count]];
+    for (unsigned int i = 0; i < count; i++) {
+        const char *name = ivar_getName(ivars[i]);
+        const char *enc  = ivar_getTypeEncoding(ivars[i]);
+        [mgr log:[NSString stringWithFormat:@"🩻   - %s : %s", name ?: "?", enc ?: "?"]];
+    }
+    if (ivars) free(ivars);
+}
+
+static void s7tv_dumpMethods(Class cls, NSString *label) {
+    SevenTVManager *mgr = [SevenTVManager sharedManager];
+    if (!cls) { [mgr log:[NSString stringWithFormat:@"🩻 %@ : classe nil", label]]; return; }
+    unsigned int count = 0;
+    Method *methods = class_copyMethodList(cls, &count);
+    NSMutableArray *names = [NSMutableArray array];
+    for (unsigned int i = 0; i < count; i++) {
+        [names addObject:NSStringFromSelector(method_getName(methods[i]))];
+    }
+    if (methods) free(methods);
+    [mgr log:[NSString stringWithFormat:@"🩻 %@ (%@) — méthodes: %@",
+        label, NSStringFromClass(cls), names.count ? [names componentsJoinedByString:@", "] : @"(aucune)"]];
+}
+
+static void s7tv_dumpAnimationArchitectureOnce(CALayer *outerLayer) {
+    static BOOL s_dumped = NO;
+    if (s_dumped || !outerLayer) return;
+    s_dumped = YES;
+
+    SevenTVManager *mgr = [SevenTVManager sharedManager];
+    Class outerCls = object_getClass(outerLayer);
+    [mgr log:@"🩻 ━━━━━ DUMP architecture animation (une seule fois) ━━━━━"];
+    s7tv_dumpIvars(outerCls, @"ImageAttachmentLayer (outer, trouvé via sublayer 'Animated')");
+
+    id animLayer = s7tv_getObjectIvar(outerLayer, "animatedImageLayer");
+    SEL startSel = NSSelectorFromString(@"startAnimating");
+    if (animLayer) {
+        [mgr log:[NSString stringWithFormat:@"🩻 ivar 'animatedImageLayer' trouvé → classe réelle: %@",
+            NSStringFromClass(object_getClass(animLayer))]];
+        [mgr log:[NSString stringWithFormat:@"🩻   répond à startAnimating: %@",
+            [animLayer respondsToSelector:startSel] ? @"OUI" : @"NON"]];
+        s7tv_dumpMethods(object_getClass(animLayer), @"objet de l'ivar animatedImageLayer");
+    } else {
+        [mgr log:@"🩻 ivar 'animatedImageLayer' INTROUVABLE sur l'ImageAttachmentLayer — le nom a peut-être changé"];
+    }
+
+    // Comparaison avec le sublayer détecté via containsString:@"Animated"
+    for (CALayer *sub in outerLayer.sublayers) {
+        if ([NSStringFromClass(object_getClass(sub)) containsString:@"Animated"]) {
+            [mgr log:[NSString stringWithFormat:
+                @"🩻 sublayer 'Animated' (celui qu'on resize) → classe: %@ — MÊME OBJET que l'ivar animatedImageLayer: %@",
+                NSStringFromClass(object_getClass(sub)),
+                (sub == animLayer) ? @"OUI" : @"NON"]];
+            s7tv_dumpMethods(object_getClass(sub), @"sublayer 'Animated' (celui qu'on resize)");
+        }
+    }
+    [mgr log:@"🩻 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"];
 }
 
 
@@ -1592,6 +1689,10 @@ static void TwitchSevenTVInit(void) {
 
                     if (emoteLayers.count == 0) return;
 
+                    // Dump diagnostic (une seule fois) pour vérifier les noms réels
+                    // d'ivars/classes sur CETTE version de l'app.
+                    s7tv_dumpAnimationArchitectureOnce(emoteLayers.firstObject);
+
                     // Hook displayLayer: directement sur Twitch.AnimatedImageAttachmentLayer.
                     // (Avant : hook posé sur CALayer — ne s'installait JAMAIS car CALayer
                     // n'implémente pas displayLayer: lui-même, c'est AnimatedImageAttachmentLayer
@@ -1610,7 +1711,11 @@ static void TwitchSevenTVInit(void) {
                                     @try { ((void(*)(id,SEL,id))origIMP)(selfObj, displaySel, layerArg); } @catch(...) {}
                                     // self est ici l'AnimatedImageAttachmentLayer lui-même
                                     @try {
-                                        if ([selfObj respondsToSelector:startSel]) {
+                                        BOOL responds = [selfObj respondsToSelector:startSel];
+                                        [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
+                                            @"🩻 displayLayer: déclenché sur %@ — répond à startAnimating: %@",
+                                            NSStringFromClass(object_getClass(selfObj)), responds ? @"OUI" : @"NON"]];
+                                        if (responds) {
                                             ((void(*)(id,SEL))objc_msgSend)(selfObj, startSel);
                                         }
                                     } @catch(...) {}
