@@ -252,14 +252,49 @@ static void s7tv_dumpAnimationArchitectureOnce(CALayer *outerLayer) {
         [mgr log:@"🩻 ivar 'animatedImageLayer' INTROUVABLE sur l'ImageAttachmentLayer — le nom a peut-être changé"];
     }
 
+    // Lire les autres ivars clés de l'ImageAttachmentLayer
+    id staticLayer  = s7tv_getObjectIvar(outerLayer, "staticImageLayer");
+    id currentLayer = s7tv_getObjectIvar(outerLayer, "currentImageLayer");
+    id curDisplayMode = s7tv_getObjectIvar(outerLayer, "currentDisplayMode");
+
+    [mgr log:[NSString stringWithFormat:@"🩻 ivar 'staticImageLayer'  → %@ (%p)",
+        staticLayer ? NSStringFromClass(object_getClass(staticLayer)) : @"nil", staticLayer]];
+    [mgr log:[NSString stringWithFormat:@"🩻 ivar 'animatedImageLayer'→ %@ (%p)",
+        animLayer ? NSStringFromClass(object_getClass(animLayer)) : @"nil", animLayer]];
+    [mgr log:[NSString stringWithFormat:@"🩻 ivar 'currentImageLayer' → %@ (%p)",
+        currentLayer ? NSStringFromClass(object_getClass(currentLayer)) : @"nil", currentLayer]];
+    [mgr log:[NSString stringWithFormat:@"🩻 ivar 'currentDisplayMode'→ %@",
+        curDisplayMode ? [curDisplayMode description] : @"nil"]];
+
+    // ⬇ Diagnostic clé : quel layer est réellement affiché ?
+    if (currentLayer) {
+        BOOL curIsAnimated = (currentLayer == animLayer);
+        BOOL curIsStatic   = (currentLayer == staticLayer);
+        [mgr log:[NSString stringWithFormat:
+            @"🩻 currentImageLayer == animatedImageLayer : %@ | == staticImageLayer : %@",
+            curIsAnimated ? @"✅ OUI (animé affiché)" : @"❌ NON",
+            curIsStatic   ? @"✅ OUI (statique affiché)" : @"NON"]];
+    } else {
+        [mgr log:@"🩻 currentImageLayer nil — ivar absent ou nom changé"];
+    }
+
     // Comparaison avec le sublayer détecté via containsString:@"Animated"
     for (CALayer *sub in outerLayer.sublayers) {
         if ([NSStringFromClass(object_getClass(sub)) containsString:@"Animated"]) {
             [mgr log:[NSString stringWithFormat:
-                @"🩻 sublayer 'Animated' (celui qu'on resize) → classe: %@ — MÊME OBJET que l'ivar animatedImageLayer: %@",
-                NSStringFromClass(object_getClass(sub)),
-                (sub == animLayer) ? @"OUI" : @"NON"]];
-            s7tv_dumpMethods(object_getClass(sub), @"sublayer 'Animated' (celui qu'on resize)");
+                @"🩻 sublayer 'Animated' (trouvé via .sublayers) (%p) → classe: %@",
+                sub, NSStringFromClass(object_getClass(sub))]];
+            [mgr log:[NSString stringWithFormat:
+                @"🩻   == animatedImageLayer(ivar): %@ | == currentImageLayer: %@",
+                (sub == animLayer)   ? @"OUI" : @"NON",
+                (sub == currentLayer)? @"OUI" : @"NON"]];
+            [mgr log:[NSString stringWithFormat:
+                @"🩻   frame: %@ | hidden: %@ | opacity: %.2f | superlayer: %@",
+                NSStringFromCGRect(sub.frame),
+                sub.isHidden ? @"OUI" : @"NON",
+                sub.opacity,
+                sub.superlayer ? NSStringFromClass(object_getClass(sub.superlayer)) : @"nil"]];
+            s7tv_dumpMethods(object_getClass(sub), @"sublayer 'Animated'");
         }
     }
     [mgr log:@"🩻 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"];
@@ -1737,6 +1772,27 @@ static void TwitchSevenTVInit(void) {
                                         }
                                         if (responds) {
                                             ((void(*)(id,SEL))objc_msgSend)(selfObj, startSel);
+                                            // Diagnostic clé : est-ce que selfObj (l'AnimatedImageAttachmentLayer)
+                                            // est bien le currentImageLayer affiché par le layer englobant ?
+                                            static NSInteger s_curLayerLogCount = 0;
+                                            if (s_curLayerLogCount < 5) {
+                                                s_curLayerLogCount++;
+                                                CALayer *outerL = [(CALayer *)selfObj superlayer];
+                                                id curLayer  = s7tv_getObjectIvar(outerL, "currentImageLayer");
+                                                id animIvar  = s7tv_getObjectIvar(outerL, "animatedImageLayer");
+                                                id staticIvar= s7tv_getObjectIvar(outerL, "staticImageLayer");
+                                                id dispMode  = s7tv_getObjectIvar(outerL, "currentDisplayMode");
+                                                [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
+                                                    @"🩻 displayLayer [%ld/5] currentImageLayer==%p selfObj==%p animIvar==%p staticIvar==%p dispMode=%@",
+                                                    (long)s_curLayerLogCount,
+                                                    curLayer, selfObj, animIvar, staticIvar,
+                                                    dispMode ? [dispMode description] : @"nil"]];
+                                                [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
+                                                    @"🩻   → cur==self: %@ | cur==animIvar: %@ | cur==staticIvar: %@",
+                                                    (curLayer == selfObj)    ? @"✅OUI(animé affiché)" : @"❌NON",
+                                                    (curLayer == animIvar)   ? @"OUI" : @"NON",
+                                                    (curLayer == staticIvar) ? @"OUI(STATIQUE!)" : @"NON"]];
+                                            }
                                         }
                                     } @catch(...) {}
                                 }));
