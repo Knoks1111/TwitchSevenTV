@@ -123,8 +123,9 @@ static NSURLSession *SevenTVGetUrgentSession(void) {
         cfg.URLCache           = SevenTVGetSharedCache(); // même cache que bulk
         cfg.requestCachePolicy = NSURLRequestReturnCacheDataElseLoad;
         cfg.protocolClasses    = @[];
-        // 3 connexions dédiées aux emotes urgentes — jamais bloquées par le bulk
-        cfg.HTTPMaximumConnectionsPerHost = 3;
+        // 8 connexions — couvre le semaphore bulk (6) + les urgences temps réel.
+        // HTTP/2 multiplex sur une connexion TCP, donc pas de surcoût réseau.
+        cfg.HTTPMaximumConnectionsPerHost = 8;
         s_urgentSession = [NSURLSession sessionWithConfiguration:cfg];
     });
     return s_urgentSession;
@@ -132,7 +133,7 @@ static NSURLSession *SevenTVGetUrgentSession(void) {
 
 // ── URL CDN pour un emote ID ─────────────────────────────────────────────────
 static NSURL *SevenTVCDNURLForEmoteID(NSString *emoteID) {
-    NSString *str = [NSString stringWithFormat:@"https://cdn.7tv.app/emote/%@/1x.gif", emoteID];
+    NSString *str = [NSString stringWithFormat:@"https://cdn.7tv.app/emote/%@/4x.webp", emoteID];
     return [NSURL URLWithString:str];
 }
 
@@ -335,10 +336,17 @@ static NSURL *SevenTVCDNURLForEmoteID(NSString *emoteID) {
     // Session URGENTE — indépendante du bulk prefetch.
     [[SevenTVGetUrgentSession() dataTaskWithRequest:req
                completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
-        // Log uniquement en cas d'erreur — supprime le spam "📦 Préfetch → OK"
         if (err) {
             [[SevenTVManager sharedManager] log:@"⚠️ Préfetch %@ → %@",
              emoteID, err.localizedDescription];
+        }
+        // Stockage manuel — NSURLSession ne stocke que si le CDN retourne les
+        // bons headers Cache-Control. On force le stockage ici pour garantir que
+        // cachedResponseForRequest: trouve l'image au moment de completion().
+        if (data && resp && !err) {
+            NSCachedURLResponse *toCache = [[NSCachedURLResponse alloc]
+                initWithResponse:resp data:data];
+            [SevenTVGetSharedCache() storeCachedResponse:toCache forRequest:req];
         }
         if (completion) completion();
     }] resume];
