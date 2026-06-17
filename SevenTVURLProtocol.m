@@ -132,11 +132,14 @@ static NSURLSession *SevenTVGetUrgentSession(void) {
 }
 
 // ── URL CDN pour un emote ID ─────────────────────────────────────────────────
-// 4x.gif : 1x.gif retiré — logs confirmés montrent un 404 quasi systématique
-// sur cette résolution (CDN 7TV n'a presque jamais de variante 1x). 4x.gif est
-// la résolution déjà confirmée disponible et fonctionnelle pour l'animation.
+// 4x.webp : retour à .webp — le CDN 7TV ne sert PAS de .gif (404 confirmés
+// systématiques sur 1x.gif ET 4x.gif, indépendamment de la résolution ; 7TV
+// ne livre qu'en WebP ou AVIF). .webp est le format réel et disponible.
+// Le test précédent en .webp n'animait pas, mais le Content-Type était spoofé
+// en "image/gif" — on corrige ça en même temps (voir plus bas) pour isoler
+// si c'était la vraie cause.
 static NSURL *SevenTVCDNURLForEmoteID(NSString *emoteID) {
-    NSString *str = [NSString stringWithFormat:@"https://cdn.7tv.app/emote/%@/4x.gif", emoteID];
+    NSString *str = [NSString stringWithFormat:@"https://cdn.7tv.app/emote/%@/4x.webp", emoteID];
     return [NSURL URLWithString:str];
 }
 
@@ -144,29 +147,30 @@ static NSURL *SevenTVCDNURLForEmoteID(NSString *emoteID) {
 //
 // PROBLÈME CORRIGÉ : ni startLoading (cache miss) ni prefetchEmoteID:completion:
 // ne vérifiaient le statut HTTP ni le contenu réel des données avant de les
-// mettre en cache et de les transmettre à Twitch avec un Content-Type:image/gif
-// spoofé. Si le CDN renvoie un 404 (ex: emote sans variante 1x disponible) avec
-// un petit corps JSON/HTML d'erreur, ce corps était accepté comme "image valide",
-// stocké en cache tel quel, et servi à Twitch qui échoue à le décoder → carré
-// vide PERMANENT (le mauvais contenu reste en cache pour toujours, le scroll ne
-// corrige rien puisque ce n'est pas un problème de timing).
+// mettre en cache et de les transmettre à Twitch. Si le CDN renvoie un 404
+// avec un petit corps JSON/HTML d'erreur, ce corps était accepté comme "image
+// valide", stocké en cache tel quel, et servi à Twitch qui échoue à le décoder
+// → carré vide PERMANENT (le mauvais contenu reste en cache pour toujours, le
+// scroll ne corrige rien puisque ce n'est pas un problème de timing).
 //
 // Double vérification :
 //   - statusCode == 200 — élimine 404/403/5xx etc.
-//   - signature de fichier GIF ("GIF8" en tête) — élimine tout corps de
-//     réponse qui ne serait pas un vrai GIF (page d'erreur, JSON, HTML),
-//     même si le CDN renvoyait par erreur un statusCode 200 sur une erreur.
-static BOOL SevenTVIsValidGIFResponse(NSURLResponse *response, NSData *data) {
-    if (!data || data.length < 6) return NO;
+//   - signature de fichier WebP ("RIFF" + "WEBP" à l'offset 8) — élimine tout
+//     corps de réponse qui ne serait pas un vrai WebP (page d'erreur, JSON,
+//     HTML), même si le CDN renvoyait par erreur un statusCode 200.
+static BOOL SevenTVIsValidWebPResponse(NSURLResponse *response, NSData *data) {
+    if (!data || data.length < 12) return NO;
 
     if ([response isKindOfClass:[NSHTTPURLResponse class]]) {
         NSInteger status = ((NSHTTPURLResponse *)response).statusCode;
         if (status != 200) return NO;
     }
 
-    static const char gifMagic[4] = {'G', 'I', 'F', '8'};
+    // Format RIFF : 4 octets "RIFF" + 4 octets taille (ignorés) + 4 octets "WEBP".
     const char *bytes = (const char *)data.bytes;
-    return (memcmp(bytes, gifMagic, sizeof(gifMagic)) == 0);
+    BOOL hasRIFF = (memcmp(bytes, "RIFF", 4) == 0);
+    BOOL hasWEBP = (memcmp(bytes + 8, "WEBP", 4) == 0);
+    return hasRIFF && hasWEBP;
 }
 
 
@@ -243,13 +247,14 @@ static BOOL SevenTVIsValidGIFResponse(NSURLResponse *response, NSData *data) {
     NSCachedURLResponse *cached = [SevenTVGetSharedCache() cachedResponseForRequest:cacheCheckReq];
 
     if (cached) {
-        [mgr log:@"⚡️ URLProtocol cache hit (sync) → emote:%@", emoteID];
+        [mgr log:@"⚡️ URLProtocol cache hit (sync) → emote:%@ (servi en image/webp, %lu bytes)",
+            emoteID, (unsigned long)cached.data.length];
 
         NSHTTPURLResponse *spoofed = [[NSHTTPURLResponse alloc]
             initWithURL:self.request.URL
             statusCode:200
            HTTPVersion:@"HTTP/1.1"
-          headerFields:@{@"Content-Type": @"image/gif"}];
+          headerFields:@{@"Content-Type": @"image/webp"}];
 
         [self.client URLProtocol:self
               didReceiveResponse:spoofed
@@ -282,7 +287,7 @@ static BOOL SevenTVIsValidGIFResponse(NSURLResponse *response, NSData *data) {
         }
 
         if (data && response) {
-            if (!SevenTVIsValidGIFResponse(response, data)) {
+            if (!SevenTVIsValidWebPResponse(response, data)) {
                 NSInteger status = [response isKindOfClass:[NSHTTPURLResponse class]]
                     ? ((NSHTTPURLResponse *)response).statusCode : -1;
                 [mgr log:@"❌ Réponse CDN invalide (cache miss) → emote:%@ status:%ld bytes:%lu — non mise en cache",
@@ -294,12 +299,15 @@ static BOOL SevenTVIsValidGIFResponse(NSURLResponse *response, NSData *data) {
                 return;
             }
 
+            [mgr log:@"✅ Réponse CDN valide (cache miss) → emote:%@ signature WebP confirmée, %lu bytes",
+                emoteID, (unsigned long)data.length];
+
             NSHTTPURLResponse *http = (NSHTTPURLResponse *)response;
             NSHTTPURLResponse *spoofed = [[NSHTTPURLResponse alloc]
                 initWithURL:strongSelf.request.URL
                 statusCode:http.statusCode
                HTTPVersion:@"HTTP/1.1"
-              headerFields:@{@"Content-Type": @"image/gif"}];
+              headerFields:@{@"Content-Type": @"image/webp"}];
 
             [strongSelf.client URLProtocol:strongSelf
                         didReceiveResponse:spoofed
@@ -390,12 +398,12 @@ static BOOL SevenTVIsValidGIFResponse(NSURLResponse *response, NSData *data) {
         // lit via cachedResponseForRequest:, évitant un cache miss à cause de
         // cachePolicy/timeoutInterval différents.
         //
-        // Validation AVANT stockage : sans ça, un 404 7TV (ex: pas de variante
-        // 1x pour cette emote) avec un petit corps JSON/HTML d'erreur était
-        // accepté comme image valide et restait en cache pour toujours →
-        // carré vide permanent que même le scroll ne corrige jamais.
+        // Validation AVANT stockage : sans ça, un 404 7TV avec un petit corps
+        // JSON/HTML d'erreur était accepté comme image valide et restait en
+        // cache pour toujours → carré vide permanent que même le scroll ne
+        // corrige jamais.
         if (data && resp && !err) {
-            if (SevenTVIsValidGIFResponse(resp, data)) {
+            if (SevenTVIsValidWebPResponse(resp, data)) {
                 NSCachedURLResponse *toCache = [[NSCachedURLResponse alloc]
                     initWithResponse:resp data:data];
                 NSURLRequest *cacheKey = [NSURLRequest requestWithURL:url];
@@ -426,7 +434,7 @@ static BOOL SevenTVIsValidGIFResponse(NSURLResponse *response, NSData *data) {
 }
 
 + (void)prewarmCDNConnection {
-    NSURL *warmURL = [NSURL URLWithString:@"https://cdn.7tv.app/emote/01F6MSP3NV00001B6E/4x.gif"];
+    NSURL *warmURL = [NSURL URLWithString:@"https://cdn.7tv.app/emote/01F6MSP3NV00001B6E/4x.webp"];
     if (!warmURL) return;
 
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:warmURL];

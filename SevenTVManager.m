@@ -1107,7 +1107,7 @@ static const CGFloat kS7TVMenuHeight = 520.0;
 - (NSURL *)cdnURLForEmote:(SevenTVEmote *)emote {
     if (!emote) return nil;
     return [NSURL URLWithString:
-            [NSString stringWithFormat:@"%@/%@/4x.gif", S7TV_CDN_BASE, emote.emoteID]];
+            [NSString stringWithFormat:@"%@/%@/4x.webp", S7TV_CDN_BASE, emote.emoteID]];
 }
 
 
