@@ -118,6 +118,45 @@ static void s7tvLogResponds(id obj, NSArray<NSString *> *selectors, NSInteger sa
 
 
 // ────────────────────────────────────────────────────────────
+// MARK: - Helper accès ivar objet sécurisé (par nom, pas d'offset)
+// Lit un ivar de type objet ("@...") en cherchant par NOM via
+// class_getInstanceVariable — aucun offset numérique en dur. Si le
+// layout change entre versions de l'app, on récupère nil au lieu de
+// lire un pointeur invalide (donc plus de risque d'EXC_BAD_ACCESS).
+// ────────────────────────────────────────────────────────────
+
+static id s7tv_getObjectIvar(id obj, const char *ivarName) {
+    if (!obj) return nil;
+    Ivar iv = class_getInstanceVariable(object_getClass(obj), ivarName);
+    if (!iv) return nil;
+    const char *enc = ivar_getTypeEncoding(iv);
+    if (!enc || enc[0] != '@') return nil; // pas un type objet → on n'y touche pas
+    return object_getIvar(obj, iv);
+}
+
+// Relance startAnimating sur le ivar "animatedImageLayer" de l'ImageAttachmentLayer
+// englobant, à intervalles réguliers (max ~1.5s), le temps que l'image GIF finisse
+// de charger en arrière-plan. Piste retenue à la place du hook sur
+// "imageLoadSubscriptions" (Combine), trop fragile à intercepter côté Swift.
+static void s7tv_retryStartAnimating(CALayer *outerLayer, NSInteger attemptsLeft) {
+    if (attemptsLeft <= 0 || !outerLayer) return;
+    __weak CALayer *weakLayer = outerLayer;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        CALayer *layer = weakLayer;
+        if (!layer || !layer.superlayer) return; // cellule recyclée / layer disparu
+
+        id animLayer = s7tv_getObjectIvar(layer, "animatedImageLayer");
+        SEL startSel = NSSelectorFromString(@"startAnimating");
+        if (animLayer && [animLayer respondsToSelector:startSel]) {
+            @try { ((void(*)(id,SEL))objc_msgSend)(animLayer, startSel); } @catch(...) {}
+        }
+        s7tv_retryStartAnimating(layer, attemptsLeft - 1);
+    });
+}
+
+
+// ────────────────────────────────────────────────────────────
 // MARK: - Hijack du bouton Bits → bouton 7TV
 // ────────────────────────────────────────────────────────────
 
@@ -1553,29 +1592,45 @@ static void TwitchSevenTVInit(void) {
 
                     if (emoteLayers.count == 0) return;
 
-                    // Hook displayLayer: sur CALayer (superclasse) en filtrant AnimatedImageAttachmentLayer
-                    // displayLayer: est dispatché par CALayer, pas par AnimatedImageAttachmentLayer lui-même
+                    // Hook displayLayer: directement sur Twitch.AnimatedImageAttachmentLayer.
+                    // (Avant : hook posé sur CALayer — ne s'installait JAMAIS car CALayer
+                    // n'implémente pas displayLayer: lui-même, c'est AnimatedImageAttachmentLayer
+                    // qui définit cette méthode comme la sienne propre. class_getInstanceMethod
+                    // sur [CALayer class] renvoyait donc dm=nil et le bloc entier était mort code.)
                     static BOOL s_displayLayerHooked = NO;
                     if (!s_displayLayerHooked) {
-                        Class calayerCls = [CALayer class];
-                        SEL displaySel = NSSelectorFromString(@"displayLayer:");
-                        Method dm = class_getInstanceMethod(calayerCls, displaySel);
-                        if (dm) {
-                            IMP origIMP = method_getImplementation(dm);
-                            SEL startSel = NSSelectorFromString(@"startAnimating");
-                            method_setImplementation(dm, imp_implementationWithBlock(^(id selfObj, id layerArg) {
-                                @try { ((void(*)(id,SEL,id))origIMP)(selfObj, displaySel, layerArg); } @catch(...) {}
-                                // Appeler startAnimating seulement sur AnimatedImageAttachmentLayer
-                                @try {
-                                    if ([NSStringFromClass(object_getClass(layerArg)) containsString:@"AnimatedImage"]) {
-                                        if ([layerArg respondsToSelector:startSel]) {
-                                            ((void(*)(id,SEL))objc_msgSend)(layerArg, startSel);
+                        Class animLayerCls = NSClassFromString(@"Twitch.AnimatedImageAttachmentLayer");
+                        if (animLayerCls) {
+                            SEL displaySel = NSSelectorFromString(@"displayLayer:");
+                            Method dm = class_getInstanceMethod(animLayerCls, displaySel);
+                            if (dm) {
+                                IMP origIMP = method_getImplementation(dm);
+                                SEL startSel = NSSelectorFromString(@"startAnimating");
+                                method_setImplementation(dm, imp_implementationWithBlock(^(id selfObj, id layerArg) {
+                                    @try { ((void(*)(id,SEL,id))origIMP)(selfObj, displaySel, layerArg); } @catch(...) {}
+                                    // self est ici l'AnimatedImageAttachmentLayer lui-même
+                                    @try {
+                                        if ([selfObj respondsToSelector:startSel]) {
+                                            ((void(*)(id,SEL))objc_msgSend)(selfObj, startSel);
                                         }
-                                    }
-                                } @catch(...) {}
-                            }));
-                            s_displayLayerHooked = YES;
+                                    } @catch(...) {}
+                                }));
+                                s_displayLayerHooked = YES;
+                                [[SevenTVManager sharedManager] log:@"✅ Hook displayLayer: sur AnimatedImageAttachmentLayer OK"];
+                            } else {
+                                [[SevenTVManager sharedManager] log:@"⚠️ displayLayer: introuvable sur AnimatedImageAttachmentLayer"];
+                            }
+                        } else {
+                            [[SevenTVManager sharedManager] log:@"⚠️ Classe AnimatedImageAttachmentLayer introuvable"];
                         }
+                    }
+
+                    // Filet de sécurité complémentaire : polling court (ivar "animatedImageLayer"
+                    // de l'ImageAttachmentLayer englobant, accès par nom — pas d'offset en dur).
+                    // Couvre le cas où displayLayer: ne se déclenche pas (image pas encore chargée
+                    // au moment du willDisplayCell).
+                    for (CALayer *outerEmoteLayer in emoteLayers) {
+                        s7tv_retryStartAnimating(outerEmoteLayer, 6); // ~1.5s de tentatives
                     }
 
                     // ─────────────────────────────────────────────────────────────
