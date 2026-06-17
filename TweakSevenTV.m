@@ -1773,6 +1773,51 @@ static void TwitchSevenTVInit(void) {
                     // d'ivars/classes sur CETTE version de l'app.
                     s7tv_dumpAnimationArchitectureOnce(emoteLayers.firstObject);
 
+                    // ────────────────────────────────────────────────────────
+                    // Hook initWithFPS: — piste prioritaire non explorée du
+                    // récap. Confirmé : les emotes WebP se chargent (signature
+                    // validée), startAnimating est appelé, displayLayer: se
+                    // déclenche, MAIS l'animation reste figée sur une frame
+                    // fixe (différente par occurrence — donc le décodage WebP
+                    // fonctionne, mais le timer/scheduler d'animation interne
+                    // ne progresse jamais après le premier rendu).
+                    // initWithFPS: est le seul point où Twitch configure ce
+                    // qui pilote la cadence d'animation. FPS=0 expliquerait
+                    // exactement ce symptôme (layer créé mais jamais "tické").
+                    static BOOL s_initWithFPSHooked = NO;
+                    if (!s_initWithFPSHooked) {
+                        Class animLayerClsForFPS = NSClassFromString(@"Twitch.AnimatedImageAttachmentLayer");
+                        if (animLayerClsForFPS) {
+                            SEL fpsSel = NSSelectorFromString(@"initWithFPS:");
+                            Method fpsM = class_getInstanceMethod(animLayerClsForFPS, fpsSel);
+                            if (fpsM) {
+                                IMP origFPSIMP = method_getImplementation(fpsM);
+                                method_setImplementation(fpsM, imp_implementationWithBlock(^id(id selfObj, double fps) {
+                                    id result = nil;
+                                    @try {
+                                        result = ((id(*)(id,SEL,double))origFPSIMP)(selfObj, fpsSel, fps);
+                                    } @catch(...) {
+                                        result = selfObj;
+                                    }
+                                    static NSInteger s_fpsLogCount = 0;
+                                    if (s_fpsLogCount < 10) {
+                                        s_fpsLogCount++;
+                                        [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
+                                            @"🩻 initWithFPS: appelé avec fps=%.3f → classe=%@ (log %ld/10)",
+                                            fps, NSStringFromClass(object_getClass(result ?: selfObj)),
+                                            (long)s_fpsLogCount]];
+                                    }
+                                    return result;
+                                }));
+                                s_initWithFPSHooked = YES;
+                                [[SevenTVManager sharedManager] log:@"✅ Hook initWithFPS: sur AnimatedImageAttachmentLayer OK"];
+                            } else {
+                                [[SevenTVManager sharedManager] log:@"⚠️ initWithFPS: introuvable sur AnimatedImageAttachmentLayer"];
+                            }
+                        }
+                    }
+                    // ────────────────────────────────────────────────────────
+
                     // Hook displayLayer: directement sur Twitch.AnimatedImageAttachmentLayer.
                     // (Avant : hook posé sur CALayer — ne s'installait JAMAIS car CALayer
                     // n'implémente pas displayLayer: lui-même, c'est AnimatedImageAttachmentLayer
