@@ -2472,8 +2472,27 @@ referenceSizeForHeaderInSection:(NSInteger)section {
         floatingWin.hidden          = NO;
 
         // rootViewController requis sous iOS 13+
+        // IMPORTANT : doit supporter toutes les orientations, sinon iOS bloque
+        // la rotation dans TOUTE l'app car il consulte toutes les fenêtres visibles.
         UIViewController *rootVC = [[UIViewController alloc] init];
         rootVC.view.backgroundColor = [UIColor clearColor];
+        // Override supportedInterfaceOrientations via sous-classe anonyme
+        object_setClass(rootVC, ({
+            Class cls = objc_allocateClassPair([UIViewController class],
+                                              "SevenTVFloatingRootVC", 0);
+            class_addMethod(cls,
+                @selector(supportedInterfaceOrientations),
+                imp_implementationWithBlock(^UIInterfaceOrientationMask(id _){ 
+                    return UIInterfaceOrientationMaskAll; 
+                }),
+                "I@:");
+            class_addMethod(cls,
+                @selector(shouldAutorotate),
+                imp_implementationWithBlock(^BOOL(id _){ return YES; }),
+                "B@:");
+            objc_registerClassPair(cls);
+            cls;
+        }));
         floatingWin.rootViewController = rootVC;
 
         self.floatingWindow = floatingWin;
@@ -2526,6 +2545,8 @@ referenceSizeForHeaderInSection:(NSInteger)section {
         // rootVC transparent — sert uniquement de présentateur
         UIViewController *rootVC = [[UIViewController alloc] init];
         rootVC.view.backgroundColor = [UIColor clearColor];
+        // Même fix que floatingWindow : supporter toutes les orientations
+        object_setClass(rootVC, NSClassFromString(@"SevenTVFloatingRootVC") ?: [UIViewController class]);
         menuWin.rootViewController = rootVC;
         menuWin.hidden = NO;
         self.menuWindow = menuWin; // retenu fortement jusqu'à la fermeture
