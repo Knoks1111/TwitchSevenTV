@@ -141,6 +141,35 @@ static NSURL *SevenTVCDNURLForEmoteID(NSString *emoteID) {
     return [NSURL URLWithString:str];
 }
 
+// ── Validation réponse CDN ───────────────────────────────────────────────────
+//
+// PROBLÈME CORRIGÉ : ni startLoading (cache miss) ni prefetchEmoteID:completion:
+// ne vérifiaient le statut HTTP ni le contenu réel des données avant de les
+// mettre en cache et de les transmettre à Twitch avec un Content-Type:image/gif
+// spoofé. Si le CDN renvoie un 404 (ex: emote sans variante 1x disponible) avec
+// un petit corps JSON/HTML d'erreur, ce corps était accepté comme "image valide",
+// stocké en cache tel quel, et servi à Twitch qui échoue à le décoder → carré
+// vide PERMANENT (le mauvais contenu reste en cache pour toujours, le scroll ne
+// corrige rien puisque ce n'est pas un problème de timing).
+//
+// Double vérification :
+//   - statusCode == 200 — élimine 404/403/5xx etc.
+//   - signature de fichier GIF ("GIF8" en tête) — élimine tout corps de
+//     réponse qui ne serait pas un vrai GIF (page d'erreur, JSON, HTML),
+//     même si le CDN renvoyait par erreur un statusCode 200 sur une erreur.
+static BOOL SevenTVIsValidGIFResponse(NSURLResponse *response, NSData *data) {
+    if (!data || data.length < 6) return NO;
+
+    if ([response isKindOfClass:[NSHTTPURLResponse class]]) {
+        NSInteger status = ((NSHTTPURLResponse *)response).statusCode;
+        if (status != 200) return NO;
+    }
+
+    static const char gifMagic[4] = {'G', 'I', 'F', '8'};
+    const char *bytes = (const char *)data.bytes;
+    return (memcmp(bytes, gifMagic, sizeof(gifMagic)) == 0);
+}
+
 
 @interface SevenTVURLProtocol ()
 @property (nonatomic, strong) NSURLSessionDataTask *activeTask;
@@ -254,6 +283,18 @@ static NSURL *SevenTVCDNURLForEmoteID(NSString *emoteID) {
         }
 
         if (data && response) {
+            if (!SevenTVIsValidGIFResponse(response, data)) {
+                NSInteger status = [response isKindOfClass:[NSHTTPURLResponse class]]
+                    ? ((NSHTTPURLResponse *)response).statusCode : -1;
+                [mgr log:@"❌ Réponse CDN invalide (cache miss) → emote:%@ status:%ld bytes:%lu — non mise en cache",
+                    emoteID, (long)status, (unsigned long)data.length];
+                [strongSelf.client URLProtocol:strongSelf
+                              didFailWithError:[NSError errorWithDomain:NSURLErrorDomain
+                                                                  code:NSURLErrorBadServerResponse
+                                                              userInfo:nil]];
+                return;
+            }
+
             NSHTTPURLResponse *http = (NSHTTPURLResponse *)response;
             NSHTTPURLResponse *spoofed = [[NSHTTPURLResponse alloc]
                 initWithURL:strongSelf.request.URL
@@ -349,11 +390,24 @@ static NSURL *SevenTVCDNURLForEmoteID(NSString *emoteID) {
         // pour que la clé de cache corresponde exactement à ce que startLoading
         // lit via cachedResponseForRequest:, évitant un cache miss à cause de
         // cachePolicy/timeoutInterval différents.
+        //
+        // Validation AVANT stockage : sans ça, un 404 7TV (ex: pas de variante
+        // 1x pour cette emote) avec un petit corps JSON/HTML d'erreur était
+        // accepté comme image valide et restait en cache pour toujours →
+        // carré vide permanent que même le scroll ne corrige jamais.
         if (data && resp && !err) {
-            NSCachedURLResponse *toCache = [[NSCachedURLResponse alloc]
-                initWithResponse:resp data:data];
-            NSURLRequest *cacheKey = [NSURLRequest requestWithURL:url];
-            [SevenTVGetSharedCache() storeCachedResponse:toCache forRequest:cacheKey];
+            if (SevenTVIsValidGIFResponse(resp, data)) {
+                NSCachedURLResponse *toCache = [[NSCachedURLResponse alloc]
+                    initWithResponse:resp data:data];
+                NSURLRequest *cacheKey = [NSURLRequest requestWithURL:url];
+                [SevenTVGetSharedCache() storeCachedResponse:toCache forRequest:cacheKey];
+            } else {
+                NSInteger status = [resp isKindOfClass:[NSHTTPURLResponse class]]
+                    ? ((NSHTTPURLResponse *)resp).statusCode : -1;
+                [[SevenTVManager sharedManager] log:
+                    @"❌ Préfetch %@ → réponse invalide status:%ld bytes:%lu — non mise en cache",
+                    emoteID, (long)status, (unsigned long)data.length];
+            }
         }
         if (completion) completion();
     }] resume];
