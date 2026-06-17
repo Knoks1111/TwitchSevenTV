@@ -1103,6 +1103,9 @@ static void s7tv_hook_network_image_requester(void) {
         [mgr log:@"✅ Hook imageAtURL:...:storeInMemoryCache:userInitiated: OK"];
     }
 
+    // ── Sélecteur startAnimating partagé ──
+    SEL startSel = NSSelectorFromString(@"startAnimating");
+
     // ── variante courte : animatedImageAtURL:withStaticScale:persistingFor: ──
     SEL selAnim1 = NSSelectorFromString(@"animatedImageAtURL:withStaticScale:persistingFor:");
     Method mAnim1 = class_getInstanceMethod(nic, selAnim1);
@@ -1110,8 +1113,12 @@ static void s7tv_hook_network_image_requester(void) {
         IMP orig = method_getImplementation(mAnim1);
         method_setImplementation(mAnim1, imp_implementationWithBlock(
             ^id(id self_, NSURL *url, CGFloat scale, id persist) {
-                [mgr log:@"🎞A %@  scale=%.1f", url.absoluteString, scale];
-                return ((id(*)(id,SEL,NSURL*,CGFloat,id))orig)(self_, selAnim1, url, scale, persist);
+                id result = ((id(*)(id,SEL,NSURL*,CGFloat,id))orig)(self_, selAnim1, url, scale, persist);
+                // Appeler startAnimating sur le résultat si disponible
+                if (result && [result respondsToSelector:startSel]) {
+                    ((void(*)(id,SEL))objc_msgSend)(result, startSel);
+                }
+                return result;
             }));
         [mgr log:@"✅ Hook animatedImageAtURL:withStaticScale:persistingFor: OK"];
     }
@@ -1123,8 +1130,12 @@ static void s7tv_hook_network_image_requester(void) {
         IMP orig = method_getImplementation(mAnim2);
         method_setImplementation(mAnim2, imp_implementationWithBlock(
             ^id(id self_, NSURL *url, CGFloat scale, id persist, BOOL user) {
-                [mgr log:@"🎞B %@  scale=%.1f user=%d", url.absoluteString, scale, user];
-                return ((id(*)(id,SEL,NSURL*,CGFloat,id,BOOL))orig)(self_, selAnim2, url, scale, persist, user);
+                id result = ((id(*)(id,SEL,NSURL*,CGFloat,id,BOOL))orig)(self_, selAnim2, url, scale, persist, user);
+                // Appeler startAnimating sur le résultat si disponible
+                if (result && [result respondsToSelector:startSel]) {
+                    ((void(*)(id,SEL))objc_msgSend)(result, startSel);
+                }
+                return result;
             }));
         [mgr log:@"✅ Hook animatedImageAtURL:...:userInitiated: OK"];
     }
