@@ -134,14 +134,11 @@ static NSURLSession *SevenTVGetUrgentSession(void) {
 }
 
 // ── URL CDN pour un emote ID ─────────────────────────────────────────────────
-// 1x.webp : réduction de résolution pour limiter le poids des fichiers —
-// les GIF convertis en 4x atteignaient plusieurs Mo pour les emotes à
-// beaucoup de frames (ex: 268 frames → 5.5 Mo), causant un lag visible.
-// .webp reste le format réel et disponible sur le CDN 7TV (contrairement
-// à .gif qui retourne un 404 systématique, peu importe la résolution).
-// Si 1x s'avère indisponible pour certaines emotes (404), remonter à 2x.
+// 2x.webp : passage de 1x → 2x pour réduire le flou visible. Les emotes
+// statiques ne sont plus converties en GIF (servies en WebP directement),
+// donc la charge CPU extra est compensée. À retester si lag revient.
 static NSURL *SevenTVCDNURLForEmoteID(NSString *emoteID) {
-    NSString *str = [NSString stringWithFormat:@"https://cdn.7tv.app/emote/%@/1x.webp", emoteID];
+    NSString *str = [NSString stringWithFormat:@"https://cdn.7tv.app/emote/%@/2x.webp", emoteID];
     return [NSURL URLWithString:str];
 }
 
@@ -205,6 +202,14 @@ static NSData *SevenTVConvertWebPDataToGIF(NSData *webpData, NSString **outFailR
     size_t frameCount = CGImageSourceGetCount(source);
     if (frameCount == 0) {
         if (outFailReason) *outFailReason = @"frameCount==0";
+        CFRelease(source);
+        return nil;
+    }
+    // Emote statique (1 seule frame) → pas de conversion nécessaire.
+    // On retourne nil avec une raison spéciale que les call sites
+    // reconnaissent pour servir le WebP tel quel au lieu de GIF.
+    if (frameCount == 1) {
+        if (outFailReason) *outFailReason = @"static";
         CFRelease(source);
         return nil;
     }
@@ -318,6 +323,10 @@ static NSData *SevenTVConvertWebPDataToGIF(NSData *webpData, NSString **outFailR
 
 
 @interface SevenTVURLProtocol ()
+
+// ── Compteurs globaux animé / statique (partagés entre startLoading et prefetchEmoteID:completion:)
+static _Atomic(NSInteger) s_gifCount  = 0;  // emotes converties en GIF animé
+static _Atomic(NSInteger) s_webpCount = 0;  // emotes statiques servies en WebP
 @property (nonatomic, strong) NSURLSessionDataTask *activeTask;
 @end
 
@@ -444,6 +453,34 @@ static NSData *SevenTVConvertWebPDataToGIF(NSData *webpData, NSString **outFailR
 
             NSString *failReason = nil;
             NSData *gifData = SevenTVConvertWebPDataToGIF(data, &failReason);
+
+            if (!gifData && [failReason isEqualToString:@"static"]) {
+                // Emote statique (1 frame) → servir le WebP original tel quel,
+                // pas de conversion. Twitch affiche le WebP statique nativement.
+                s_webpCount++;
+                [mgr log:@"🖼 Cache miss statique → emote:%@ servi en image/webp (%lu bytes) [GIF:%ld WebP:%ld]",
+                    emoteID, (unsigned long)data.length, (long)s_gifCount, (long)s_webpCount];
+
+                NSHTTPURLResponse *http = (NSHTTPURLResponse *)response;
+                NSHTTPURLResponse *spoofed = [[NSHTTPURLResponse alloc]
+                    initWithURL:strongSelf.request.URL
+                    statusCode:http.statusCode
+                   HTTPVersion:@"HTTP/1.1"
+                  headerFields:@{@"Content-Type": @"image/webp"}];
+
+                NSCachedURLResponse *toCache = [[NSCachedURLResponse alloc]
+                    initWithResponse:spoofed data:data];
+                NSURLRequest *cacheKey = [NSURLRequest requestWithURL:strongSelf.request.URL];
+                [SevenTVGetSharedCache() storeCachedResponse:toCache forRequest:cacheKey];
+
+                [strongSelf.client URLProtocol:strongSelf
+                            didReceiveResponse:spoofed
+                            cacheStoragePolicy:NSURLCacheStorageAllowed];
+                [strongSelf.client URLProtocol:strongSelf didLoadData:data];
+                [strongSelf.client URLProtocolDidFinishLoading:strongSelf];
+                return;
+            }
+
             if (!gifData) {
                 [mgr log:@"❌ Conversion WebP→GIF échouée (cache miss) → emote:%@ bytes:%lu raison:%@ — non mise en cache",
                     emoteID, (unsigned long)data.length, failReason ?: @"?"];
@@ -454,12 +491,14 @@ static NSData *SevenTVConvertWebPDataToGIF(NSData *webpData, NSString **outFailR
                 return;
             }
 
+            s_gifCount++;
             CGImageSourceRef gifSrcForCount = CGImageSourceCreateWithData((CFDataRef)gifData, NULL);
             size_t frameCountForLog = gifSrcForCount ? CGImageSourceGetCount(gifSrcForCount) : 0;
             if (gifSrcForCount) CFRelease(gifSrcForCount);
 
-            [mgr log:@"✅ Réponse CDN valide (cache miss) → emote:%@ converti WebP→GIF, %lu frames, %lu → %lu bytes",
-                emoteID, (unsigned long)frameCountForLog, (unsigned long)data.length, (unsigned long)gifData.length];
+            [mgr log:@"✅ Réponse CDN valide (cache miss) → emote:%@ converti WebP→GIF, %lu frames, %lu → %lu bytes [GIF:%ld WebP:%ld]",
+                emoteID, (unsigned long)frameCountForLog, (unsigned long)data.length, (unsigned long)gifData.length,
+                (long)s_gifCount, (long)s_webpCount];
 
             NSHTTPURLResponse *http = (NSHTTPURLResponse *)response;
             NSHTTPURLResponse *spoofed = [[NSHTTPURLResponse alloc]
@@ -569,7 +608,26 @@ static NSData *SevenTVConvertWebPDataToGIF(NSData *webpData, NSString **outFailR
             if (SevenTVIsValidWebPResponse(resp, data)) {
                 NSString *failReason = nil;
                 NSData *gifData = SevenTVConvertWebPDataToGIF(data, &failReason);
-                if (gifData) {
+
+                if (!gifData && [failReason isEqualToString:@"static"]) {
+                    // Emote statique → stocker le WebP original directement.
+                    s_webpCount++;
+                    NSHTTPURLResponse *http = (NSHTTPURLResponse *)resp;
+                    NSHTTPURLResponse *webpResp = [[NSHTTPURLResponse alloc]
+                        initWithURL:url
+                        statusCode:http.statusCode
+                       HTTPVersion:@"HTTP/1.1"
+                      headerFields:@{@"Content-Type": @"image/webp"}];
+                    NSCachedURLResponse *toCache = [[NSCachedURLResponse alloc]
+                        initWithResponse:webpResp data:data];
+                    NSURLRequest *cacheKey = [NSURLRequest requestWithURL:url];
+                    [SevenTVGetSharedCache() storeCachedResponse:toCache forRequest:cacheKey];
+                    [[SevenTVManager sharedManager] log:
+                        @"🖼 Préfetch %@ → statique WebP stocké (%lu bytes) [GIF:%ld WebP:%ld]",
+                        emoteID, (unsigned long)data.length, (long)s_gifCount, (long)s_webpCount];
+
+                } else if (gifData) {
+                    s_gifCount++;
                     NSHTTPURLResponse *http = (NSHTTPURLResponse *)resp;
                     NSHTTPURLResponse *gifResp = [[NSHTTPURLResponse alloc]
                         initWithURL:url
@@ -585,9 +643,10 @@ static NSData *SevenTVConvertWebPDataToGIF(NSData *webpData, NSString **outFailR
                     size_t frameCountForLog = gifSrcForCount ? CGImageSourceGetCount(gifSrcForCount) : 0;
                     if (gifSrcForCount) CFRelease(gifSrcForCount);
                     [[SevenTVManager sharedManager] log:
-                        @"✅ Préfetch %@ → converti WebP→GIF, %lu frames, %lu → %lu bytes",
+                        @"✅ Préfetch %@ → converti WebP→GIF, %lu frames, %lu → %lu bytes [GIF:%ld WebP:%ld]",
                         emoteID, (unsigned long)frameCountForLog,
-                        (unsigned long)data.length, (unsigned long)gifData.length];
+                        (unsigned long)data.length, (unsigned long)gifData.length,
+                        (long)s_gifCount, (long)s_webpCount];
                 } else {
                     [[SevenTVManager sharedManager] log:
                         @"❌ Préfetch %@ → conversion WebP→GIF échouée bytes:%lu raison:%@ — non mise en cache",
@@ -619,7 +678,7 @@ static NSData *SevenTVConvertWebPDataToGIF(NSData *webpData, NSString **outFailR
 }
 
 + (void)prewarmCDNConnection {
-    NSURL *warmURL = [NSURL URLWithString:@"https://cdn.7tv.app/emote/01F6MSP3NV00001B6E/1x.webp"];
+    NSURL *warmURL = [NSURL URLWithString:@"https://cdn.7tv.app/emote/01F6MSP3NV00001B6E/2x.webp"];
     if (!warmURL) return;
 
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:warmURL];
