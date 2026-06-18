@@ -190,14 +190,21 @@ static BOOL SevenTVIsValidWebPResponse(NSURLResponse *response, NSData *data) {
 // kCGImagePropertyWebPDelayTime / kCGImagePropertyWebPDictionary disponibles
 // depuis iOS 14 (ImageIO) — donc le timing par frame du WebP source est lu
 // correctement, pas une valeur arbitraire.
-static NSData *SevenTVConvertWebPDataToGIF(NSData *webpData) {
-    if (!webpData) return nil;
+static NSData *SevenTVConvertWebPDataToGIF(NSData *webpData, NSString **outFailReason) {
+    if (!webpData) {
+        if (outFailReason) *outFailReason = @"webpData nil";
+        return nil;
+    }
 
     CGImageSourceRef source = CGImageSourceCreateWithData((CFDataRef)webpData, NULL);
-    if (!source) return nil;
+    if (!source) {
+        if (outFailReason) *outFailReason = @"CGImageSourceCreateWithData a échoué (données pas reconnues comme image)";
+        return nil;
+    }
 
     size_t frameCount = CGImageSourceGetCount(source);
     if (frameCount == 0) {
+        if (outFailReason) *outFailReason = @"frameCount==0";
         CFRelease(source);
         return nil;
     }
@@ -221,6 +228,8 @@ static NSData *SevenTVConvertWebPDataToGIF(NSData *webpData) {
         (CFMutableDataRef)gifData, (CFStringRef)@"com.compuserve.gif",
         (frameCount + stride - 1) / stride, NULL);
     if (!dest) {
+        if (outFailReason) *outFailReason = [NSString stringWithFormat:
+            @"CGImageDestinationCreateWithData a échoué (frameCount=%lu)", (unsigned long)frameCount];
         CFRelease(source);
         return nil;
     }
@@ -233,6 +242,7 @@ static NSData *SevenTVConvertWebPDataToGIF(NSData *webpData) {
     CGImageDestinationSetProperties(dest, (CFDictionaryRef)gifProperties);
 
     BOOL anyFrameAdded = NO;
+    size_t framesNilCount = 0;
     double pendingDelay = 0.0;
     for (size_t i = 0; i < frameCount; i++) {
         NSDictionary *frameProps = (NSDictionary *)CFBridgingRelease(
@@ -251,7 +261,10 @@ static NSData *SevenTVConvertWebPDataToGIF(NSData *webpData) {
         if (!isKeptFrame) continue;
 
         CGImageRef frame = CGImageSourceCreateImageAtIndex(source, i, NULL);
-        if (!frame) continue;
+        if (!frame) {
+            framesNilCount++;
+            continue;
+        }
 
         NSNumber *delay = @(pendingDelay);
         pendingDelay = 0.0;
@@ -269,7 +282,17 @@ static NSData *SevenTVConvertWebPDataToGIF(NSData *webpData) {
 
     CFRelease(source);
 
-    if (!anyFrameAdded || !CGImageDestinationFinalize(dest)) {
+    if (!anyFrameAdded) {
+        if (outFailReason) *outFailReason = [NSString stringWithFormat:
+            @"aucune frame ajoutée (frameCount=%lu, stride=%lu, framesNil=%lu)",
+            (unsigned long)frameCount, (unsigned long)stride, (unsigned long)framesNilCount];
+        CFRelease(dest);
+        return nil;
+    }
+    if (!CGImageDestinationFinalize(dest)) {
+        if (outFailReason) *outFailReason = [NSString stringWithFormat:
+            @"CGImageDestinationFinalize a échoué (frameCount=%lu, stride=%lu, framesNil=%lu)",
+            (unsigned long)frameCount, (unsigned long)stride, (unsigned long)framesNilCount];
         CFRelease(dest);
         return nil;
     }
@@ -404,9 +427,11 @@ static NSData *SevenTVConvertWebPDataToGIF(NSData *webpData) {
                 return;
             }
 
-            NSData *gifData = SevenTVConvertWebPDataToGIF(data);
+            NSString *failReason = nil;
+            NSData *gifData = SevenTVConvertWebPDataToGIF(data, &failReason);
             if (!gifData) {
-                [mgr log:@"❌ Conversion WebP→GIF échouée (cache miss) → emote:%@ — non mise en cache", emoteID];
+                [mgr log:@"❌ Conversion WebP→GIF échouée (cache miss) → emote:%@ bytes:%lu raison:%@ — non mise en cache",
+                    emoteID, (unsigned long)data.length, failReason ?: @"?"];
                 [strongSelf.client URLProtocol:strongSelf
                               didFailWithError:[NSError errorWithDomain:NSURLErrorDomain
                                                                   code:NSURLErrorCannotDecodeContentData
@@ -527,7 +552,8 @@ static NSData *SevenTVConvertWebPDataToGIF(NSData *webpData) {
         // sync) sert alors directement du GIF sans reconvertir à la lecture.
         if (data && resp && !err) {
             if (SevenTVIsValidWebPResponse(resp, data)) {
-                NSData *gifData = SevenTVConvertWebPDataToGIF(data);
+                NSString *failReason = nil;
+                NSData *gifData = SevenTVConvertWebPDataToGIF(data, &failReason);
                 if (gifData) {
                     NSHTTPURLResponse *http = (NSHTTPURLResponse *)resp;
                     NSHTTPURLResponse *gifResp = [[NSHTTPURLResponse alloc]
@@ -549,7 +575,8 @@ static NSData *SevenTVConvertWebPDataToGIF(NSData *webpData) {
                         (unsigned long)data.length, (unsigned long)gifData.length];
                 } else {
                     [[SevenTVManager sharedManager] log:
-                        @"❌ Préfetch %@ → conversion WebP→GIF échouée — non mise en cache", emoteID];
+                        @"❌ Préfetch %@ → conversion WebP→GIF échouée bytes:%lu raison:%@ — non mise en cache",
+                        emoteID, (unsigned long)data.length, failReason ?: @"?"];
                 }
             } else {
                 NSInteger status = [resp isKindOfClass:[NSHTTPURLResponse class]]
