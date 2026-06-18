@@ -394,8 +394,12 @@ static NSData *SevenTVConvertWebPDataToGIF(NSData *webpData) {
                 return;
             }
 
-            [mgr log:@"✅ Réponse CDN valide (cache miss) → emote:%@ converti WebP→GIF, %lu → %lu bytes",
-                emoteID, (unsigned long)data.length, (unsigned long)gifData.length];
+            CGImageSourceRef gifSrcForCount = CGImageSourceCreateWithData((CFDataRef)gifData, NULL);
+            size_t frameCountForLog = gifSrcForCount ? CGImageSourceGetCount(gifSrcForCount) : 0;
+            if (gifSrcForCount) CFRelease(gifSrcForCount);
+
+            [mgr log:@"✅ Réponse CDN valide (cache miss) → emote:%@ converti WebP→GIF, %lu frames, %lu → %lu bytes",
+                emoteID, (unsigned long)frameCountForLog, (unsigned long)data.length, (unsigned long)gifData.length];
 
             NSHTTPURLResponse *http = (NSHTTPURLResponse *)response;
             NSHTTPURLResponse *spoofed = [[NSHTTPURLResponse alloc]
@@ -515,6 +519,14 @@ static NSData *SevenTVConvertWebPDataToGIF(NSData *webpData) {
                         initWithResponse:gifResp data:gifData];
                     NSURLRequest *cacheKey = [NSURLRequest requestWithURL:url];
                     [SevenTVGetSharedCache() storeCachedResponse:toCache forRequest:cacheKey];
+
+                    CGImageSourceRef gifSrcForCount = CGImageSourceCreateWithData((CFDataRef)gifData, NULL);
+                    size_t frameCountForLog = gifSrcForCount ? CGImageSourceGetCount(gifSrcForCount) : 0;
+                    if (gifSrcForCount) CFRelease(gifSrcForCount);
+                    [[SevenTVManager sharedManager] log:
+                        @"✅ Préfetch %@ → converti WebP→GIF, %lu frames, %lu → %lu bytes",
+                        emoteID, (unsigned long)frameCountForLog,
+                        (unsigned long)data.length, (unsigned long)gifData.length];
                 } else {
                     [[SevenTVManager sharedManager] log:
                         @"❌ Préfetch %@ → conversion WebP→GIF échouée — non mise en cache", emoteID];
