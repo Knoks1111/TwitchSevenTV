@@ -134,14 +134,14 @@ static NSURLSession *SevenTVGetUrgentSession(void) {
 }
 
 // ── URL CDN pour un emote ID ─────────────────────────────────────────────────
-// 4x.webp : retour à .webp — le CDN 7TV ne sert PAS de .gif (404 confirmés
-// systématiques sur 1x.gif ET 4x.gif, indépendamment de la résolution ; 7TV
-// ne livre qu'en WebP ou AVIF). .webp est le format réel et disponible.
-// Le test précédent en .webp n'animait pas, mais le Content-Type était spoofé
-// en "image/gif" — on corrige ça en même temps (voir plus bas) pour isoler
-// si c'était la vraie cause.
+// 1x.webp : réduction de résolution pour limiter le poids des fichiers —
+// les GIF convertis en 4x atteignaient plusieurs Mo pour les emotes à
+// beaucoup de frames (ex: 268 frames → 5.5 Mo), causant un lag visible.
+// .webp reste le format réel et disponible sur le CDN 7TV (contrairement
+// à .gif qui retourne un 404 systématique, peu importe la résolution).
+// Si 1x s'avère indisponible pour certaines emotes (404), remonter à 2x.
 static NSURL *SevenTVCDNURLForEmoteID(NSString *emoteID) {
-    NSString *str = [NSString stringWithFormat:@"https://cdn.7tv.app/emote/%@/4x.webp", emoteID];
+    NSString *str = [NSString stringWithFormat:@"https://cdn.7tv.app/emote/%@/1x.webp", emoteID];
     return [NSURL URLWithString:str];
 }
 
@@ -207,9 +207,19 @@ static NSData *SevenTVConvertWebPDataToGIF(NSData *webpData) {
     NSDictionary *webpSourceDict = sourceProps[(NSString *)kCGImagePropertyWebPDictionary];
     NSNumber *loopCount = webpSourceDict[(NSString *)kCGImagePropertyWebPLoopCount] ?: @0;
 
+    // Sous-échantillonnage adaptatif — les GIF à beaucoup de frames (200+)
+    // pesaient plusieurs Mo (ex: 268 frames → 5.5 Mo), causant un lag visible
+    // sur l'appareil. On saute des frames au-delà d'un seuil, en cumulant le
+    // delay des frames sautées sur la frame gardée pour garder la même durée
+    // totale d'animation (juste moins fluide), pas un effet accéléré.
+    size_t stride = 1;
+    if (frameCount > 150) stride = 3;
+    else if (frameCount > 60) stride = 2;
+
     NSMutableData *gifData = [NSMutableData data];
     CGImageDestinationRef dest = CGImageDestinationCreateWithData(
-        (CFMutableDataRef)gifData, (CFStringRef)@"com.compuserve.gif", frameCount, NULL);
+        (CFMutableDataRef)gifData, (CFStringRef)@"com.compuserve.gif",
+        (frameCount + stride - 1) / stride, NULL);
     if (!dest) {
         CFRelease(source);
         return nil;
@@ -223,18 +233,28 @@ static NSData *SevenTVConvertWebPDataToGIF(NSData *webpData) {
     CGImageDestinationSetProperties(dest, (CFDictionaryRef)gifProperties);
 
     BOOL anyFrameAdded = NO;
+    double pendingDelay = 0.0;
     for (size_t i = 0; i < frameCount; i++) {
-        CGImageRef frame = CGImageSourceCreateImageAtIndex(source, i, NULL);
-        if (!frame) continue;
-
         NSDictionary *frameProps = (NSDictionary *)CFBridgingRelease(
             CGImageSourceCopyPropertiesAtIndex(source, i, NULL));
         NSDictionary *webpFrameDict = frameProps[(NSString *)kCGImagePropertyWebPDictionary];
         // Délai en secondes — fallback 0.1s (100ms) si absent, cohérent avec le
         // minimum standard GIF (kCGImagePropertyGIFDelayTime est clampé à 100ms).
-        NSNumber *delay = webpFrameDict[(NSString *)kCGImagePropertyWebPUnclampedDelayTime]
-                        ?: webpFrameDict[(NSString *)kCGImagePropertyWebPDelayTime]
-                        ?: @0.1;
+        NSNumber *delayNum = webpFrameDict[(NSString *)kCGImagePropertyWebPUnclampedDelayTime]
+                           ?: webpFrameDict[(NSString *)kCGImagePropertyWebPDelayTime]
+                           ?: @0.1;
+        pendingDelay += delayNum.doubleValue;
+
+        // On ne garde que les frames à intervalle "stride" — les frames
+        // sautées entre-temps ont déjà cumulé leur délai dans pendingDelay.
+        BOOL isKeptFrame = (i % stride == 0) || (i == frameCount - 1);
+        if (!isKeptFrame) continue;
+
+        CGImageRef frame = CGImageSourceCreateImageAtIndex(source, i, NULL);
+        if (!frame) continue;
+
+        NSNumber *delay = @(pendingDelay);
+        pendingDelay = 0.0;
 
         NSDictionary *frameProperties = @{
             (NSString *)kCGImagePropertyGIFDictionary: @{
@@ -557,7 +577,7 @@ static NSData *SevenTVConvertWebPDataToGIF(NSData *webpData) {
 }
 
 + (void)prewarmCDNConnection {
-    NSURL *warmURL = [NSURL URLWithString:@"https://cdn.7tv.app/emote/01F6MSP3NV00001B6E/4x.webp"];
+    NSURL *warmURL = [NSURL URLWithString:@"https://cdn.7tv.app/emote/01F6MSP3NV00001B6E/1x.webp"];
     if (!warmURL) return;
 
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:warmURL];
