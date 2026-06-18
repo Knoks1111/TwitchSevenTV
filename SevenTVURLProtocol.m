@@ -321,12 +321,12 @@ static NSData *SevenTVConvertWebPDataToGIF(NSData *webpData, NSString **outFailR
     return gifData;
 }
 
-
-@interface SevenTVURLProtocol ()
-
 // ── Compteurs globaux animé / statique (partagés entre startLoading et prefetchEmoteID:completion:)
 static _Atomic(NSInteger) s_gifCount  = 0;  // emotes converties en GIF animé
 static _Atomic(NSInteger) s_webpCount = 0;  // emotes statiques servies en WebP
+
+
+@interface SevenTVURLProtocol ()
 @property (nonatomic, strong) NSURLSessionDataTask *activeTask;
 @end
 
