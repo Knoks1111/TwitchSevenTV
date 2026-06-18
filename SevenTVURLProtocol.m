@@ -223,10 +223,25 @@ static NSData *SevenTVConvertWebPDataToGIF(NSData *webpData, NSString **outFailR
     if (frameCount > 150) stride = 3;
     else if (frameCount > 60) stride = 2;
 
+    // BUG CORRIGÉ : (frameCount + stride - 1) / stride sous-comptait d'une
+    // frame chaque fois que (frameCount-1) n'est pas déjà un multiple de
+    // stride — la frame finale forcée par "i == frameCount-1" plus bas
+    // n'était alors pas comptée dans la capacité déclarée à la création.
+    // CGImageDestinationFinalize échoue silencieusement si on ajoute plus
+    // d'images que la capacité annoncée (confirmé par les logs : 100% des
+    // échecs avaient framesNil=0, donc le décodage marchait — seul le
+    // compte capacité/ajouts ne correspondait pas). On compte ici exactement
+    // les frames qui seront gardées, avec la même règle que isKeptFrame plus
+    // bas, pour que la capacité déclarée soit toujours exacte.
+    size_t keptFrameCount = 0;
+    for (size_t i = 0; i < frameCount; i++) {
+        if ((i % stride == 0) || (i == frameCount - 1)) keptFrameCount++;
+    }
+
     NSMutableData *gifData = [NSMutableData data];
     CGImageDestinationRef dest = CGImageDestinationCreateWithData(
         (CFMutableDataRef)gifData, (CFStringRef)@"com.compuserve.gif",
-        (frameCount + stride - 1) / stride, NULL);
+        keptFrameCount, NULL);
     if (!dest) {
         if (outFailReason) *outFailReason = [NSString stringWithFormat:
             @"CGImageDestinationCreateWithData a échoué (frameCount=%lu)", (unsigned long)frameCount];
