@@ -810,6 +810,12 @@ static const CGFloat kS7TVMenuHeight = 520.0;
          (unsigned long)(total - skipped),
          (unsigned long)skipped];
 
+        // Bilan animées / statiques — compteurs tenus par SevenTVURLProtocol.
+        NSInteger gifCount  = [SevenTVURLProtocol gifConvertedCount];
+        NSInteger webpCount = [SevenTVURLProtocol webpStaticCount];
+        [self log:@"📊 Bilan conversion : %ld animées (GIF) / %ld statiques (WebP) sur %ld emotes traitées",
+         (long)gifCount, (long)webpCount, (long)(gifCount + webpCount)];
+
         // Libérer la clé → permettre un re-prefetch si le set change
         @synchronized(self) {
             [self.activePrefetchKeys removeObject:setKey];

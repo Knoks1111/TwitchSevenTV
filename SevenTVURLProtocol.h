@@ -28,4 +28,10 @@
 // dans le picker sans aucun réseau supplémentaire.
 + (NSURLCache *)sharedEmoteCache;
 
+// Compteurs de conversion — nombre d'emotes converties en GIF animé
+// et nombre d'emotes statiques servies en WebP depuis le démarrage.
+// Utilisés par SevenTVManager pour le log bilan de fin de prefetch.
++ (NSInteger)gifConvertedCount;
++ (NSInteger)webpStaticCount;
+
 @end

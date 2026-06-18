@@ -333,6 +333,9 @@ static _Atomic(NSInteger) s_webpCount = 0;  // emotes statiques servies en WebP
 
 @implementation SevenTVURLProtocol
 
++ (NSInteger)gifConvertedCount  { return s_gifCount; }
++ (NSInteger)webpStaticCount    { return s_webpCount; }
+
 // ============================================================
 // MARK: - NSURLProtocol — interception des requêtes Twitch
 // ============================================================
