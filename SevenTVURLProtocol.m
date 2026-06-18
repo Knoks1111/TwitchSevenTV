@@ -209,7 +209,7 @@ static NSData *SevenTVConvertWebPDataToGIF(NSData *webpData) {
 
     NSMutableData *gifData = [NSMutableData data];
     CGImageDestinationRef dest = CGImageDestinationCreateWithData(
-        (CFMutableDataRef)gifData, kUTTypeGIF, frameCount, NULL);
+        (CFMutableDataRef)gifData, (CFStringRef)@"com.compuserve.gif", frameCount, NULL);
     if (!dest) {
         CFRelease(source);
         return nil;
