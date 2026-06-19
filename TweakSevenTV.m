@@ -19,7 +19,8 @@
 #import "SevenTVURLProtocol.h"
 #import "SevenTVLogo.h"
 #import "SevenTVSettingsController.h"
-#import "SevenTVAdBlock.h"
+// Cle NSUserDefaults Auto Collect Channel Points
+#define kTCLiveAutoCollectChannelPoints @"TCDBGLiveAutoCollectChannelPoints"
 
 
 

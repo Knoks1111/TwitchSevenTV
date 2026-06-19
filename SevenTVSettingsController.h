@@ -22,11 +22,5 @@
 @interface SevenTVDebugPageController     : UITableViewController @end
 @interface SevenTVFavoritesListController : UITableViewController @end
 
-// ─── Sous-pages Stream Proxy / AdBlock ───────────────────────────────────────
-@interface S7TVStreamProxyController    : UITableViewController @end
-@interface S7TVLiveStreamController     : UITableViewController @end
-@interface S7TVDisableAdsController     : UITableViewController @end
-@interface S7TVBlockedURLsController    : UITableViewController @end
-@interface S7TVExcludedURLsController   : UITableViewController @end
-@interface S7TVProxyTemplatesController : UITableViewController @end
-@interface S7TVSavedProxiesController   : UITableViewController @end
+// ─── Sous-pages Live Stream Control ────────────────
+@interface S7TVLiveStreamController : UITableViewController @end
