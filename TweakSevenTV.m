@@ -1425,20 +1425,38 @@ static void s7tv_stopOrientationObserver(void) {
 }
 
 // ── Toast ─────────────────────────────────────────────────────────────────────
+// Fenêtre dédiée au toast — niveau UIWindowLevelAlert pour passer au-dessus
+// du player Twitch qui tourne sur une fenêtre de niveau supérieur à Normal.
+static UIWindow *s_toastWindow = nil;
+
 static void s7tv_showOrientationToast(BOOL locked) {
     dispatch_async(dispatch_get_main_queue(), ^{
-        UIWindow *keyWindow = nil;
+        // Trouver la UIWindowScene active
+        UIWindowScene *activeScene = nil;
         for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
             if (![scene isKindOfClass:[UIWindowScene class]]) continue;
-            if (scene.activationState != UISceneActivationStateForegroundActive) continue;
-            for (UIWindow *w in ((UIWindowScene *)scene).windows) {
-                if (!w.isHidden && w.windowLevel == UIWindowLevelNormal) {
-                    keyWindow = w; break;
-                }
+            if (scene.activationState == UISceneActivationStateForegroundActive) {
+                activeScene = (UIWindowScene *)scene;
+                break;
             }
-            if (keyWindow) break;
         }
-        if (!keyWindow) return;
+        if (!activeScene) return;
+
+        // Créer une fenêtre dédiée au niveau Alert — au-dessus du player Twitch
+        UIWindow *toastWindow = [[UIWindow alloc] initWithWindowScene:activeScene];
+        toastWindow.windowLevel = UIWindowLevelAlert;
+        toastWindow.backgroundColor = [UIColor clearColor];
+        toastWindow.userInteractionEnabled = NO;
+        // Rootvc minimal pour pouvoir addSubview
+        UIViewController *rootVC = [[UIViewController alloc] init];
+        rootVC.view.backgroundColor = [UIColor clearColor];
+        toastWindow.rootViewController = rootVC;
+        toastWindow.hidden = NO;
+        s_toastWindow = toastWindow; // retain
+
+        UIView *container = toastWindow.rootViewController.view;
+        CGFloat winW = toastWindow.bounds.size.width;
+        CGFloat winH = toastWindow.bounds.size.height;
 
         NSString *symbol = locked ? @"lock.rotation"      : @"lock.rotation.open";
         NSString *label  = locked ? @"Orientation verrouillée" : @"Orientation déverrouillée";
@@ -1449,7 +1467,7 @@ static void s7tv_showOrientationToast(BOOL locked) {
         toast.layer.masksToBounds = YES;
         toast.alpha = 0;
         toast.translatesAutoresizingMaskIntoConstraints = NO;
-        [keyWindow addSubview:toast];
+        [container addSubview:toast];
 
         UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration
             configurationWithPointSize:22 weight:UIImageSymbolWeightMedium];
@@ -1469,10 +1487,6 @@ static void s7tv_showOrientationToast(BOOL locked) {
         lbl.translatesAutoresizingMaskIntoConstraints = NO;
         [toast addSubview:lbl];
 
-        // Le toast doit être en coordonnées de fenêtre, pas rotées
-        CGFloat winW = keyWindow.bounds.size.width;
-        CGFloat winH = keyWindow.bounds.size.height;
-
         [NSLayoutConstraint activateConstraints:@[
             [iconView.leadingAnchor  constraintEqualToAnchor:toast.leadingAnchor  constant:16],
             [iconView.centerYAnchor  constraintEqualToAnchor:toast.centerYAnchor],
@@ -1482,17 +1496,21 @@ static void s7tv_showOrientationToast(BOOL locked) {
             [lbl.trailingAnchor      constraintEqualToAnchor:toast.trailingAnchor    constant:-16],
             [lbl.centerYAnchor       constraintEqualToAnchor:toast.centerYAnchor],
             [toast.heightAnchor      constraintEqualToConstant:52],
-            [toast.centerXAnchor     constraintEqualToAnchor:keyWindow.centerXAnchor],
-            [toast.topAnchor         constraintEqualToAnchor:keyWindow.topAnchor constant:winH * 0.28],
+            [toast.centerXAnchor     constraintEqualToAnchor:container.centerXAnchor],
+            [toast.topAnchor         constraintEqualToAnchor:container.topAnchor constant:winH * 0.28],
         ]];
 
-        [keyWindow layoutIfNeeded];
+        [container layoutIfNeeded];
 
         [UIView animateWithDuration:0.25 animations:^{ toast.alpha = 1.0; } completion:^(BOOL f) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.6 * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{
                 [UIView animateWithDuration:0.3 animations:^{ toast.alpha = 0; }
-                                 completion:^(BOOL ff) { [toast removeFromSuperview]; }];
+                                 completion:^(BOOL ff) {
+                    [toast removeFromSuperview];
+                    s_toastWindow.hidden = YES;
+                    s_toastWindow = nil; // libérer
+                }];
             });
         }];
     });
