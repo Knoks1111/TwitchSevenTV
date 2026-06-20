@@ -1655,7 +1655,6 @@ static void s7tv_swizzle_orientation_lock(void) {
 
 
 
-__attribute__((constructor))
 static void s7tv_hook_emote_size(void) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
@@ -1681,6 +1680,7 @@ static void s7tv_hook_emote_size(void) {
     });
 }
 
+__attribute__((constructor))
 static void TwitchSevenTVInit(void) {
     SevenTVManager *mgr = [SevenTVManager sharedManager];
     [mgr log:@"🔌 Chargement TwitchSevenTV v2.0 (substrate-free)..."];
