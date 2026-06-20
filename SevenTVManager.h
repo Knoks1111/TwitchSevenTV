@@ -118,8 +118,12 @@ extern NSString *const S7TVLogsDidUpdateNotification;
 // Vide le buffer de logs
 - (void)clearLogs;
 
-// --- Ratios emotes ---
+// --- Ratios et positions emotes ---
 // Dictionnaire { emoteID → ratio (width/height) } utilisé par willDisplayCell pour resize
 - (NSMutableDictionary *)emoteRatios;
+// Dictionnaire { @(characterIndex) → emoteID } utilisé par sizeOfImageAttachmentAtCharacterIndex:
+- (NSMutableDictionary *)emotePositions;
+// Taille cible emote (hauteur) depuis NSUserDefaults
+- (CGFloat)targetEmoteSize;
 
 @end

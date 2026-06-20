@@ -1656,6 +1656,31 @@ static void s7tv_swizzle_orientation_lock(void) {
 
 
 __attribute__((constructor))
+static void s7tv_hook_emote_size(void) {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        Class cls = NSClassFromString(@"Twitch.ChatMessageString");
+        if (!cls) return;
+        SEL sel = NSSelectorFromString(@"sizeOfImageAttachmentAtCharacterIndex:");
+        Method m = class_getInstanceMethod(cls, sel);
+        if (!m) return;
+
+        IMP orig = method_getImplementation(m);
+        method_setImplementation(m, imp_implementationWithBlock(^CGSize(id self_, NSUInteger idx) {
+            CGSize orig_size = ((CGSize(*)(id,SEL,NSUInteger))orig)(self_, sel, idx);
+            SevenTVManager *mgr = [SevenTVManager sharedManager];
+            NSString *emoteID = [mgr emotePositions][@(idx)];
+            if (!emoteID) return orig_size;
+            NSNumber *ratioNum = [mgr emoteRatios][emoteID];
+            if (!ratioNum) return orig_size;
+            CGFloat targetSize = [[NSUserDefaults standardUserDefaults] integerForKey:@"s7tv_emote_size"] ?: 30.0;
+            CGFloat ratio = ratioNum.floatValue;
+            return CGSizeMake(targetSize * ratio, targetSize);
+        }));
+        [[SevenTVManager sharedManager] log:@"✅ sizeOfImageAttachmentAtCharacterIndex: hooké"];
+    });
+}
+
 static void TwitchSevenTVInit(void) {
     SevenTVManager *mgr = [SevenTVManager sharedManager];
     [mgr log:@"🔌 Chargement TwitchSevenTV v2.0 (substrate-free)..."];
@@ -1686,6 +1711,7 @@ static void TwitchSevenTVInit(void) {
 
     // Hook NetworkImageRequester (lecture seule, log URLs 7TV)
     s7tv_hook_network_image_requester();
+    s7tv_hook_emote_size();
 
     // Section 7TV dans les paramètres Twitch
     s7tv_swizzle_account_menu();
