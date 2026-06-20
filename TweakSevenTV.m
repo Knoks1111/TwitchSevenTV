@@ -1459,18 +1459,18 @@ static void s7tv_showOrientationToast(BOOL locked) {
         CGFloat winH = toastWindow.bounds.size.height;
 
         NSString *symbol = locked ? @"lock.rotation"      : @"lock.rotation.open";
-        NSString *label  = locked ? @"Orientation verrouillée" : @"Orientation déverrouillée";
+        NSString *label  = locked ? @"Verrouillé" : @"Déverrouillé";
 
         UIView *toast = [[UIView alloc] init];
-        toast.backgroundColor = [UIColor colorWithWhite:0.08 alpha:0.88];
-        toast.layer.cornerRadius = 18;
+        toast.backgroundColor = [UIColor colorWithWhite:0.08 alpha:0.62];
+        toast.layer.cornerRadius = 14;
         toast.layer.masksToBounds = YES;
         toast.alpha = 0;
         toast.translatesAutoresizingMaskIntoConstraints = NO;
         [container addSubview:toast];
 
         UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration
-            configurationWithPointSize:22 weight:UIImageSymbolWeightMedium];
+            configurationWithPointSize:14 weight:UIImageSymbolWeightMedium];
         UIImage *icon = [UIImage systemImageNamed:symbol withConfiguration:cfg];
         UIImageView *iconView = [[UIImageView alloc] initWithImage:icon];
         iconView.tintColor   = locked
@@ -1482,22 +1482,22 @@ static void s7tv_showOrientationToast(BOOL locked) {
 
         UILabel *lbl = [[UILabel alloc] init];
         lbl.text      = label;
-        lbl.font      = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+        lbl.font      = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
         lbl.textColor = [UIColor whiteColor];
         lbl.translatesAutoresizingMaskIntoConstraints = NO;
         [toast addSubview:lbl];
 
         [NSLayoutConstraint activateConstraints:@[
-            [iconView.leadingAnchor  constraintEqualToAnchor:toast.leadingAnchor  constant:16],
+            [iconView.leadingAnchor  constraintEqualToAnchor:toast.leadingAnchor  constant:12],
             [iconView.centerYAnchor  constraintEqualToAnchor:toast.centerYAnchor],
-            [iconView.widthAnchor    constraintEqualToConstant:26],
-            [iconView.heightAnchor   constraintEqualToConstant:26],
-            [lbl.leadingAnchor       constraintEqualToAnchor:iconView.trailingAnchor constant:10],
-            [lbl.trailingAnchor      constraintEqualToAnchor:toast.trailingAnchor    constant:-16],
+            [iconView.widthAnchor    constraintEqualToConstant:18],
+            [iconView.heightAnchor   constraintEqualToConstant:18],
+            [lbl.leadingAnchor       constraintEqualToAnchor:iconView.trailingAnchor constant:8],
+            [lbl.trailingAnchor      constraintEqualToAnchor:toast.trailingAnchor    constant:-12],
             [lbl.centerYAnchor       constraintEqualToAnchor:toast.centerYAnchor],
-            [toast.heightAnchor      constraintEqualToConstant:52],
+            [toast.heightAnchor      constraintEqualToConstant:38],
             [toast.centerXAnchor     constraintEqualToAnchor:container.centerXAnchor],
-            [toast.topAnchor         constraintEqualToAnchor:container.topAnchor constant:winH * 0.28],
+            [toast.bottomAnchor      constraintEqualToAnchor:container.bottomAnchor constant:-(winH * 0.12)],
         ]];
 
         [container layoutIfNeeded];
