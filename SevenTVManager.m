@@ -277,6 +277,18 @@ static const CGFloat kS7TVMenuHeight = 520.0;
 @implementation SevenTVManager
 
 // ============================================================
+// MARK: - Taille cible emote
+// ============================================================
+
+- (CGFloat)targetEmoteSize {
+    NSInteger stored = [[NSUserDefaults standardUserDefaults] integerForKey:@"s7tv_emote_size"];
+    if (stored <= 0) {
+        return 30.0; // valeur par défaut
+    }
+    return (CGFloat)stored;
+}
+
+// ============================================================
 // MARK: - Singleton
 // ============================================================
 
