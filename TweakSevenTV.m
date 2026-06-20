@@ -1649,6 +1649,174 @@ static void s7tv_swizzle_orientation_lock(void) {
 
 
 // ────────────────────────────────────────────────────────────
+// MARK: - DEBUG — Dump complet du système de layout des attachments
+//
+// Objectif : identifier QUELLE méthode est réellement responsable du
+// dimensionnement des NSTextAttachment (emotes) dans le chat Twitch,
+// puisque sizeOfImageAttachmentAtCharacterIndex: n'est jamais appelée.
+//
+// Stratégie :
+//   1. Dump la liste complète des méthodes (avec type encoding) des
+//      classes Twitch impliquées dans le rendu du texte du chat.
+//   2. Hook les 2 méthodes "candidates historiques" connues du projet :
+//      - NSTextAttachment.attachmentBoundsForTextContainer:proposedLineFragment:glyphPosition:characterIndex:
+//      - NSLayoutManager.setAttachmentSize:forGlyphRange:
+//   3. Hook addAttribute:value:range: / setAttributes:range: sur
+//      NSMutableAttributedString pour voir, en temps réel, QUELLE classe
+//      d'objet est utilisée comme NSTextAttachment par Twitch (sa vraie
+//      classe peut être une sous-classe custom, pas NSTextAttachment nu).
+// ────────────────────────────────────────────────────────────
+
+static void s7tv_dbg_dumpMethodsForClass(Class cls, NSString *label) {
+    if (!cls) {
+        [[SevenTVManager sharedManager] log:@"🐛 [DBG-DUMP] %@ → classe introuvable (nil)", label];
+        return;
+    }
+    unsigned int count = 0;
+    Method *methods = class_copyMethodList(cls, &count);
+    [[SevenTVManager sharedManager] log:@"🐛 [DBG-DUMP] ━━━ %@ (%@) — %u méthodes ━━━",
+        label, NSStringFromClass(cls), count];
+    for (unsigned int i = 0; i < count; i++) {
+        SEL sel = method_getName(methods[i]);
+        const char *encoding = method_getTypeEncoding(methods[i]);
+        [[SevenTVManager sharedManager] log:@"🐛 [DBG-DUMP]   - %@  [%s]",
+            NSStringFromSelector(sel), encoding ?: "?"];
+    }
+    if (methods) free(methods);
+
+    // Remonte aussi la superclasse directe (souvent là où vit le vrai layout)
+    Class superCls = class_getSuperclass(cls);
+    if (superCls && superCls != [NSObject class]) {
+        unsigned int superCount = 0;
+        Method *superMethods = class_copyMethodList(superCls, &superCount);
+        [[SevenTVManager sharedManager] log:@"🐛 [DBG-DUMP] ━━━ %@ → superclasse %@ — %u méthodes ━━━",
+            label, NSStringFromClass(superCls), superCount];
+        for (unsigned int i = 0; i < superCount; i++) {
+            SEL sel = method_getName(superMethods[i]);
+            const char *encoding = method_getTypeEncoding(superMethods[i]);
+            [[SevenTVManager sharedManager] log:@"🐛 [DBG-DUMP]   - %@  [%s]",
+                NSStringFromSelector(sel), encoding ?: "?"];
+        }
+        if (superMethods) free(superMethods);
+    }
+}
+
+static void s7tv_dbg_hookAttachmentBounds(void) {
+    // - (CGRect)attachmentBoundsForTextContainer:(NSTextContainer*)tc
+    //                       proposedLineFragment:(CGRect)rect
+    //                              glyphPosition:(CGPoint)pos
+    //                            characterIndex:(NSUInteger)idx
+    Class cls = [NSTextAttachment class];
+    SEL sel = @selector(attachmentBoundsForTextContainer:proposedLineFragment:glyphPosition:characterIndex:);
+    Method m = class_getInstanceMethod(cls, sel);
+    if (!m) {
+        [[SevenTVManager sharedManager] log:@"🐛 [DBG] attachmentBoundsForTextContainer: introuvable sur NSTextAttachment"];
+        return;
+    }
+    IMP orig = method_getImplementation(m);
+    static NSUInteger s_callCount = 0;
+    method_setImplementation(m, imp_implementationWithBlock(^CGRect(id self_, NSTextContainer *tc, CGRect lineFrag, CGPoint glyphPos, NSUInteger charIdx) {
+        CGRect r = ((CGRect(*)(id,SEL,NSTextContainer*,CGRect,CGPoint,NSUInteger))orig)(self_, sel, tc, lineFrag, glyphPos, charIdx);
+        s_callCount++;
+        if (s_callCount <= 40) {
+            [[SevenTVManager sharedManager] log:@"🐛 [DBG] attachmentBoundsForTextContainer: appelé #%lu class=%@ charIdx=%lu → bounds=%@",
+                (unsigned long)s_callCount, NSStringFromClass([self_ class]), (unsigned long)charIdx, NSStringFromCGRect(r)];
+        }
+        return r;
+    }));
+    [[SevenTVManager sharedManager] log:@"✅ [DBG] attachmentBoundsForTextContainer: hooké sur NSTextAttachment"];
+}
+
+static void s7tv_dbg_hookLayoutManagerAttachmentSize(void) {
+    // - (void)setAttachmentSize:(CGSize)size forGlyphRange:(NSRange)range
+    Class cls = [NSLayoutManager class];
+    SEL sel = NSSelectorFromString(@"setAttachmentSize:forGlyphRange:");
+    Method m = class_getInstanceMethod(cls, sel);
+    if (!m) {
+        [[SevenTVManager sharedManager] log:@"🐛 [DBG] setAttachmentSize:forGlyphRange: introuvable sur NSLayoutManager"];
+        return;
+    }
+    IMP orig = method_getImplementation(m);
+    static NSUInteger s_callCount = 0;
+    method_setImplementation(m, imp_implementationWithBlock(^void(id self_, CGSize size, NSRange range) {
+        s_callCount++;
+        if (s_callCount <= 40) {
+            [[SevenTVManager sharedManager] log:@"🐛 [DBG] setAttachmentSize:forGlyphRange: appelé #%lu class=%@ size=%@ range={%lu,%lu}",
+                (unsigned long)s_callCount, NSStringFromClass([self_ class]), NSStringFromCGSize(size),
+                (unsigned long)range.location, (unsigned long)range.length];
+        }
+        ((void(*)(id,SEL,CGSize,NSRange))orig)(self_, sel, size, range);
+    }));
+    [[SevenTVManager sharedManager] log:@"✅ [DBG] setAttachmentSize:forGlyphRange: hooké sur NSLayoutManager"];
+}
+
+static void s7tv_dbg_hookAddAttribute(void) {
+    // Permet de voir, en temps réel, la VRAIE classe utilisée par Twitch
+    // pour représenter une emote/attachment dans l'attributed string final,
+    // et la range exacte où elle est insérée.
+    Class cls = [NSMutableAttributedString class];
+
+    SEL sel1 = @selector(addAttribute:value:range:);
+    Method m1 = class_getInstanceMethod(cls, sel1);
+    if (m1) {
+        IMP orig1 = method_getImplementation(m1);
+        static NSUInteger s_count1 = 0;
+        method_setImplementation(m1, imp_implementationWithBlock(^void(id self_, NSString *attrName, id value, NSRange range) {
+            if ([attrName isEqualToString:NSAttachmentAttributeName] || [value isKindOfClass:[NSTextAttachment class]]) {
+                s_count1++;
+                if (s_count1 <= 40) {
+                    [[SevenTVManager sharedManager] log:@"🐛 [DBG] addAttribute: NSTextAttachment #%lu class=%@ range={%lu,%lu} attrName=%@",
+                        (unsigned long)s_count1, NSStringFromClass([value class]),
+                        (unsigned long)range.location, (unsigned long)range.length, attrName];
+                }
+            }
+            ((void(*)(id,SEL,NSString*,id,NSRange))orig1)(self_, sel1, attrName, value, range);
+        }));
+    }
+
+    SEL sel2 = @selector(setAttributes:range:);
+    Method m2 = class_getInstanceMethod(cls, sel2);
+    if (m2) {
+        IMP orig2 = method_getImplementation(m2);
+        static NSUInteger s_count2 = 0;
+        method_setImplementation(m2, imp_implementationWithBlock(^void(id self_, NSDictionary *attrs, NSRange range) {
+            id att = attrs[NSAttachmentAttributeName];
+            if (att) {
+                s_count2++;
+                if (s_count2 <= 40) {
+                    [[SevenTVManager sharedManager] log:@"🐛 [DBG] setAttributes: NSTextAttachment #%lu class=%@ range={%lu,%lu}",
+                        (unsigned long)s_count2, NSStringFromClass([att class]),
+                        (unsigned long)range.location, (unsigned long)range.length];
+                }
+            }
+            ((void(*)(id,SEL,NSDictionary*,NSRange))orig2)(self_, sel2, attrs, range);
+        }));
+    }
+    [[SevenTVManager sharedManager] log:@"✅ [DBG] addAttribute:/setAttributes: hookés sur NSMutableAttributedString"];
+}
+
+static void s7tv_debug_dump_layout_system(void) {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        [[SevenTVManager sharedManager] log:@"🐛 ════════ DEBUG DUMP LAYOUT SYSTEM — START ════════"];
+
+        s7tv_dbg_dumpMethodsForClass(NSClassFromString(@"Twitch.ChatMessageString"), @"ChatMessageString");
+        s7tv_dbg_dumpMethodsForClass(NSClassFromString(@"Twitch.MessageStringLayer"), @"MessageStringLayer");
+        s7tv_dbg_dumpMethodsForClass(NSClassFromString(@"Twitch.MessageStringView"), @"MessageStringView");
+        s7tv_dbg_dumpMethodsForClass(NSClassFromString(@"Twitch.ImageAttachmentLayer"), @"ImageAttachmentLayer");
+        s7tv_dbg_dumpMethodsForClass(NSClassFromString(@"Twitch.AnimatedImageAttachmentLayer"), @"AnimatedImageAttachmentLayer");
+        s7tv_dbg_dumpMethodsForClass(NSClassFromString(@"Twitch.StaticImageAttachmentLayer"), @"StaticImageAttachmentLayer");
+
+        s7tv_dbg_hookAttachmentBounds();
+        s7tv_dbg_hookLayoutManagerAttachmentSize();
+        s7tv_dbg_hookAddAttribute();
+
+        [[SevenTVManager sharedManager] log:@"🐛 ════════ DEBUG DUMP LAYOUT SYSTEM — END (hooks actifs) ════════"];
+    });
+}
+
+
+// ────────────────────────────────────────────────────────────
 // MARK: - Point d'entrée __attribute__((constructor))
 // ────────────────────────────────────────────────────────────
 
@@ -1749,6 +1917,7 @@ static void TwitchSevenTVInit(void) {
     // Hook NetworkImageRequester (lecture seule, log URLs 7TV)
     s7tv_hook_network_image_requester();
     s7tv_hook_emote_size();
+    s7tv_debug_dump_layout_system();
 
     // Section 7TV dans les paramètres Twitch
     s7tv_swizzle_account_menu();
