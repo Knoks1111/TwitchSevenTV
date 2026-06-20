@@ -1665,16 +1665,53 @@ static void s7tv_hook_emote_size(void) {
         if (!m) return;
 
         IMP orig = method_getImplementation(m);
+
+        // ── DEBUG ────────────────────────────────────────────────────
+        // Compteur d'appels (throttle des logs pour ne pas spammer le buffer).
+        // Permet de répondre à 2 questions :
+        //   1. La méthode est-elle appelée du tout, et avec quelle fréquence ?
+        //   2. Les idx reçus correspondent-ils aux clés stockées dans emotePositions ?
+        static NSUInteger s7tv_dbg_callCount = 0;
+        static BOOL s7tv_dbg_dumpedOnce = NO;
+        const NSUInteger S7TV_DBG_MAX_LOGS = 60;
+        // ─────────────────────────────────────────────────────────────
+
         method_setImplementation(m, imp_implementationWithBlock(^CGSize(id self_, NSUInteger idx) {
             CGSize orig_size = ((CGSize(*)(id,SEL,NSUInteger))orig)(self_, sel, idx);
             SevenTVManager *mgr = [SevenTVManager sharedManager];
-            NSString *emoteID = [mgr emotePositions][@(idx)];
+            NSDictionary *positions = [mgr emotePositions];
+            NSString *emoteID = positions[@(idx)];
+
+            s7tv_dbg_callCount++;
+
+            // Dump complet des clés stockées (une seule fois, dès qu'on a au
+            // moins une position en mémoire) → permet de voir la plage réelle
+            // des indices stockés vs l'idx reçu par Twitch.
+            if (!s7tv_dbg_dumpedOnce && positions.count > 0) {
+                s7tv_dbg_dumpedOnce = YES;
+                NSArray *sortedKeys = [positions.allKeys sortedArrayUsingSelector:@selector(compare:)];
+                [mgr log:@"🐛 [DBG] emotePositions au 1er appel avec données (%lu entrées): %@",
+                    (unsigned long)positions.count, sortedKeys];
+            }
+
+            if (s7tv_dbg_callCount <= S7TV_DBG_MAX_LOGS) {
+                [mgr log:@"🐛 [DBG #%lu] sizeOfImageAttachmentAtCharacterIndex idx=%lu orig_size=%@ match=%@ class_self=%@",
+                    (unsigned long)s7tv_dbg_callCount,
+                    (unsigned long)idx,
+                    NSStringFromCGSize(orig_size),
+                    emoteID ?: @"NIL",
+                    NSStringFromClass([self_ class])];
+            }
+
             if (!emoteID) return orig_size;
             NSNumber *ratioNum = [mgr emoteRatios][emoteID];
             if (!ratioNum) return orig_size;
             CGFloat targetSize = [[NSUserDefaults standardUserDefaults] integerForKey:@"s7tv_emote_size"] ?: 30.0;
             CGFloat ratio = ratioNum.floatValue;
-            return CGSizeMake(targetSize * ratio, targetSize);
+            CGSize newSize = CGSizeMake(targetSize * ratio, targetSize);
+            [mgr log:@"🐛 [DBG] ✅ MATCH idx=%lu emoteID=%@ orig=%@ → new=%@",
+                (unsigned long)idx, emoteID, NSStringFromCGSize(orig_size), NSStringFromCGSize(newSize)];
+            return newSize;
         }));
         [[SevenTVManager sharedManager] log:@"✅ sizeOfImageAttachmentAtCharacterIndex: hooké"];
     });
