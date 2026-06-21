@@ -2385,11 +2385,34 @@ static void TwitchSevenTVInit(void) {
                     for (CALayer *caLayer in emoteLayers) {
                         CGRect f = caLayer.frame;
                         if (f.size.width <= 0 || f.size.height <= 0) { emoteIndex++; continue; }
+
+                        // LOG DIAGNOSTIC : frame AVANT resize
+                        // → si f.size = 30x30, BOUNDS hook est respecté par Twitch (bon)
+                        // → si f.size = 18x18, Twitch ignore BOUNDS hook (problème)
+                        static NSInteger s_preLog = 0;
+                        if (s_preLog < 20) {
+                            s_preLog++;
+                            [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
+                                @"[RESIZE] pre #%ld frame AVANT={%.0f,%.0f} pos={%.0f,%.0f}",
+                                (long)s_preLog, f.size.width, f.size.height,
+                                f.origin.x, f.origin.y]];
+                        }
+
+                        // Ratio depuis orderedRatios (data API 7TV)
                         CGFloat ratio = (emoteIndex < (NSInteger)orderedRatios.count)
                             ? orderedRatios[emoteIndex].floatValue
                             : f.size.width / f.size.height;
                         emoteIndex++;
+
+                        // Largeur cible = min(targetSize * ratio, targetSize * boundsRatio)
+                        // On clamp à la largeur que CoreText a réservée (= ce que BOUNDS a retourné)
+                        // pour éviter tout overflow → chevauchement.
+                        // BOUNDS retourne toujours ratio=1.0 (30x30) donc la largeur max réservée
+                        // est targetSize. On utilise la même valeur pour garantir la cohérence.
                         CGFloat newWidth = targetSize * ratio;
+                        // Clamp au targetSize reservé par BOUNDS pour éviter l'overflow CoreText
+                        if (newWidth > targetSize * 1.5) newWidth = targetSize; // garde raisonnable
+
                         caLayer.bounds = CGRectMake(0, 0, newWidth, targetSize);
                         caLayer.frame  = CGRectMake(f.origin.x,
                                                     f.origin.y + (f.size.height - targetSize) / 2.0,
