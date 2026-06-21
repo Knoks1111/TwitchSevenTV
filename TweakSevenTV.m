@@ -1776,20 +1776,20 @@ static void s7tv_dbg_hookAttachmentBounds(void) {
         UIImage *image = [attachment respondsToSelector:@selector(image)] ? attachment.image : nil;
 
         // Condition : bounds "par defaut" (hauteur <=22pt = emotes standard)
-        // On ne dépend PAS de image.size car Twitch utilise des UIImage placeholder
-        // à taille {0,0} — le vrai contenu est dans AnimatedImageAttachmentLayer.
-        // Ratio fallback 1.0 (carré) si image n'a pas de dimensions.
-        if (r.size.height <= 22.0) {
+        // Ratio calculé depuis r.size (la taille originale Twitch) :
+        //   - carré  {18,18} → ratio=1.0 → réserve targetSize×targetSize
+        //   - large  {24,18} → ratio=1.33 → réserve targetSize×1.33 × targetSize
+        // willDisplayCell scale au même ratio via f.size → BOUNDS et willDisplayCell
+        // sont toujours en sync → zéro overflow CoreText → fin des chevauchements.
+        if (r.size.height > 0 && r.size.height <= 22.0) {
             CGFloat targetSize = [[SevenTVManager sharedManager] targetEmoteSize];
-            CGFloat ratio = (image && image.size.width > 0 && image.size.height > 0)
-                ? image.size.width / image.size.height : 1.0;
+            CGFloat ratio = (r.size.width > 0) ? r.size.width / r.size.height : 1.0;
             CGRect newRect = CGRectMake(0, -6.0, targetSize * ratio, targetSize);
             s_resized++;
             if (s_resized <= 30) {
                 [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
-                    @"[BOUNDS] v3 resize #%lu imgSize={%.0f,%.0f} ratio=%.2f orig=%@ new=%@",
-                    (unsigned long)s_resized,
-                    image ? image.size.width : -1, image ? image.size.height : -1,
+                    @"[BOUNDS] v3 resize #%lu origSize={%.0f,%.0f} ratio=%.2f orig=%@ new=%@",
+                    (unsigned long)s_resized, r.size.width, r.size.height,
                     ratio, NSStringFromCGRect(r), NSStringFromCGRect(newRect)]];
             }
             return newRect;
@@ -1798,8 +1798,8 @@ static void s7tv_dbg_hookAttachmentBounds(void) {
         s_skipped++;
         if (s_skipped <= 5) {
             [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
-                @"[BOUNDS] skip #%lu image=%@ r.h=%.0f (>22pt, ignore)",
-                (unsigned long)s_skipped, image ? NSStringFromClass([image class]) : @"nil", r.size.height]];
+                @"[BOUNDS] skip #%lu r.h=%.0f (>22pt, ignore)",
+                (unsigned long)s_skipped, r.size.height]];
         }
         return r;
     }));
@@ -1834,26 +1834,24 @@ static void s7tv_dbg_hookLayoutManagerAttachmentSize(void) {
                     ? ((NSTextAttachment *)attachment).image : nil;
 
                 // Condition : size "par defaut" (hauteur <=22pt)
-                // Meme logique que hookAttachmentBounds — on ne depend pas de image.size.
-                if (size.height <= 22.0) {
+                // Meme logique que hookAttachmentBounds — ratio depuis size originale.
+                if (size.height > 0 && size.height <= 22.0) {
                     CGFloat targetSize = [[SevenTVManager sharedManager] targetEmoteSize];
-                    CGFloat ratio = (image && image.size.width > 0 && image.size.height > 0)
-                        ? image.size.width / image.size.height : 1.0;
+                    CGFloat ratio = (size.width > 0) ? size.width / size.height : 1.0;
                     finalSize = CGSizeMake(targetSize * ratio, targetSize);
                     s_resized++;
                     if (s_resized <= 30) {
                         [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
-                            @"[ATTSIZE] v3 resize #%lu imgSize={%.0f,%.0f} ratio=%.2f orig=%@ new=%@",
-                            (unsigned long)s_resized,
-                            image ? image.size.width : -1, image ? image.size.height : -1,
-                            ratio, NSStringFromCGSize(size), NSStringFromCGSize(finalSize)]];
+                            @"[ATTSIZE] v3 resize #%lu origSize={%.0f,%.0f} ratio=%.2f new=%@",
+                            (unsigned long)s_resized, size.width, size.height,
+                            ratio, NSStringFromCGSize(finalSize)]];
                     }
                 } else {
                     s_skipped++;
                     if (s_skipped <= 5) {
                         [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
-                            @"[ATTSIZE] skip #%lu image=%@ size.h=%.0f (>22pt, ignore)",
-                            (unsigned long)s_skipped, image ? NSStringFromClass([image class]) : @"nil", size.height]];
+                            @"[ATTSIZE] skip #%lu size.h=%.0f (>22pt, ignore)",
+                            (unsigned long)s_skipped, size.height]];
                     }
                 }
             }
@@ -2398,10 +2396,11 @@ static void TwitchSevenTVInit(void) {
                                 f.origin.x, f.origin.y]];
                         }
 
-                        // Ratio depuis orderedRatios (data API 7TV)
-                        CGFloat ratio = (emoteIndex < (NSInteger)orderedRatios.count)
-                            ? orderedRatios[emoteIndex].floatValue
-                            : f.size.width / f.size.height;
+                        // Ratio depuis le frame ACTUEL du layer (= taille naturelle Twitch)
+                        // Même source que BOUNDS (r.size.width/r.size.height) → sync parfait.
+                        // orderedRatios n'est plus utilisé ici pour éviter le désalignement
+                        // entre index emote et index layer.
+                        CGFloat ratio = (f.size.height > 0) ? f.size.width / f.size.height : 1.0;
                         emoteIndex++;
 
                         // Largeur cible = min(targetSize * ratio, targetSize * boundsRatio)
@@ -2410,8 +2409,6 @@ static void TwitchSevenTVInit(void) {
                         // BOUNDS retourne toujours ratio=1.0 (30x30) donc la largeur max réservée
                         // est targetSize. On utilise la même valeur pour garantir la cohérence.
                         CGFloat newWidth = targetSize * ratio;
-                        // Clamp au targetSize reservé par BOUNDS pour éviter l'overflow CoreText
-                        if (newWidth > targetSize * 1.5) newWidth = targetSize; // garde raisonnable
 
                         caLayer.bounds = CGRectMake(0, 0, newWidth, targetSize);
                         caLayer.frame  = CGRectMake(f.origin.x,
