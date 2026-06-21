@@ -1991,7 +1991,8 @@ static void s7tv_debug_dump_layout_system(void) {
         s7tv_hook_uiimage_decode_tagging();
         s7tv_dbg_hookAttachmentBounds();
         s7tv_dbg_hookLayoutManagerAttachmentSize();
-        [[SevenTVManager sharedManager] log:@"✅ Hooks resize layout (bounds + attachmentSize) actifs"];
+        s7tv_dbg_hookAddAttribute(); // diagnostic: classe réelle des attachments Twitch
+        [[SevenTVManager sharedManager] log:@"✅ Hooks resize layout (bounds + attachmentSize + addAttribute) actifs"];
     });
 }
 
@@ -2119,6 +2120,102 @@ static void TwitchSevenTVInit(void) {
                             }
                         }
                     }
+
+                    // ── Piste 3 : modifier NSTextAttachment.bounds AVANT re-layout ────────
+                    // orderedRatios est déjà calculé ci-dessus depuis cellText.
+                    // On walk les subviews pour trouver le UILabel dont l'attributedText
+                    // contient des NSTextAttachment (= les emotes dans le message).
+                    // On modifie les bounds directement sur chaque attachment puis on
+                    // ré-assigne attributedText → force CoreText à relayouter avec les
+                    // bonnes dimensions → fin des chevauchements.
+                    // NOTE : badges Twitch sont rendus dans un label séparé ; le label
+                    // message ne devrait contenir que les emotes 7TV comme attachments.
+                    if (orderedRatios.count > 0) {
+                        NSMutableArray *vStack = [NSMutableArray arrayWithObject:cell];
+                        while (vStack.count > 0) {
+                            UIView *v = vStack[0];
+                            [vStack removeObjectAtIndex:0];
+
+                            NSAttributedString *attrStr = nil;
+                            UILabel   *foundLabel    = nil;
+                            UITextView *foundTextView = nil;
+
+                            if ([v isKindOfClass:[UITextView class]]) {
+                                UITextView *tv2 = (UITextView *)v;
+                                if (tv2.attributedText.length > 0) {
+                                    attrStr       = tv2.attributedText;
+                                    foundTextView = tv2;
+                                }
+                            } else if ([v isKindOfClass:[UILabel class]]) {
+                                UILabel *lbl = (UILabel *)v;
+                                if (lbl.attributedText.length > 0) {
+                                    attrStr    = lbl.attributedText;
+                                    foundLabel = lbl;
+                                }
+                            }
+
+                            if (attrStr.length > 0) {
+                                // Vérifier si ce label contient au moins un NSTextAttachment
+                                __block BOOL hasAtt = NO;
+                                [attrStr enumerateAttribute:NSAttachmentAttributeName
+                                                    inRange:NSMakeRange(0, attrStr.length)
+                                                    options:0
+                                                 usingBlock:^(id val, NSRange r, BOOL *stop) {
+                                    if (val) { hasAtt = YES; *stop = YES; }
+                                }];
+
+                                if (hasAtt) {
+                                    // Copie mutable pour modifier sans crasher le layout en cours
+                                    NSMutableAttributedString *ms = [attrStr mutableCopy];
+                                    __block NSInteger attachIdx = 0;
+                                    [ms enumerateAttribute:NSAttachmentAttributeName
+                                                   inRange:NSMakeRange(0, ms.length)
+                                                   options:0
+                                                usingBlock:^(id val, NSRange r, BOOL *stop) {
+                                        if (!val) return;
+                                        if (![val respondsToSelector:@selector(setBounds:)]) return;
+                                        if (attachIdx >= (NSInteger)orderedRatios.count) {
+                                            // Plus de ratios connus → on ne touche pas
+                                            return;
+                                        }
+                                        CGFloat ratio   = orderedRatios[attachIdx].floatValue;
+                                        CGFloat w       = targetSize * ratio;
+                                        // descent=6 : décale vers le bas pour aligner sur la baseline
+                                        CGRect  nb = CGRectMake(0, -6.0, w, targetSize + 6.0);
+                                        [(NSTextAttachment *)val setBounds:nb];
+
+                                        static NSInteger s_bl = 0;
+                                        if (s_bl < 30) {
+                                            s_bl++;
+                                            [[SevenTVManager sharedManager] log:
+                                                [NSString stringWithFormat:
+                                                    @"🔧 [ATTBOUNDS] att#%ld bounds={0,-6,%.0f,%.0f} ratio=%.2f",
+                                                    (long)s_bl, w, targetSize + 6.0, ratio]];
+                                        }
+                                        attachIdx++;
+                                    }];
+
+                                    // Ré-assigner → CoreText relayoute avec les nouvelles bounds
+                                    dispatch_async(dispatch_get_main_queue(), ^{
+                                        if (!weakCell || !weakCell.window) return;
+                                        if (foundLabel)    foundLabel.attributedText    = ms;
+                                        else if (foundTextView) foundTextView.attributedText = ms;
+                                        [[SevenTVManager sharedManager] log:
+                                            [NSString stringWithFormat:
+                                                @"🔧 [ATTBOUNDS] %ld attachments bounds réassignés (%.0fpt)",
+                                                (long)attachIdx, targetSize]];
+                                    });
+
+                                    // On a trouvé et traité le label → arrêter le walk
+                                    [vStack removeAllObjects];
+                                    continue;
+                                }
+                            }
+
+                            for (UIView *sub in v.subviews) [vStack addObject:sub];
+                        }
+                    }
+                    // ─────────────────────────────────────────────────────────────────
 
                     // Collecter les emote layers via l'API publique CALayer uniquement
                     // (plus de raw pointer → élimine le crash objc_retain sur Swift storage)
