@@ -1776,12 +1776,32 @@ static void s7tv_dbg_hookAttachmentBounds(void) {
         UIImage *image = [attachment respondsToSelector:@selector(image)] ? attachment.image : nil;
 
         // Condition : bounds "par defaut" (hauteur <=22pt = emotes standard)
-        // Ratio calculé depuis r.size (la taille originale Twitch) :
-        //   - carré  {18,18} → ratio=1.0 → réserve targetSize×targetSize
-        //   - large  {24,18} → ratio=1.33 → réserve targetSize×1.33 × targetSize
-        // willDisplayCell scale au même ratio via f.size → BOUNDS et willDisplayCell
-        // sont toujours en sync → zéro overflow CoreText → fin des chevauchements.
         if (r.size.height > 0 && r.size.height <= 22.0) {
+
+            // Détection badge : les badges sont des NSTextAttachment consécutifs
+            // au DÉBUT du string (charIdx 0, 1, 2...). Si tous les caractères
+            // AVANT charIdx sont aussi des attachments, on est dans la zone badges.
+            // Dès qu'il y a du texte (username) avant → c'est une emote.
+            if (charIdx == 0) {
+                return r; // Premier caractère = forcément un badge
+            }
+            NSLayoutManager *lm2 = tc ? tc.layoutManager : nil;
+            NSTextStorage *ts2 = lm2 ? lm2.textStorage : nil;
+            if (ts2 && ts2.length > 0) {
+                BOOL inBadgeZone = YES;
+                for (NSUInteger i = 0; i < charIdx && i < ts2.length; i++) {
+                    if (![ts2 attribute:NSAttachmentAttributeName
+                                atIndex:i
+                         effectiveRange:NULL]) {
+                        inBadgeZone = NO;
+                        break;
+                    }
+                }
+                if (inBadgeZone) {
+                    return r; // Badge — ne pas modifier les bounds
+                }
+            }
+
             CGFloat targetSize = [[SevenTVManager sharedManager] targetEmoteSize];
             CGFloat ratio = (r.size.width > 0) ? r.size.width / r.size.height : 1.0;
             CGRect newRect = CGRectMake(0, -6.0, targetSize * ratio, targetSize);
