@@ -1775,16 +1775,21 @@ static void s7tv_dbg_hookAttachmentBounds(void) {
         NSTextAttachment *attachment = (NSTextAttachment *)self_;
         UIImage *image = [attachment respondsToSelector:@selector(image)] ? attachment.image : nil;
 
-        // Condition : image presente et bounds "par defaut" (<=22pt de hauteur)
-        if (image && image.size.width > 0 && image.size.height > 0 && r.size.height <= 22.0) {
+        // Condition : bounds "par defaut" (hauteur <=22pt = emotes standard)
+        // On ne dépend PAS de image.size car Twitch utilise des UIImage placeholder
+        // à taille {0,0} — le vrai contenu est dans AnimatedImageAttachmentLayer.
+        // Ratio fallback 1.0 (carré) si image n'a pas de dimensions.
+        if (r.size.height <= 22.0) {
             CGFloat targetSize = [[SevenTVManager sharedManager] targetEmoteSize];
-            CGFloat ratio = image.size.width / image.size.height;
+            CGFloat ratio = (image && image.size.width > 0 && image.size.height > 0)
+                ? image.size.width / image.size.height : 1.0;
             CGRect newRect = CGRectMake(0, -6.0, targetSize * ratio, targetSize);
             s_resized++;
             if (s_resized <= 30) {
                 [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
                     @"[BOUNDS] v3 resize #%lu imgSize={%.0f,%.0f} ratio=%.2f orig=%@ new=%@",
-                    (unsigned long)s_resized, image.size.width, image.size.height,
+                    (unsigned long)s_resized,
+                    image ? image.size.width : -1, image ? image.size.height : -1,
                     ratio, NSStringFromCGRect(r), NSStringFromCGRect(newRect)]];
             }
             return newRect;
@@ -1793,7 +1798,7 @@ static void s7tv_dbg_hookAttachmentBounds(void) {
         s_skipped++;
         if (s_skipped <= 5) {
             [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
-                @"[BOUNDS] skip #%lu image=%@ r.h=%.0f",
+                @"[BOUNDS] skip #%lu image=%@ r.h=%.0f (>22pt, ignore)",
                 (unsigned long)s_skipped, image ? NSStringFromClass([image class]) : @"nil", r.size.height]];
         }
         return r;
@@ -1828,23 +1833,26 @@ static void s7tv_dbg_hookLayoutManagerAttachmentSize(void) {
                 UIImage *image = (attachment && [attachment respondsToSelector:@selector(image)])
                     ? ((NSTextAttachment *)attachment).image : nil;
 
-                // Condition : image presente et size "par defaut" (hauteur <= 22pt)
-                if (image && image.size.width > 0 && image.size.height > 0 && size.height <= 22.0) {
+                // Condition : size "par defaut" (hauteur <=22pt)
+                // Meme logique que hookAttachmentBounds — on ne depend pas de image.size.
+                if (size.height <= 22.0) {
                     CGFloat targetSize = [[SevenTVManager sharedManager] targetEmoteSize];
-                    CGFloat ratio = image.size.width / image.size.height;
+                    CGFloat ratio = (image && image.size.width > 0 && image.size.height > 0)
+                        ? image.size.width / image.size.height : 1.0;
                     finalSize = CGSizeMake(targetSize * ratio, targetSize);
                     s_resized++;
                     if (s_resized <= 30) {
                         [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
                             @"[ATTSIZE] v3 resize #%lu imgSize={%.0f,%.0f} ratio=%.2f orig=%@ new=%@",
-                            (unsigned long)s_resized, image.size.width, image.size.height,
+                            (unsigned long)s_resized,
+                            image ? image.size.width : -1, image ? image.size.height : -1,
                             ratio, NSStringFromCGSize(size), NSStringFromCGSize(finalSize)]];
                     }
                 } else {
                     s_skipped++;
                     if (s_skipped <= 5) {
                         [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
-                            @"[ATTSIZE] skip #%lu image=%@ size.h=%.0f",
+                            @"[ATTSIZE] skip #%lu image=%@ size.h=%.0f (>22pt, ignore)",
                             (unsigned long)s_skipped, image ? NSStringFromClass([image class]) : @"nil", size.height]];
                     }
                 }
