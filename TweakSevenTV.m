@@ -2377,12 +2377,11 @@ static void TwitchSevenTVInit(void) {
 
                     // ─────────────────────────────────────────────────────────────
 
-                    NSInteger emoteIndex = 0;
                     [CATransaction begin];
                     [CATransaction setDisableActions:YES];
                     for (CALayer *caLayer in emoteLayers) {
                         CGRect f = caLayer.frame;
-                        if (f.size.width <= 0 || f.size.height <= 0) { emoteIndex++; continue; }
+                        if (f.size.width <= 0 || f.size.height <= 0) { continue; }
 
                         // LOG DIAGNOSTIC : frame AVANT resize
                         // → si f.size = 30x30, BOUNDS hook est respecté par Twitch (bon)
@@ -2398,10 +2397,7 @@ static void TwitchSevenTVInit(void) {
 
                         // Ratio depuis le frame ACTUEL du layer (= taille naturelle Twitch)
                         // Même source que BOUNDS (r.size.width/r.size.height) → sync parfait.
-                        // orderedRatios n'est plus utilisé ici pour éviter le désalignement
-                        // entre index emote et index layer.
                         CGFloat ratio = (f.size.height > 0) ? f.size.width / f.size.height : 1.0;
-                        emoteIndex++;
 
                         // Largeur cible = min(targetSize * ratio, targetSize * boundsRatio)
                         // On clamp à la largeur que CoreText a réservée (= ce que BOUNDS a retourné)
