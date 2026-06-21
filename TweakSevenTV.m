@@ -30,6 +30,7 @@
 // ────────────────────────────────────────────────────────────
 
 static const char kS7TVTextFieldTagged = 5;
+static const char kS7TVEmoteRatioKey   = 9;   // associated object sur UIImage/objet animé → NSNumber(ratio)
 static const char kS7TVBitsHijacked    = 6;
 static const char kS7TVOrigSectionCount = 7;
 static const char kS7TVShareHijacked   = 8;   // verrou orientation
@@ -1254,6 +1255,18 @@ static void s7tv_swizzle_websocket(void) {
 // ────────────────────────────────────────────────────────────
 
 static void s7tv_hook_network_image_requester(void) {
+    // Extrait l'emoteID depuis une URL CDN du type
+    // https://cdn.7tv.app/emote/<emoteID>/2x.webp (ou tout autre format
+    // contenant "/emote/<id>/").
+    NSString *(^extractEmoteID)(NSString *) = ^NSString *(NSString *urlStr) {
+        NSRange marker = [urlStr rangeOfString:@"/emote/"];
+        if (marker.location == NSNotFound) return nil;
+        NSString *afterMarker = [urlStr substringFromIndex:marker.location + marker.length];
+        NSRange nextSlash = [afterMarker rangeOfString:@"/"];
+        if (nextSlash.location == NSNotFound) return afterMarker;
+        return [afterMarker substringToIndex:nextSlash.location];
+    };
+
     Class nic = NSClassFromString(@"TwitchKit.NetworkImageRequester");
     if (!nic) {
         [[SevenTVManager sharedManager] log:@"⚠️ NetworkImageRequester introuvable"];
@@ -1276,12 +1289,21 @@ static void s7tv_hook_network_image_requester(void) {
         method_setImplementation(mImg1, imp_implementationWithBlock(
             ^id(id self_, NSURL *url, CGFloat scale, id persist) {
                 NSString *urlStr = url.absoluteString ?: @"";
-                if ([urlStr containsString:kS7TVMarker]) {
+                BOOL isS7TV = [urlStr containsString:kS7TVMarker];
+                if (isS7TV) {
                     [mgr log:@"🟢7TV 🖼A %@  scale=%.1f", urlStr, scale];
                 } else {
                     [mgr log:@"🖼A %@  scale=%.1f", urlStr, scale];
                 }
-                return ((id(*)(id,SEL,NSURL*,CGFloat,id))orig)(self_, selImg1, url, scale, persist);
+                id result = ((id(*)(id,SEL,NSURL*,CGFloat,id))orig)(self_, selImg1, url, scale, persist);
+                if (isS7TV && result) {
+                    NSString *emoteID = extractEmoteID(urlStr);
+                    NSNumber *ratio = emoteID ? mgr.emoteRatios[emoteID] : nil;
+                    if (ratio) {
+                        objc_setAssociatedObject(result, &kS7TVEmoteRatioKey, ratio, OBJC_ASSOCIATION_RETAIN);
+                    }
+                }
+                return result;
             }));
         [mgr log:@"✅ Hook imageAtURL:withScale:persistingFor: OK"];
     }
@@ -1294,12 +1316,21 @@ static void s7tv_hook_network_image_requester(void) {
         method_setImplementation(mImg2, imp_implementationWithBlock(
             ^id(id self_, NSURL *url, CGFloat scale, id persist, BOOL mem, BOOL user) {
                 NSString *urlStr = url.absoluteString ?: @"";
-                if ([urlStr containsString:kS7TVMarker]) {
+                BOOL isS7TV = [urlStr containsString:kS7TVMarker];
+                if (isS7TV) {
                     [mgr log:@"🟢7TV 🖼B %@  scale=%.1f mem=%d user=%d", urlStr, scale, mem, user];
                 } else {
                     [mgr log:@"🖼B %@  scale=%.1f mem=%d user=%d", urlStr, scale, mem, user];
                 }
-                return ((id(*)(id,SEL,NSURL*,CGFloat,id,BOOL,BOOL))orig)(self_, selImg2, url, scale, persist, mem, user);
+                id result = ((id(*)(id,SEL,NSURL*,CGFloat,id,BOOL,BOOL))orig)(self_, selImg2, url, scale, persist, mem, user);
+                if (isS7TV && result) {
+                    NSString *emoteID = extractEmoteID(urlStr);
+                    NSNumber *ratio = emoteID ? mgr.emoteRatios[emoteID] : nil;
+                    if (ratio) {
+                        objc_setAssociatedObject(result, &kS7TVEmoteRatioKey, ratio, OBJC_ASSOCIATION_RETAIN);
+                    }
+                }
+                return result;
             }));
         [mgr log:@"✅ Hook imageAtURL:...:storeInMemoryCache:userInitiated: OK"];
     }
@@ -1322,6 +1353,13 @@ static void s7tv_hook_network_image_requester(void) {
                     [mgr log:@"🟢7TV animatedImageAtURL:withStaticScale:persistingFor: → %@  result=%@ respondsStartAnimating=%@",
                         urlStr, result ? NSStringFromClass(object_getClass(result)) : @"nil",
                         responds ? @"OUI" : @"NON"];
+                    if (result) {
+                        NSString *emoteID = extractEmoteID(urlStr);
+                        NSNumber *ratio = emoteID ? mgr.emoteRatios[emoteID] : nil;
+                        if (ratio) {
+                            objc_setAssociatedObject(result, &kS7TVEmoteRatioKey, ratio, OBJC_ASSOCIATION_RETAIN);
+                        }
+                    }
                 }
                 // Appeler startAnimating sur le résultat si disponible
                 if (responds) {
@@ -1347,6 +1385,13 @@ static void s7tv_hook_network_image_requester(void) {
                     [mgr log:@"🟢7TV animatedImageAtURL:...:userInitiated: → %@  result=%@ respondsStartAnimating=%@",
                         urlStr, result ? NSStringFromClass(object_getClass(result)) : @"nil",
                         responds ? @"OUI" : @"NON"];
+                    if (result) {
+                        NSString *emoteID = extractEmoteID(urlStr);
+                        NSNumber *ratio = emoteID ? mgr.emoteRatios[emoteID] : nil;
+                        if (ratio) {
+                            objc_setAssociatedObject(result, &kS7TVEmoteRatioKey, ratio, OBJC_ASSOCIATION_RETAIN);
+                        }
+                    }
                 }
                 // Appeler startAnimating sur le résultat si disponible
                 if (responds) {
@@ -1715,12 +1760,34 @@ static void s7tv_dbg_hookAttachmentBounds(void) {
     }
     IMP orig = method_getImplementation(m);
     static NSUInteger s_callCount = 0;
+    static NSUInteger s_matchCount = 0;
     method_setImplementation(m, imp_implementationWithBlock(^CGRect(id self_, NSTextContainer *tc, CGRect lineFrag, CGPoint glyphPos, NSUInteger charIdx) {
         CGRect r = ((CGRect(*)(id,SEL,NSTextContainer*,CGRect,CGPoint,NSUInteger))orig)(self_, sel, tc, lineFrag, glyphPos, charIdx);
         s_callCount++;
-        if (s_callCount <= 40) {
-            [[SevenTVManager sharedManager] log:@"🐛 [DBG] attachmentBoundsForTextContainer: appelé #%lu class=%@ charIdx=%lu → bounds=%@",
-                (unsigned long)s_callCount, NSStringFromClass([self_ class]), (unsigned long)charIdx, NSStringFromCGRect(r)];
+
+        // self_ est le NSTextAttachment lui-même. On lit l'image qu'il
+        // contient — si elle a été taguée par s7tv_hook_network_image_requester
+        // avec un ratio 7TV, on recalcule des bounds corrects, indépendamment
+        // de tout matching d'index de caractère.
+        NSTextAttachment *attachment = (NSTextAttachment *)self_;
+        id image = [attachment respondsToSelector:@selector(image)] ? attachment.image : nil;
+        NSNumber *ratioNum = image ? objc_getAssociatedObject(image, &kS7TVEmoteRatioKey) : nil;
+
+        if (ratioNum) {
+            s_matchCount++;
+            CGFloat targetSize = [[SevenTVManager sharedManager] targetEmoteSize];
+            CGFloat ratio = ratioNum.floatValue;
+            CGRect newRect = CGRectMake(0, r.origin.y, targetSize * ratio, targetSize);
+            if (s_matchCount <= 40) {
+                [[SevenTVManager sharedManager] log:@"🐛 [BOUNDS] ✅ MATCH #%lu ratio=%.3f orig=%@ → new=%@",
+                    (unsigned long)s_matchCount, ratio, NSStringFromCGRect(r), NSStringFromCGRect(newRect)];
+            }
+            return newRect;
+        }
+
+        if (s_callCount <= 20) {
+            [[SevenTVManager sharedManager] log:@"🐛 [BOUNDS] #%lu pas de tag 7TV (image=%@) → bounds inchangés %@",
+                (unsigned long)s_callCount, image ? NSStringFromClass([image class]) : @"nil", NSStringFromCGRect(r)];
         }
         return r;
     }));
@@ -1729,6 +1796,9 @@ static void s7tv_dbg_hookAttachmentBounds(void) {
 
 static void s7tv_dbg_hookLayoutManagerAttachmentSize(void) {
     // - (void)setAttachmentSize:(CGSize)size forGlyphRange:(NSRange)range
+    // self_ est le NSLayoutManager (Twitch.MessageStringLayoutManager).
+    // On retrouve le NSTextAttachment réel via le textStorage à l'index
+    // correspondant, puis on lit le tag de ratio posé sur son image.
     Class cls = [NSLayoutManager class];
     SEL sel = NSSelectorFromString(@"setAttachmentSize:forGlyphRange:");
     Method m = class_getInstanceMethod(cls, sel);
@@ -1738,14 +1808,39 @@ static void s7tv_dbg_hookLayoutManagerAttachmentSize(void) {
     }
     IMP orig = method_getImplementation(m);
     static NSUInteger s_callCount = 0;
-    method_setImplementation(m, imp_implementationWithBlock(^void(id self_, CGSize size, NSRange range) {
+    static NSUInteger s_matchCount = 0;
+    method_setImplementation(m, imp_implementationWithBlock(^void(id self_, CGSize size, NSRange glyphRange) {
         s_callCount++;
-        if (s_callCount <= 40) {
-            [[SevenTVManager sharedManager] log:@"🐛 [DBG] setAttachmentSize:forGlyphRange: appelé #%lu class=%@ size=%@ range={%lu,%lu}",
-                (unsigned long)s_callCount, NSStringFromClass([self_ class]), NSStringFromCGSize(size),
-                (unsigned long)range.location, (unsigned long)range.length];
+        CGSize finalSize = size;
+
+        NSLayoutManager *lm = (NSLayoutManager *)self_;
+        NSTextStorage *textStorage = lm.textStorage;
+        if (textStorage && glyphRange.length > 0) {
+            NSRange charRange = [lm characterRangeForGlyphRange:glyphRange actualGlyphRange:NULL];
+            if (charRange.location != NSNotFound && charRange.location < textStorage.length) {
+                id attachment = [textStorage attribute:NSAttachmentAttributeName atIndex:charRange.location effectiveRange:NULL];
+                id image = (attachment && [attachment respondsToSelector:@selector(image)]) ? ((NSTextAttachment *)attachment).image : nil;
+                NSNumber *ratioNum = image ? objc_getAssociatedObject(image, &kS7TVEmoteRatioKey) : nil;
+                if (ratioNum) {
+                    s_matchCount++;
+                    CGFloat targetSize = [[SevenTVManager sharedManager] targetEmoteSize];
+                    CGFloat ratio = ratioNum.floatValue;
+                    finalSize = CGSizeMake(targetSize * ratio, targetSize);
+                    if (s_matchCount <= 40) {
+                        [[SevenTVManager sharedManager] log:@"🐛 [ATTSIZE] ✅ MATCH #%lu ratio=%.3f orig=%@ → new=%@ range={%lu,%lu}",
+                            (unsigned long)s_matchCount, ratio, NSStringFromCGSize(size), NSStringFromCGSize(finalSize),
+                            (unsigned long)charRange.location, (unsigned long)charRange.length];
+                    }
+                }
+            }
         }
-        ((void(*)(id,SEL,CGSize,NSRange))orig)(self_, sel, size, range);
+
+        if (s_callCount <= 20 && finalSize.width == size.width && finalSize.height == size.height) {
+            [[SevenTVManager sharedManager] log:@"🐛 [ATTSIZE] #%lu pas de tag 7TV → size inchangé %@",
+                (unsigned long)s_callCount, NSStringFromCGSize(size)];
+        }
+
+        ((void(*)(id,SEL,CGSize,NSRange))orig)(self_, sel, finalSize, glyphRange);
     }));
     [[SevenTVManager sharedManager] log:@"✅ [DBG] setAttachmentSize:forGlyphRange: hooké sur NSLayoutManager"];
 }
@@ -1798,20 +1893,13 @@ static void s7tv_dbg_hookAddAttribute(void) {
 static void s7tv_debug_dump_layout_system(void) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
-        [[SevenTVManager sharedManager] log:@"🐛 ════════ DEBUG DUMP LAYOUT SYSTEM — START ════════"];
-
-        s7tv_dbg_dumpMethodsForClass(NSClassFromString(@"Twitch.ChatMessageString"), @"ChatMessageString");
-        s7tv_dbg_dumpMethodsForClass(NSClassFromString(@"Twitch.MessageStringLayer"), @"MessageStringLayer");
-        s7tv_dbg_dumpMethodsForClass(NSClassFromString(@"Twitch.MessageStringView"), @"MessageStringView");
-        s7tv_dbg_dumpMethodsForClass(NSClassFromString(@"Twitch.ImageAttachmentLayer"), @"ImageAttachmentLayer");
-        s7tv_dbg_dumpMethodsForClass(NSClassFromString(@"Twitch.AnimatedImageAttachmentLayer"), @"AnimatedImageAttachmentLayer");
-        s7tv_dbg_dumpMethodsForClass(NSClassFromString(@"Twitch.StaticImageAttachmentLayer"), @"StaticImageAttachmentLayer");
-
+        // Les vrais points d'accroche identifiés sont :
+        //   - NSTextAttachment.attachmentBoundsForTextContainer:...
+        //   - Twitch.MessageStringLayoutManager.setAttachmentSize:forGlyphRange:
+        // (sizeOfImageAttachmentAtCharacterIndex: n'est jamais appelée — abandonné)
         s7tv_dbg_hookAttachmentBounds();
         s7tv_dbg_hookLayoutManagerAttachmentSize();
-        s7tv_dbg_hookAddAttribute();
-
-        [[SevenTVManager sharedManager] log:@"🐛 ════════ DEBUG DUMP LAYOUT SYSTEM — END (hooks actifs) ════════"];
+        [[SevenTVManager sharedManager] log:@"✅ Hooks resize layout (bounds + attachmentSize) actifs"];
     });
 }
 
@@ -1820,70 +1908,6 @@ static void s7tv_debug_dump_layout_system(void) {
 // MARK: - Point d'entrée __attribute__((constructor))
 // ────────────────────────────────────────────────────────────
 
-
-
-
-static void s7tv_hook_emote_size(void) {
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        Class cls = NSClassFromString(@"Twitch.ChatMessageString");
-        if (!cls) return;
-        SEL sel = NSSelectorFromString(@"sizeOfImageAttachmentAtCharacterIndex:");
-        Method m = class_getInstanceMethod(cls, sel);
-        if (!m) return;
-
-        IMP orig = method_getImplementation(m);
-
-        // ── DEBUG ────────────────────────────────────────────────────
-        // Compteur d'appels (throttle des logs pour ne pas spammer le buffer).
-        // Permet de répondre à 2 questions :
-        //   1. La méthode est-elle appelée du tout, et avec quelle fréquence ?
-        //   2. Les idx reçus correspondent-ils aux clés stockées dans emotePositions ?
-        static NSUInteger s7tv_dbg_callCount = 0;
-        static BOOL s7tv_dbg_dumpedOnce = NO;
-        const NSUInteger S7TV_DBG_MAX_LOGS = 60;
-        // ─────────────────────────────────────────────────────────────
-
-        method_setImplementation(m, imp_implementationWithBlock(^CGSize(id self_, NSUInteger idx) {
-            CGSize orig_size = ((CGSize(*)(id,SEL,NSUInteger))orig)(self_, sel, idx);
-            SevenTVManager *mgr = [SevenTVManager sharedManager];
-            NSDictionary *positions = [mgr emotePositions];
-            NSString *emoteID = positions[@(idx)];
-
-            s7tv_dbg_callCount++;
-
-            // Dump complet des clés stockées (une seule fois, dès qu'on a au
-            // moins une position en mémoire) → permet de voir la plage réelle
-            // des indices stockés vs l'idx reçu par Twitch.
-            if (!s7tv_dbg_dumpedOnce && positions.count > 0) {
-                s7tv_dbg_dumpedOnce = YES;
-                NSArray *sortedKeys = [positions.allKeys sortedArrayUsingSelector:@selector(compare:)];
-                [mgr log:@"🐛 [DBG] emotePositions au 1er appel avec données (%lu entrées): %@",
-                    (unsigned long)positions.count, sortedKeys];
-            }
-
-            if (s7tv_dbg_callCount <= S7TV_DBG_MAX_LOGS) {
-                [mgr log:@"🐛 [DBG #%lu] sizeOfImageAttachmentAtCharacterIndex idx=%lu orig_size=%@ match=%@ class_self=%@",
-                    (unsigned long)s7tv_dbg_callCount,
-                    (unsigned long)idx,
-                    NSStringFromCGSize(orig_size),
-                    emoteID ?: @"NIL",
-                    NSStringFromClass([self_ class])];
-            }
-
-            if (!emoteID) return orig_size;
-            NSNumber *ratioNum = [mgr emoteRatios][emoteID];
-            if (!ratioNum) return orig_size;
-            CGFloat targetSize = [[NSUserDefaults standardUserDefaults] integerForKey:@"s7tv_emote_size"] ?: 30.0;
-            CGFloat ratio = ratioNum.floatValue;
-            CGSize newSize = CGSizeMake(targetSize * ratio, targetSize);
-            [mgr log:@"🐛 [DBG] ✅ MATCH idx=%lu emoteID=%@ orig=%@ → new=%@",
-                (unsigned long)idx, emoteID, NSStringFromCGSize(orig_size), NSStringFromCGSize(newSize)];
-            return newSize;
-        }));
-        [[SevenTVManager sharedManager] log:@"✅ sizeOfImageAttachmentAtCharacterIndex: hooké"];
-    });
-}
 
 __attribute__((constructor))
 static void TwitchSevenTVInit(void) {
@@ -1916,7 +1940,10 @@ static void TwitchSevenTVInit(void) {
 
     // Hook NetworkImageRequester (lecture seule, log URLs 7TV)
     s7tv_hook_network_image_requester();
-    s7tv_hook_emote_size();
+    // s7tv_hook_emote_size() retiré : sizeOfImageAttachmentAtCharacterIndex: n'est
+    // jamais appelée par Twitch (confirmé par dump debug). Remplacé par
+    // s7tv_debug_dump_layout_system() qui installe les vrais hooks
+    // (attachmentBoundsForTextContainer: + setAttachmentSize:forGlyphRange:).
     s7tv_debug_dump_layout_system();
 
     // Section 7TV dans les paramètres Twitch
