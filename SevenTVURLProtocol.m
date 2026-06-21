@@ -32,6 +32,9 @@
 #import "SevenTVManager.h"
 #import <ImageIO/ImageIO.h>
 #import <MobileCoreServices/MobileCoreServices.h>
+#import <objc/runtime.h>
+
+const char kS7TVEmoteIDOnDataKey = 0;
 
 static NSString *const kSevenTVEmoteIDPrefix = @"7tv_";
 static NSString *const kHandledKey           = @"SevenTVURLProtocolHandled";
@@ -414,6 +417,7 @@ static _Atomic(NSInteger) s_webpCount = 0;  // emotes statiques servies en WebP
         [self.client URLProtocol:self
               didReceiveResponse:spoofed
               cacheStoragePolicy:NSURLCacheStorageAllowed];
+        objc_setAssociatedObject(cached.data, &kS7TVEmoteIDOnDataKey, emoteID, OBJC_ASSOCIATION_RETAIN);
         [self.client URLProtocol:self didLoadData:cached.data];
         [self.client URLProtocolDidFinishLoading:self];
         return; // ← on sort sans jamais créer de dataTask
@@ -479,6 +483,7 @@ static _Atomic(NSInteger) s_webpCount = 0;  // emotes statiques servies en WebP
                 [strongSelf.client URLProtocol:strongSelf
                             didReceiveResponse:spoofed
                             cacheStoragePolicy:NSURLCacheStorageAllowed];
+                objc_setAssociatedObject(data, &kS7TVEmoteIDOnDataKey, emoteID, OBJC_ASSOCIATION_RETAIN);
                 [strongSelf.client URLProtocol:strongSelf didLoadData:data];
                 [strongSelf.client URLProtocolDidFinishLoading:strongSelf];
                 return;
@@ -513,6 +518,7 @@ static _Atomic(NSInteger) s_webpCount = 0;  // emotes statiques servies en WebP
             [strongSelf.client URLProtocol:strongSelf
                         didReceiveResponse:spoofed
                         cacheStoragePolicy:NSURLCacheStorageAllowed];
+            objc_setAssociatedObject(gifData, &kS7TVEmoteIDOnDataKey, emoteID, OBJC_ASSOCIATION_RETAIN);
             [strongSelf.client URLProtocol:strongSelf didLoadData:gifData];
             [strongSelf.client URLProtocolDidFinishLoading:strongSelf];
         } else {

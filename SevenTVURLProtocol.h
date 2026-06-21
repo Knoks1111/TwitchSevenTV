@@ -8,6 +8,13 @@
 
 #import <Foundation/Foundation.h>
 
+// Clé d'association (objc_setAssociatedObject) posée sur la NSData brute
+// servie via didLoadData:, contenant l'emoteID 7TV (NSString) correspondant.
+// Permet à TweakSevenTV.m de retrouver, au moment où Twitch décode cette
+// donnée en UIImage (+imageWithData:), quel ratio appliquer — sans dépendre
+// d'un pipeline de chargement d'image qu'on ne contrôle pas.
+extern const char kS7TVEmoteIDOnDataKey;
+
 @interface SevenTVURLProtocol : NSURLProtocol
 
 // Préchauffage TCP/TLS vers cdn.7tv.app au JOIN d'un channel.

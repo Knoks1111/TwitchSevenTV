@@ -1890,6 +1890,97 @@ static void s7tv_dbg_hookAddAttribute(void) {
     [[SevenTVManager sharedManager] log:@"✅ [DBG] addAttribute:/setAttributes: hookés sur NSMutableAttributedString"];
 }
 
+static void s7tv_hook_uiimage_decode_tagging(void) {
+    // SevenTVURLProtocol tague la NSData brute (cached.data / data / gifData)
+    // avec l'emoteID 7TV au moment de didLoadData:. On intercepte ici le
+    // décodage UIImage générique pour propager ce tag (converti en ratio
+    // via SevenTVManager.emoteRatios) sur l'UIImage résultante — c'est CE
+    // tag que lisent ensuite les hooks attachmentBoundsForTextContainer:
+    // et setAttachmentSize:forGlyphRange:.
+    //
+    // Ciblé car confirmé indépendant du pipeline NetworkImageRequester
+    // (jamais appelé pour les attachments de chat) — ici on dépend
+    // uniquement de +[UIImage imageWithData:] / -initWithData:, appelés
+    // par n'importe quel chemin de décodage, y compris celui de Twitch.
+
+    SevenTVManager *mgr = [SevenTVManager sharedManager];
+
+    void (^tagResultIfNeeded)(NSData *, id) = ^(NSData *data, id resultImage) {
+        if (!data || !resultImage) return;
+        NSString *emoteID = objc_getAssociatedObject(data, &kS7TVEmoteIDOnDataKey);
+        if (!emoteID) return;
+        NSNumber *ratioNum = mgr.emoteRatios[emoteID];
+        if (!ratioNum) ratioNum = @(1.0);
+        objc_setAssociatedObject(resultImage, &kS7TVEmoteRatioKey, ratioNum, OBJC_ASSOCIATION_RETAIN);
+        static NSUInteger s_tagCount = 0;
+        s_tagCount++;
+        if (s_tagCount <= 40) {
+            [mgr log:@"🐛 [DECODE] ✅ Tag propagé NSData→UIImage #%lu emoteID=%@ ratio=%.3f",
+                (unsigned long)s_tagCount, emoteID, ratioNum.floatValue];
+        }
+    };
+
+    // +[UIImage imageWithData:]
+    {
+        SEL sel = @selector(imageWithData:);
+        Method m = class_getClassMethod([UIImage class], sel);
+        if (m) {
+            IMP orig = method_getImplementation(m);
+            method_setImplementation(m, imp_implementationWithBlock(^UIImage *(id self_, NSData *data) {
+                UIImage *result = ((UIImage *(*)(id,SEL,NSData*))orig)(self_, sel, data);
+                tagResultIfNeeded(data, result);
+                return result;
+            }));
+            [mgr log:@"✅ [DBG] +[UIImage imageWithData:] hooké"];
+        }
+    }
+
+    // +[UIImage imageWithData:scale:]
+    {
+        SEL sel = @selector(imageWithData:scale:);
+        Method m = class_getClassMethod([UIImage class], sel);
+        if (m) {
+            IMP orig = method_getImplementation(m);
+            method_setImplementation(m, imp_implementationWithBlock(^UIImage *(id self_, NSData *data, CGFloat scale) {
+                UIImage *result = ((UIImage *(*)(id,SEL,NSData*,CGFloat))orig)(self_, sel, data, scale);
+                tagResultIfNeeded(data, result);
+                return result;
+            }));
+            [mgr log:@"✅ [DBG] +[UIImage imageWithData:scale:] hooké"];
+        }
+    }
+
+    // -[UIImage initWithData:]
+    {
+        SEL sel = @selector(initWithData:);
+        Method m = class_getInstanceMethod([UIImage class], sel);
+        if (m) {
+            IMP orig = method_getImplementation(m);
+            method_setImplementation(m, imp_implementationWithBlock(^UIImage *(id self_, NSData *data) {
+                UIImage *result = ((UIImage *(*)(id,SEL,NSData*))orig)(self_, sel, data);
+                tagResultIfNeeded(data, result);
+                return result;
+            }));
+            [mgr log:@"✅ [DBG] -[UIImage initWithData:] hooké"];
+        }
+    }
+
+    // -[UIImage initWithData:scale:]
+    {
+        SEL sel = @selector(initWithData:scale:);
+        Method m = class_getInstanceMethod([UIImage class], sel);
+        if (m) {
+            IMP orig = method_getImplementation(m);
+            method_setImplementation(m, imp_implementationWithBlock(^UIImage *(id self_, NSData *data, CGFloat scale) {
+                UIImage *result = ((UIImage *(*)(id,SEL,NSData*,CGFloat))orig)(self_, sel, data, scale);
+                tagResultIfNeeded(data, result);
+                return result;
+            }));
+            [mgr log:@"✅ [DBG] -[UIImage initWithData:scale:] hooké"];
+        }
+    }
+}
+
 static void s7tv_debug_dump_layout_system(void) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
@@ -1897,6 +1988,7 @@ static void s7tv_debug_dump_layout_system(void) {
         //   - NSTextAttachment.attachmentBoundsForTextContainer:...
         //   - Twitch.MessageStringLayoutManager.setAttachmentSize:forGlyphRange:
         // (sizeOfImageAttachmentAtCharacterIndex: n'est jamais appelée — abandonné)
+        s7tv_hook_uiimage_decode_tagging();
         s7tv_dbg_hookAttachmentBounds();
         s7tv_dbg_hookLayoutManagerAttachmentSize();
         [[SevenTVManager sharedManager] log:@"✅ Hooks resize layout (bounds + attachmentSize) actifs"];
