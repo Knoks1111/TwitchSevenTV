@@ -1751,66 +1751,72 @@ static void s7tv_dbg_hookAttachmentBounds(void) {
     //                       proposedLineFragment:(CGRect)rect
     //                              glyphPosition:(CGPoint)pos
     //                            characterIndex:(NSUInteger)idx
+    //
+    // Stratégie v3 : on n'a plus besoin du tag kS7TVEmoteRatioKey.
+    // Les logs ont confirmé que image=UIImage est DÉJÀ présente (Twitch charge
+    // les images via un pipeline interne qui ne passe pas par imageWithData:).
+    // On utilise directement image.size pour calculer le ratio — ça couvre
+    // les emotes 7TV ET les emotes Twitch natives (agrandissement uniforme).
+    // Garde : seulement si la taille par défaut retournée est <= 22pt
+    // (= emotes standard — exclut badges et éléments déjà correctement taillés).
     Class cls = [NSTextAttachment class];
     SEL sel = @selector(attachmentBoundsForTextContainer:proposedLineFragment:glyphPosition:characterIndex:);
     Method m = class_getInstanceMethod(cls, sel);
     if (!m) {
-        [[SevenTVManager sharedManager] log:@"🐛 [DBG] attachmentBoundsForTextContainer: introuvable sur NSTextAttachment"];
+        [[SevenTVManager sharedManager] log:@"DBG attachmentBoundsForTextContainer: introuvable sur NSTextAttachment"];
         return;
     }
     IMP orig = method_getImplementation(m);
-    static NSUInteger s_callCount = 0;
-    static NSUInteger s_matchCount = 0;
+    static NSUInteger s_resized = 0;
+    static NSUInteger s_skipped = 0;
     method_setImplementation(m, imp_implementationWithBlock(^CGRect(id self_, NSTextContainer *tc, CGRect lineFrag, CGPoint glyphPos, NSUInteger charIdx) {
         CGRect r = ((CGRect(*)(id,SEL,NSTextContainer*,CGRect,CGPoint,NSUInteger))orig)(self_, sel, tc, lineFrag, glyphPos, charIdx);
-        s_callCount++;
 
-        // self_ est le NSTextAttachment lui-même. On lit l'image qu'il
-        // contient — si elle a été taguée par s7tv_hook_network_image_requester
-        // avec un ratio 7TV, on recalcule des bounds corrects, indépendamment
-        // de tout matching d'index de caractère.
         NSTextAttachment *attachment = (NSTextAttachment *)self_;
-        id image = [attachment respondsToSelector:@selector(image)] ? attachment.image : nil;
-        NSNumber *ratioNum = image ? objc_getAssociatedObject(image, &kS7TVEmoteRatioKey) : nil;
+        UIImage *image = [attachment respondsToSelector:@selector(image)] ? attachment.image : nil;
 
-        if (ratioNum) {
-            s_matchCount++;
+        // Condition : image presente et bounds "par defaut" (<=22pt de hauteur)
+        if (image && image.size.width > 0 && image.size.height > 0 && r.size.height <= 22.0) {
             CGFloat targetSize = [[SevenTVManager sharedManager] targetEmoteSize];
-            CGFloat ratio = ratioNum.floatValue;
-            CGRect newRect = CGRectMake(0, r.origin.y, targetSize * ratio, targetSize);
-            if (s_matchCount <= 40) {
-                [[SevenTVManager sharedManager] log:@"🐛 [BOUNDS] ✅ MATCH #%lu ratio=%.3f orig=%@ → new=%@",
-                    (unsigned long)s_matchCount, ratio, NSStringFromCGRect(r), NSStringFromCGRect(newRect)];
+            CGFloat ratio = image.size.width / image.size.height;
+            CGRect newRect = CGRectMake(0, -6.0, targetSize * ratio, targetSize);
+            s_resized++;
+            if (s_resized <= 30) {
+                [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
+                    @"[BOUNDS] v3 resize #%lu imgSize={%.0f,%.0f} ratio=%.2f orig=%@ new=%@",
+                    (unsigned long)s_resized, image.size.width, image.size.height,
+                    ratio, NSStringFromCGRect(r), NSStringFromCGRect(newRect)]];
             }
             return newRect;
         }
 
-        if (s_callCount <= 20) {
-            [[SevenTVManager sharedManager] log:@"🐛 [BOUNDS] #%lu pas de tag 7TV (image=%@) → bounds inchangés %@",
-                (unsigned long)s_callCount, image ? NSStringFromClass([image class]) : @"nil", NSStringFromCGRect(r)];
+        s_skipped++;
+        if (s_skipped <= 5) {
+            [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
+                @"[BOUNDS] skip #%lu image=%@ r.h=%.0f",
+                (unsigned long)s_skipped, image ? NSStringFromClass([image class]) : @"nil", r.size.height]];
         }
         return r;
     }));
-    [[SevenTVManager sharedManager] log:@"✅ [DBG] attachmentBoundsForTextContainer: hooké sur NSTextAttachment"];
+    [[SevenTVManager sharedManager] log:@"[DBG] attachmentBoundsForTextContainer: hooke sur NSTextAttachment (v3 image.size)"];
 }
 
 static void s7tv_dbg_hookLayoutManagerAttachmentSize(void) {
     // - (void)setAttachmentSize:(CGSize)size forGlyphRange:(NSRange)range
-    // self_ est le NSLayoutManager (Twitch.MessageStringLayoutManager).
-    // On retrouve le NSTextAttachment réel via le textStorage à l'index
-    // correspondant, puis on lit le tag de ratio posé sur son image.
+    //
+    // Strategie v3 : meme logique que hookAttachmentBounds — on utilise
+    // directement image.size pour calculer le ratio sans avoir besoin du tag.
     Class cls = [NSLayoutManager class];
     SEL sel = NSSelectorFromString(@"setAttachmentSize:forGlyphRange:");
     Method m = class_getInstanceMethod(cls, sel);
     if (!m) {
-        [[SevenTVManager sharedManager] log:@"🐛 [DBG] setAttachmentSize:forGlyphRange: introuvable sur NSLayoutManager"];
+        [[SevenTVManager sharedManager] log:@"[DBG] setAttachmentSize:forGlyphRange: introuvable sur NSLayoutManager"];
         return;
     }
     IMP orig = method_getImplementation(m);
-    static NSUInteger s_callCount = 0;
-    static NSUInteger s_matchCount = 0;
+    static NSUInteger s_resized = 0;
+    static NSUInteger s_skipped = 0;
     method_setImplementation(m, imp_implementationWithBlock(^void(id self_, CGSize size, NSRange glyphRange) {
-        s_callCount++;
         CGSize finalSize = size;
 
         NSLayoutManager *lm = (NSLayoutManager *)self_;
@@ -1819,30 +1825,35 @@ static void s7tv_dbg_hookLayoutManagerAttachmentSize(void) {
             NSRange charRange = [lm characterRangeForGlyphRange:glyphRange actualGlyphRange:NULL];
             if (charRange.location != NSNotFound && charRange.location < textStorage.length) {
                 id attachment = [textStorage attribute:NSAttachmentAttributeName atIndex:charRange.location effectiveRange:NULL];
-                id image = (attachment && [attachment respondsToSelector:@selector(image)]) ? ((NSTextAttachment *)attachment).image : nil;
-                NSNumber *ratioNum = image ? objc_getAssociatedObject(image, &kS7TVEmoteRatioKey) : nil;
-                if (ratioNum) {
-                    s_matchCount++;
+                UIImage *image = (attachment && [attachment respondsToSelector:@selector(image)])
+                    ? ((NSTextAttachment *)attachment).image : nil;
+
+                // Condition : image presente et size "par defaut" (hauteur <= 22pt)
+                if (image && image.size.width > 0 && image.size.height > 0 && size.height <= 22.0) {
                     CGFloat targetSize = [[SevenTVManager sharedManager] targetEmoteSize];
-                    CGFloat ratio = ratioNum.floatValue;
+                    CGFloat ratio = image.size.width / image.size.height;
                     finalSize = CGSizeMake(targetSize * ratio, targetSize);
-                    if (s_matchCount <= 40) {
-                        [[SevenTVManager sharedManager] log:@"🐛 [ATTSIZE] ✅ MATCH #%lu ratio=%.3f orig=%@ → new=%@ range={%lu,%lu}",
-                            (unsigned long)s_matchCount, ratio, NSStringFromCGSize(size), NSStringFromCGSize(finalSize),
-                            (unsigned long)charRange.location, (unsigned long)charRange.length];
+                    s_resized++;
+                    if (s_resized <= 30) {
+                        [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
+                            @"[ATTSIZE] v3 resize #%lu imgSize={%.0f,%.0f} ratio=%.2f orig=%@ new=%@",
+                            (unsigned long)s_resized, image.size.width, image.size.height,
+                            ratio, NSStringFromCGSize(size), NSStringFromCGSize(finalSize)]];
+                    }
+                } else {
+                    s_skipped++;
+                    if (s_skipped <= 5) {
+                        [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
+                            @"[ATTSIZE] skip #%lu image=%@ size.h=%.0f",
+                            (unsigned long)s_skipped, image ? NSStringFromClass([image class]) : @"nil", size.height]];
                     }
                 }
             }
         }
 
-        if (s_callCount <= 20 && finalSize.width == size.width && finalSize.height == size.height) {
-            [[SevenTVManager sharedManager] log:@"🐛 [ATTSIZE] #%lu pas de tag 7TV → size inchangé %@",
-                (unsigned long)s_callCount, NSStringFromCGSize(size)];
-        }
-
         ((void(*)(id,SEL,CGSize,NSRange))orig)(self_, sel, finalSize, glyphRange);
     }));
-    [[SevenTVManager sharedManager] log:@"✅ [DBG] setAttachmentSize:forGlyphRange: hooké sur NSLayoutManager"];
+    [[SevenTVManager sharedManager] log:@"[DBG] setAttachmentSize:forGlyphRange: hooke sur NSLayoutManager (v3 image.size)"];
 }
 
 static void s7tv_dbg_hookAddAttribute(void) {
