@@ -2461,6 +2461,31 @@ static void TwitchSevenTVInit(void) {
                                                     (curLayer == staticIvar) ? @"OUI(STATIQUE!)" : @"NON"]];
                                             }
                                         }
+
+                                        // ── Resize du superlayer (ImageAttachmentLayer) ──────────
+                                        // displayLayer: fire quand l'image est prête → Twitch a fini
+                                        // tous ses setFrame:. C'est le bon moment pour corriger la taille.
+                                        CALayer *outer = [(CALayer *)selfObj superlayer];
+                                        if (outer) {
+                                            CGRect outerFrame = outer.frame;
+                                            CGFloat oh = outerFrame.size.height;
+                                            if (oh > 0 && oh <= 22.0) {
+                                                // Pas encore resizé
+                                                CGFloat targetSize = [[SevenTVManager sharedManager] targetEmoteSize];
+                                                CGFloat ratio = (outerFrame.size.width > 0)
+                                                    ? outerFrame.size.width / oh : 1.0;
+                                                CGFloat newW = targetSize * ratio;
+                                                CGRect corrected = CGRectMake(
+                                                    outerFrame.origin.x,
+                                                    outerFrame.origin.y + (oh - targetSize) / 2.0,
+                                                    newW, targetSize);
+                                                [CATransaction begin];
+                                                [CATransaction setDisableActions:YES];
+                                                outer.frame = corrected;
+                                                [CATransaction commit];
+                                            }
+                                        }
+
                                     } @catch(...) {}
                                 }));
                                 s_displayLayerHooked = YES;
