@@ -574,13 +574,39 @@ static _Atomic(NSInteger) s_webpCount = 0;  // emotes statiques servies en WebP
         return;
     }
 
-    // Si déjà en cache → completion immédiate, pas de réseau.
-    // Requête propre (sans kHandledKey) → clé identique à ce que stocke prefetch.
+    // Si déjà en cache → vérifier que c'est bien un GIF (et non un WebP animé
+    // laissé en cache suite à un reboot pendant le prefetch).
+    // - image/gif  → ok, skip
+    // - image/webp + 1 frame  → statique volontaire, skip
+    // - image/webp + N frames → animé raté, re-télécharger et re-convertir
     NSMutableURLRequest *checkReq = [NSMutableURLRequest requestWithURL:url];
     checkReq.cachePolicy = NSURLRequestReturnCacheDataDontLoad;
-    if ([SevenTVGetSharedCache() cachedResponseForRequest:checkReq]) {
-        if (completion) completion();
-        return;
+    NSCachedURLResponse *existing = [SevenTVGetSharedCache() cachedResponseForRequest:checkReq];
+    if (existing) {
+        NSString *ct = @"";
+        if ([existing.response isKindOfClass:[NSHTTPURLResponse class]])
+            ct = ((NSHTTPURLResponse *)existing.response).allHeaderFields[@"Content-Type"] ?: @"";
+        BOOL isWebP = [ct containsString:@"webp"];
+        if (isWebP && existing.data.length > 0) {
+            CGImageSourceRef src = CGImageSourceCreateWithData((CFDataRef)existing.data, NULL);
+            size_t frameCount = src ? CGImageSourceGetCount(src) : 0;
+            if (src) CFRelease(src);
+            if (frameCount > 1) {
+                // WebP animé en cache → re-télécharger pour convertir en GIF
+                [[SevenTVManager sharedManager] log:
+                    @"🔄 Prefetch %@ → WebP animé (%lu frames) en cache, re-conversion GIF",
+                    emoteID, (unsigned long)frameCount];
+                // Ne pas skipper, continuer vers le téléchargement
+            } else {
+                // WebP statique volontaire → ok
+                if (completion) completion();
+                return;
+            }
+        } else {
+            // GIF ou autre → ok
+            if (completion) completion();
+            return;
+        }
     }
 
     // Téléchargement en background via la session prefetch dédiée.
