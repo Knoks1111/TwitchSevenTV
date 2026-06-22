@@ -1746,6 +1746,56 @@ static void s7tv_dbg_dumpMethodsForClass(Class cls, NSString *label) {
     }
 }
 
+static void s7tv_hook_displayLayer(void) {
+    // Hook displayLayer: sur Twitch.AnimatedImageAttachmentLayer.
+    // Installé tôt (à t=3s) pour être actif dès le premier message avec emote.
+    // Fire quand l'image est prête → Twitch a fini tous ses setFrame: → bon timing
+    // pour corriger le frame du superlayer (ImageAttachmentLayer) sans conflit.
+    Class animLayerCls = NSClassFromString(@"Twitch.AnimatedImageAttachmentLayer");
+    if (!animLayerCls) {
+        [[SevenTVManager sharedManager] log:@"⚠️ [displayLayer hook] AnimatedImageAttachmentLayer introuvable à t=3s — sera installé lazily"];
+        return;
+    }
+    SEL displaySel = NSSelectorFromString(@"displayLayer:");
+    Method dm = class_getInstanceMethod(animLayerCls, displaySel);
+    if (!dm) {
+        [[SevenTVManager sharedManager] log:@"⚠️ [displayLayer hook] méthode displayLayer: introuvable"];
+        return;
+    }
+    IMP origIMP = method_getImplementation(dm);
+    SEL startSel = NSSelectorFromString(@"startAnimating");
+    method_setImplementation(dm, imp_implementationWithBlock(^(id selfObj, id layerArg) {
+        @try { ((void(*)(id,SEL,id))origIMP)(selfObj, displaySel, layerArg); } @catch(...) {}
+        @try {
+            // startAnimating pour les GIF animés
+            if ([selfObj respondsToSelector:startSel]) {
+                ((void(*)(id,SEL))objc_msgSend)(selfObj, startSel);
+            }
+            // Resize du superlayer (ImageAttachmentLayer) si pas encore fait
+            CALayer *outer = [(CALayer *)selfObj superlayer];
+            if (outer) {
+                CGRect outerFrame = outer.frame;
+                CGFloat oh = outerFrame.size.height;
+                if (oh > 0 && oh <= 22.0) {
+                    CGFloat targetSize = [[SevenTVManager sharedManager] targetEmoteSize];
+                    CGFloat ratio = (outerFrame.size.width > 0)
+                        ? outerFrame.size.width / oh : 1.0;
+                    CGFloat newW = targetSize * ratio;
+                    CGRect corrected = CGRectMake(
+                        outerFrame.origin.x,
+                        outerFrame.origin.y + (oh - targetSize) / 2.0,
+                        newW, targetSize);
+                    [CATransaction begin];
+                    [CATransaction setDisableActions:YES];
+                    outer.frame = corrected;
+                    [CATransaction commit];
+                }
+            }
+        } @catch(...) {}
+    }));
+    [[SevenTVManager sharedManager] log:@"✅ Hook displayLayer: sur AnimatedImageAttachmentLayer OK (installé tôt)"];
+}
+
 static void s7tv_dbg_hookAttachmentBounds(void) {
     // - (CGRect)attachmentBoundsForTextContainer:(NSTextContainer*)tc
     //                       proposedLineFragment:(CGRect)rect
@@ -2063,7 +2113,8 @@ static void s7tv_debug_dump_layout_system(void) {
         s7tv_hook_uiimage_decode_tagging();
         s7tv_dbg_hookAttachmentBounds();
         s7tv_dbg_hookLayoutManagerAttachmentSize();
-        s7tv_dbg_hookAddAttribute(); // diagnostic: classe réelle des attachments Twitch
+        s7tv_dbg_hookAddAttribute();
+        s7tv_hook_displayLayer(); // installé tôt → actif dès le premier message
 
         // ── Hook setFrame: sur Twitch.ImageAttachmentLayer ────────────────
         // Twitch ignore attachmentBoundsForTextContainer: pour positionner ses
@@ -2408,94 +2459,12 @@ static void TwitchSevenTVInit(void) {
                     }
                     // ────────────────────────────────────────────────────────
 
-                    // Hook displayLayer: directement sur Twitch.AnimatedImageAttachmentLayer.
-                    // (Avant : hook posé sur CALayer — ne s'installait JAMAIS car CALayer
-                    // n'implémente pas displayLayer: lui-même, c'est AnimatedImageAttachmentLayer
-                    // qui définit cette méthode comme la sienne propre. class_getInstanceMethod
-                    // sur [CALayer class] renvoyait donc dm=nil et le bloc entier était mort code.)
+                    // Fallback : si displayLayer: hook n'était pas encore installé
+                    // à t=3s (classe pas encore chargée), on réessaie ici.
                     static BOOL s_displayLayerHooked = NO;
                     if (!s_displayLayerHooked) {
-                        Class animLayerCls = NSClassFromString(@"Twitch.AnimatedImageAttachmentLayer");
-                        if (animLayerCls) {
-                            SEL displaySel = NSSelectorFromString(@"displayLayer:");
-                            Method dm = class_getInstanceMethod(animLayerCls, displaySel);
-                            if (dm) {
-                                IMP origIMP = method_getImplementation(dm);
-                                SEL startSel = NSSelectorFromString(@"startAnimating");
-                                method_setImplementation(dm, imp_implementationWithBlock(^(id selfObj, id layerArg) {
-                                    @try { ((void(*)(id,SEL,id))origIMP)(selfObj, displaySel, layerArg); } @catch(...) {}
-                                    // self est ici l'AnimatedImageAttachmentLayer lui-même
-                                    @try {
-                                        BOOL responds = [selfObj respondsToSelector:startSel];
-                                        // Throttle : on logge seulement les 5 premiers appels, le
-                                        // comportement est confirmé stable, plus la peine de spammer.
-                                        static NSInteger s_displayLayerLogCount = 0;
-                                        if (s_displayLayerLogCount < 5) {
-                                            s_displayLayerLogCount++;
-                                            [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
-                                                @"🩻 displayLayer: déclenché sur %@ — répond à startAnimating: %@ (log %ld/5)",
-                                                NSStringFromClass(object_getClass(selfObj)), responds ? @"OUI" : @"NON",
-                                                (long)s_displayLayerLogCount]];
-                                        }
-                                        if (responds) {
-                                            ((void(*)(id,SEL))objc_msgSend)(selfObj, startSel);
-                                            // Diagnostic clé : est-ce que selfObj (l'AnimatedImageAttachmentLayer)
-                                            // est bien le currentImageLayer affiché par le layer englobant ?
-                                            static NSInteger s_curLayerLogCount = 0;
-                                            if (s_curLayerLogCount < 5) {
-                                                s_curLayerLogCount++;
-                                                CALayer *outerL = [(CALayer *)selfObj superlayer];
-                                                id curLayer  = s7tv_getObjectIvar(outerL, "currentImageLayer");
-                                                id animIvar  = s7tv_getObjectIvar(outerL, "animatedImageLayer");
-                                                id staticIvar= s7tv_getObjectIvar(outerL, "staticImageLayer");
-                                                id dispMode  = s7tv_getObjectIvar(outerL, "currentDisplayMode");
-                                                [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
-                                                    @"🩻 displayLayer [%ld/5] currentImageLayer==%p selfObj==%p animIvar==%p staticIvar==%p dispMode=%@",
-                                                    (long)s_curLayerLogCount,
-                                                    curLayer, selfObj, animIvar, staticIvar,
-                                                    dispMode ? [dispMode description] : @"nil"]];
-                                                [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
-                                                    @"🩻   → cur==self: %@ | cur==animIvar: %@ | cur==staticIvar: %@",
-                                                    (curLayer == selfObj)    ? @"✅OUI(animé affiché)" : @"❌NON",
-                                                    (curLayer == animIvar)   ? @"OUI" : @"NON",
-                                                    (curLayer == staticIvar) ? @"OUI(STATIQUE!)" : @"NON"]];
-                                            }
-                                        }
-
-                                        // ── Resize du superlayer (ImageAttachmentLayer) ──────────
-                                        // displayLayer: fire quand l'image est prête → Twitch a fini
-                                        // tous ses setFrame:. C'est le bon moment pour corriger la taille.
-                                        CALayer *outer = [(CALayer *)selfObj superlayer];
-                                        if (outer) {
-                                            CGRect outerFrame = outer.frame;
-                                            CGFloat oh = outerFrame.size.height;
-                                            if (oh > 0 && oh <= 22.0) {
-                                                // Pas encore resizé
-                                                CGFloat targetSize = [[SevenTVManager sharedManager] targetEmoteSize];
-                                                CGFloat ratio = (outerFrame.size.width > 0)
-                                                    ? outerFrame.size.width / oh : 1.0;
-                                                CGFloat newW = targetSize * ratio;
-                                                CGRect corrected = CGRectMake(
-                                                    outerFrame.origin.x,
-                                                    outerFrame.origin.y + (oh - targetSize) / 2.0,
-                                                    newW, targetSize);
-                                                [CATransaction begin];
-                                                [CATransaction setDisableActions:YES];
-                                                outer.frame = corrected;
-                                                [CATransaction commit];
-                                            }
-                                        }
-
-                                    } @catch(...) {}
-                                }));
-                                s_displayLayerHooked = YES;
-                                [[SevenTVManager sharedManager] log:@"✅ Hook displayLayer: sur AnimatedImageAttachmentLayer OK"];
-                            } else {
-                                [[SevenTVManager sharedManager] log:@"⚠️ displayLayer: introuvable sur AnimatedImageAttachmentLayer"];
-                            }
-                        } else {
-                            [[SevenTVManager sharedManager] log:@"⚠️ Classe AnimatedImageAttachmentLayer introuvable"];
-                        }
+                        s7tv_hook_displayLayer();
+                        s_displayLayerHooked = YES;
                     }
 
                     // Filet de sécurité complémentaire : polling court (ivar "animatedImageLayer"
