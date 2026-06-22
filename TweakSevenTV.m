@@ -2403,6 +2403,10 @@ static void TwitchSevenTVInit(void) {
                         CGRect f = caLayer.frame;
                         if (f.size.width <= 0 || f.size.height <= 0) { continue; }
 
+                        // Badges Twitch : toujours à gauche de la ligne (x < 60pt),
+                        // avant le username. Les emotes sont après le username (x > 100pt).
+                        if (f.origin.x < 60.0) { continue; }
+
                         // LOG DIAGNOSTIC : frame AVANT resize
                         // → si f.size = 30x30, BOUNDS hook est respecté par Twitch (bon)
                         // → si f.size = 18x18, Twitch ignore BOUNDS hook (problème)
