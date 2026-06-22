@@ -1807,24 +1807,30 @@ static void s7tv_dbg_hookAttachmentBounds(void) {
         // Condition : bounds "par defaut" (hauteur <=22pt = emotes standard)
         if (r.size.height > 0 && r.size.height <= 22.0) {
 
-            // Détection badge : les badges sont des NSTextAttachment consécutifs
-            // au DÉBUT du string (charIdx 0, 1, 2...). Si tous les caractères
-            // AVANT charIdx sont aussi des attachments, on est dans la zone badges.
-            // Dès qu'il y a du texte (username) avant → c'est une emote.
-            if (charIdx == 0) {
-                return r; // Premier caractère = forcément un badge
-            }
+            // Détection badge v2 : le textStorage Twitch commence par un char
+            // spécial invisible (att[0]=NO mais pas alphanumérique).
+            // Les badges viennent ensuite (charIdx=1, 2...).
+            // Règle : si tous les chars avant charIdx sont soit des attachments,
+            // soit des chars NON-alphanumériques (invisibles) → badge zone.
+            // Dès qu'on trouve un char alphanumérique → username → zone message.
             NSLayoutManager *lm2 = tc ? tc.layoutManager : nil;
             NSTextStorage *ts2 = lm2 ? lm2.textStorage : nil;
-            if (ts2 && ts2.length > 0) {
+            if (ts2 && ts2.length > 0 && charIdx <= ts2.length) {
                 BOOL inBadgeZone = YES;
+                NSCharacterSet *alphaNum = [NSCharacterSet alphanumericCharacterSet];
                 for (NSUInteger i = 0; i < charIdx && i < ts2.length; i++) {
-                    if (![ts2 attribute:NSAttachmentAttributeName
-                                atIndex:i
-                         effectiveRange:NULL]) {
-                        inBadgeZone = NO;
-                        break;
+                    id attHere = [ts2 attribute:NSAttachmentAttributeName
+                                        atIndex:i
+                                 effectiveRange:NULL];
+                    if (!attHere) {
+                        NSString *cs = [ts2.string substringWithRange:NSMakeRange(i, 1)];
+                        if (cs.length > 0 && [alphaNum characterIsMember:[cs characterAtIndex:0]]) {
+                            inBadgeZone = NO;
+                            break;
+                        }
+                        // Char spécial/invisible → on continue
                     }
+                    // Attachment → on continue (badge précédent)
                 }
                 if (inBadgeZone) {
                     return r; // Badge — ne pas modifier les bounds
