@@ -1775,6 +1775,35 @@ static void s7tv_dbg_hookAttachmentBounds(void) {
         NSTextAttachment *attachment = (NSTextAttachment *)self_;
         UIImage *image = [attachment respondsToSelector:@selector(image)] ? attachment.image : nil;
 
+        // DIAGNOSTIC : logger les 10 premiers appels pour voir charIdx et accessibilité textStorage
+        {
+            static NSUInteger s_diagCount = 0;
+            if (s_diagCount < 10) {
+                s_diagCount++;
+                NSLayoutManager *lm_d = tc ? tc.layoutManager : nil;
+                NSTextStorage  *ts_d  = lm_d ? lm_d.textStorage : nil;
+                NSUInteger tsLen = ts_d ? ts_d.length : 0;
+                NSString *prevCharsInfo = @"";
+                if (ts_d && charIdx > 0 && charIdx < tsLen) {
+                    // Vérifier si char[0] est un attachment
+                    id att0 = [ts_d attribute:NSAttachmentAttributeName atIndex:0 effectiveRange:NULL];
+                    // Vérifier si char avant charIdx est du texte ou attachment
+                    id attPrev = (charIdx > 0) ? [ts_d attribute:NSAttachmentAttributeName atIndex:charIdx-1 effectiveRange:NULL] : nil;
+                    prevCharsInfo = [NSString stringWithFormat:@" att[0]=%@ att[charIdx-1]=%@",
+                        att0 ? @"YES" : @"NO",
+                        attPrev ? @"YES" : @"NO"];
+                }
+                [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
+                    @"[BOUNDS-DIAG] #%lu charIdx=%lu r={%.0f,%.0f} tc=%@ lm=%@ ts=%@(len=%lu)%@",
+                    (unsigned long)s_diagCount, (unsigned long)charIdx,
+                    r.size.width, r.size.height,
+                    tc ? @"OK" : @"nil",
+                    lm_d ? @"OK" : @"nil",
+                    ts_d ? @"OK" : @"nil", (unsigned long)tsLen,
+                    prevCharsInfo]];
+            }
+        }
+
         // Condition : bounds "par defaut" (hauteur <=22pt = emotes standard)
         if (r.size.height > 0 && r.size.height <= 22.0) {
 
