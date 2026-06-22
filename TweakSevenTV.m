@@ -2064,7 +2064,42 @@ static void s7tv_debug_dump_layout_system(void) {
         s7tv_dbg_hookAttachmentBounds();
         s7tv_dbg_hookLayoutManagerAttachmentSize();
         s7tv_dbg_hookAddAttribute(); // diagnostic: classe réelle des attachments Twitch
-        [[SevenTVManager sharedManager] log:@"✅ Hooks resize layout (bounds + attachmentSize + addAttribute) actifs"];
+
+        // ── Hook setFrame: sur Twitch.ImageAttachmentLayer ────────────────
+        // Twitch ignore attachmentBoundsForTextContainer: pour positionner ses
+        // layers — il utilise sa propre logique (taille naturelle de l'image).
+        // En hookant setFrame:, on intercepte synchronement au moment exact où
+        // Twitch fixe le frame du layer → resize immédiat, zéro délai.
+        Class ialClass = NSClassFromString(@"Twitch.ImageAttachmentLayer");
+        if (ialClass) {
+            SEL sfSel = @selector(setFrame:);
+            Method sfM = class_getInstanceMethod(ialClass, sfSel);
+            if (sfM) {
+                IMP sfOrig = method_getImplementation(sfM);
+                method_setImplementation(sfM, imp_implementationWithBlock(^void(CALayer *self_, CGRect newFrame) {
+                    // Appel original d'abord
+                    ((void(*)(id,SEL,CGRect))sfOrig)(self_, sfSel, newFrame);
+                    // Resize si c'est une emote (hauteur <= 22pt = taille naturelle Twitch)
+                    CGFloat h = newFrame.size.height;
+                    if (h > 0 && h <= 22.0) {
+                        CGFloat targetSize = [[SevenTVManager sharedManager] targetEmoteSize];
+                        CGFloat ratio = (newFrame.size.width > 0) ? newFrame.size.width / h : 1.0;
+                        CGFloat newW = targetSize * ratio;
+                        CGRect  corrected = CGRectMake(newFrame.origin.x,
+                                                       newFrame.origin.y + (h - targetSize) / 2.0,
+                                                       newW, targetSize);
+                        ((void(*)(id,SEL,CGRect))sfOrig)(self_, sfSel, corrected);
+                    }
+                }));
+                [[SevenTVManager sharedManager] log:@"✅ Hook setFrame: sur ImageAttachmentLayer OK (resize synchrone)"];
+            } else {
+                [[SevenTVManager sharedManager] log:@"⚠️ setFrame: introuvable sur ImageAttachmentLayer"];
+            }
+        } else {
+            [[SevenTVManager sharedManager] log:@"⚠️ Twitch.ImageAttachmentLayer introuvable (hook setFrame: ignoré)"];
+        }
+
+        [[SevenTVManager sharedManager] log:@"✅ Hooks resize layout (bounds + attachmentSize + addAttribute + setFrame) actifs"];
     });
 }
 
@@ -2148,11 +2183,12 @@ static void TwitchSevenTVInit(void) {
                 // Seulement pour ChatMessageTableViewCell
                 if (![NSStringFromClass([cell class]) isEqualToString:@"Twitch.ChatMessageTableViewCell"]) return;
 
-                // Attendre que le layout soit fini puis resizer
+                // setFrame: hook gère le resize synchrone — dispatch_async
+                // sert juste à laisser le runloop finir le layout courant avant
+                // le BFS, sans délai visible.
                 __weak UITableViewCell *weakCell = cell;
                 __weak UITableView     *weakTV   = tableView;
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)),
-                               dispatch_get_main_queue(), ^{
+                dispatch_async(dispatch_get_main_queue(), ^{
                     UITableViewCell *cell = weakCell;
                     UITableView     *tv   = weakTV;
                     // Guards stream-close : si l'un des deux objets est mort,
@@ -2477,7 +2513,7 @@ static void TwitchSevenTVInit(void) {
             });
 
             method_setImplementation(origMethod, newIMP);
-            [[SevenTVManager sharedManager] log:@"✅ willDisplayCell hooké (avec délai 100ms)"];
+            [[SevenTVManager sharedManager] log:@"✅ willDisplayCell hooké (dispatch_async, setFrame: hook actif)"];
 
             // Observer : quand le slider change la taille, on force un reloadData
             // sur toutes les ChatTranscriptView visibles.
