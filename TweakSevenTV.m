@@ -2079,19 +2079,34 @@ static void s7tv_debug_dump_layout_system(void) {
                 method_setImplementation(sfM, imp_implementationWithBlock(^void(CALayer *self_, CGRect newFrame) {
                     // Appel original d'abord
                     ((void(*)(id,SEL,CGRect))sfOrig)(self_, sfSel, newFrame);
-                    // Resize si c'est une emote (hauteur <= 22pt = taille naturelle Twitch)
+
+                    // Twitch peut rappeler setFrame: juste après (image load async).
+                    // On schedule la correction pour APRÈS que Twitch ait fini
+                    // tous ses appels synchrones dans ce runloop.
                     CGFloat h = newFrame.size.height;
-                    if (h > 0 && h <= 22.0) {
-                        CGFloat targetSize = [[SevenTVManager sharedManager] targetEmoteSize];
-                        CGFloat ratio = (newFrame.size.width > 0) ? newFrame.size.width / h : 1.0;
-                        CGFloat newW = targetSize * ratio;
-                        CGRect  corrected = CGRectMake(newFrame.origin.x,
-                                                       newFrame.origin.y + (h - targetSize) / 2.0,
-                                                       newW, targetSize);
-                        ((void(*)(id,SEL,CGRect))sfOrig)(self_, sfSel, corrected);
-                    }
+                    if (h <= 0 || h > 22.0) return;
+
+                    CGFloat targetSize = [[SevenTVManager sharedManager] targetEmoteSize];
+                    CGFloat ratio = (newFrame.size.width > 0) ? newFrame.size.width / h : 1.0;
+                    CGFloat newW = targetSize * ratio;
+                    CGRect corrected = CGRectMake(newFrame.origin.x,
+                                                  newFrame.origin.y + (h - targetSize) / 2.0,
+                                                  newW, targetSize);
+
+                    __weak CALayer *weakLayer = self_;
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        CALayer *l = weakLayer;
+                        if (!l) return;
+                        // Si Twitch a réécrasé notre frame (encore <= 22pt), on corrige
+                        if (l.frame.size.height <= 22.0) {
+                            [CATransaction begin];
+                            [CATransaction setDisableActions:YES];
+                            ((void(*)(id,SEL,CGRect))sfOrig)(l, sfSel, corrected);
+                            [CATransaction commit];
+                        }
+                    });
                 }));
-                [[SevenTVManager sharedManager] log:@"✅ Hook setFrame: sur ImageAttachmentLayer OK (resize synchrone)"];
+                [[SevenTVManager sharedManager] log:@"✅ Hook setFrame: sur ImageAttachmentLayer OK (resize async-safe)"];
             } else {
                 [[SevenTVManager sharedManager] log:@"⚠️ setFrame: introuvable sur ImageAttachmentLayer"];
             }
