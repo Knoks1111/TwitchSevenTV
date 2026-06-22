@@ -24,11 +24,37 @@
 #define S7TV_CDN_BASE        @"https://cdn.7tv.app/emote"
 
 // Nombre maximum de lignes conservées dans le buffer de logs in-app
-#define S7TV_LOG_BUFFER_MAX  1000
+#define S7TV_LOG_BUFFER_MAX  5000
 
 // Nom de la notification postée quand une nouvelle ligne est ajoutée au buffer
 // SevenTVLogsController écoute cette notification pour se rafraîchir.
 extern NSString *const S7TVLogsDidUpdateNotification;
+
+
+// ============================================================
+// Catégories de logs
+// ============================================================
+// Chaque ligne loguée via -log: est classée automatiquement dans une de ces
+// catégories (par analyse du contenu du message, voir s7tv_categoryForMessage:
+// dans SevenTVManager.m). Chaque catégorie peut être activée/désactivée
+// indépendamment depuis SevenTVDebugPageController.
+typedef NS_ENUM(NSInteger, S7TVLogCategory) {
+    S7TVLogCategoryError = 0,        // 🚨 Erreurs / Avertissements (❌ ⚠️) — toujours prioritaire
+    S7TVLogCategoryTap,              // 👆 Tap Logger
+    S7TVLogCategorySwizzle,          // 🔌 Swizzle / Boot
+    S7TVLogCategoryCache,            // ⚡️ Cache / Réseau
+    S7TVLogCategoryPrefetch,         // 🚀 Prefetch
+    S7TVLogCategoryAPI,              // 🌍 API Emotes
+    S7TVLogCategoryIRCChannel,       // 📡 IRC / Channel
+    S7TVLogCategoryIRCInjection,     // 💉 IRC Injection
+    S7TVLogCategoryUIPicker,         // 🎨 UI / Picker
+    S7TVLogCategoryFavorites,        // ⭐ Favoris
+    S7TVLogCategoryResize,           // 📐 Resize / CoreText
+    S7TVLogCategoryOrientation,      // 🔒 Orientation Lock
+    S7TVLogCategoryImageConversion,  // 🖼 Conversion Image
+    S7TVLogCategoryDump,             // 🗑️ Dump (et tout ce qui n'est pas classé)
+};
+#define S7TV_LOG_CATEGORY_COUNT 14
 
 
 // ============================================================
@@ -59,8 +85,29 @@ extern NSString *const S7TVLogsDidUpdateNotification;
 @property (nonatomic, assign) BOOL showAnimated;          // Afficher les emotes animées dans le chat
 @property (nonatomic, assign) BOOL showPickerAnimations;  // Animer les emotes dans le picker (favoris seulement)
 @property (nonatomic, assign) BOOL showFloatingButton;    // Afficher/masquer le bouton flottant 7TV
-@property (nonatomic, assign) BOOL debugLogging;          // NSLog console activé
-@property (nonatomic, assign) BOOL tapLogging;            // Logs des taps (indépendant de debugLogging)
+@property (nonatomic, assign) BOOL debugLogging;          // NSLog console activé (mirroring Console.app)
+
+// --- Logs : interrupteur global ---
+// OFF = aucune ligne n'est enregistrée dans le buffer (peu importe les catégories
+// ci-dessous), et les switches de catégories sont grisés dans l'UI — mais leurs
+// valeurs restent inchangées en NSUserDefaults. "Voir les logs" reste accessible.
+@property (nonatomic, assign) BOOL logsEnabled;
+
+// --- Logs : catégories (chacune indépendante) ---
+@property (nonatomic, assign) BOOL logErrors;            // 🚨 Erreurs / Avertissements — ON par défaut
+@property (nonatomic, assign) BOOL logTap;                // 👆 Tap Logger
+@property (nonatomic, assign) BOOL logSwizzle;             // 🔌 Swizzle / Boot
+@property (nonatomic, assign) BOOL logCache;               // ⚡️ Cache / Réseau
+@property (nonatomic, assign) BOOL logPrefetch;            // 🚀 Prefetch
+@property (nonatomic, assign) BOOL logAPI;                 // 🌍 API Emotes
+@property (nonatomic, assign) BOOL logIRCChannel;          // 📡 IRC / Channel
+@property (nonatomic, assign) BOOL logIRCInjection;        // 💉 IRC Injection
+@property (nonatomic, assign) BOOL logUIPicker;            // 🎨 UI / Picker
+@property (nonatomic, assign) BOOL logFavorites;           // ⭐ Favoris
+@property (nonatomic, assign) BOOL logResize;              // 📐 Resize / CoreText
+@property (nonatomic, assign) BOOL logOrientation;         // 🔒 Orientation Lock
+@property (nonatomic, assign) BOOL logImageConversion;     // 🖼 Conversion Image
+@property (nonatomic, assign) BOOL logDump;                // 🗑️ Dump
 
 // --- Données des emotes ---
 // Dictionnaire: @{ "KEKW": SevenTVEmote*, "Pog": SevenTVEmote*, ... }
@@ -108,8 +155,11 @@ extern NSString *const S7TVLogsDidUpdateNotification;
 - (void)cleanupPickerForStreamClose;
 
 // --- Logs ---
-// log: est TOUJOURS enregistré dans le buffer in-app (indépendamment de debugLogging).
-// Si debugLogging == YES, la ligne est aussi envoyée à NSLog / Console.
+// log: classe automatiquement le message dans une S7TVLogCategory (par analyse
+// du contenu — voir s7tv_categoryForMessage: dans le .m) puis :
+//   - si logsEnabled == NO          → rien n'est enregistré
+//   - si la catégorie correspondante == NO → rien n'est enregistré
+//   - sinon → ajouté au buffer in-app, et envoyé à NSLog si debugLogging == YES
 - (void)log:(NSString *)format, ...;
 
 // Retourne une copie de toutes les lignes du buffer (thread-safe)

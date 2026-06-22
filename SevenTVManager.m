@@ -309,6 +309,24 @@ static const CGFloat kS7TVMenuHeight = 520.0;
         _showPickerAnimations  = NO;   // Désactivé par défaut (perf)
         _debugLogging          = (S7TV_DEBUG == 1);
 
+        // Système de logs par catégorie — valeurs par défaut avant chargement
+        // des préférences sauvegardées (voir loadPreferences ci-dessous).
+        _logsEnabled       = YES;
+        _logErrors         = YES;   // Erreurs/Avertissements visibles par défaut
+        _logTap            = NO;
+        _logSwizzle        = NO;
+        _logCache          = NO;
+        _logPrefetch       = NO;
+        _logAPI            = NO;
+        _logIRCChannel     = NO;
+        _logIRCInjection   = NO;
+        _logUIPicker       = NO;
+        _logFavorites      = NO;
+        _logResize         = NO;
+        _logOrientation    = NO;
+        _logImageConversion = NO;
+        _logDump           = NO;
+
         _globalEmotes      = @{};
         _channelEmotes     = @{};
         _fetchingChannelIDs  = [NSMutableSet set];
@@ -333,11 +351,11 @@ static const CGFloat kS7TVMenuHeight = 520.0;
         _emotePickerOtherEmotes    = @[];
 
         [self loadPreferences];
-        // Synchroniser s_tapLogEnabled avec la préférence chargée.
-        // Sans ça, s_tapLogEnabled reste YES (défaut TweakSevenTV.m) même si
-        // l'utilisateur l'a désactivé lors d'une session précédente.
+        // Synchroniser s_tapLogEnabled avec les préférences chargées.
+        // Sans ça, s_tapLogEnabled reste à sa valeur par défaut (TweakSevenTV.m)
+        // même si l'utilisateur a une autre préférence sauvegardée.
         extern BOOL s_tapLogEnabled;
-        s_tapLogEnabled = _tapLogging;
+        s_tapLogEnabled = _logsEnabled && _logTap;
         [self ensureCacheDirectory];
     }
     return self;
@@ -559,7 +577,24 @@ static const CGFloat kS7TVMenuHeight = 520.0;
     if ([prefs objectForKey:@"s7tv_debug"]             != nil) _debugLogging          = [prefs boolForKey:@"s7tv_debug"];
     if ([prefs objectForKey:@"s7tv_floating_btn"]      != nil) _showFloatingButton     = [prefs boolForKey:@"s7tv_floating_btn"];
     else _showFloatingButton = YES; // activé par défaut
-    if ([prefs objectForKey:@"s7tv_tap_log"]           != nil) _tapLogging             = [prefs boolForKey:@"s7tv_tap_log"];
+
+    // --- Logs : interrupteur global + catégories ---
+    if ([prefs objectForKey:@"s7tv_logs_enabled"]      != nil) _logsEnabled           = [prefs boolForKey:@"s7tv_logs_enabled"];
+    if ([prefs objectForKey:@"s7tv_log_errors"]        != nil) _logErrors             = [prefs boolForKey:@"s7tv_log_errors"];
+    if ([prefs objectForKey:@"s7tv_log_tap"]           != nil) _logTap                = [prefs boolForKey:@"s7tv_log_tap"];
+    if ([prefs objectForKey:@"s7tv_log_swizzle"]       != nil) _logSwizzle            = [prefs boolForKey:@"s7tv_log_swizzle"];
+    if ([prefs objectForKey:@"s7tv_log_cache"]         != nil) _logCache              = [prefs boolForKey:@"s7tv_log_cache"];
+    if ([prefs objectForKey:@"s7tv_log_prefetch"]      != nil) _logPrefetch           = [prefs boolForKey:@"s7tv_log_prefetch"];
+    if ([prefs objectForKey:@"s7tv_log_api"]           != nil) _logAPI                = [prefs boolForKey:@"s7tv_log_api"];
+    if ([prefs objectForKey:@"s7tv_log_irc_channel"]   != nil) _logIRCChannel         = [prefs boolForKey:@"s7tv_log_irc_channel"];
+    if ([prefs objectForKey:@"s7tv_log_irc_injection"] != nil) _logIRCInjection       = [prefs boolForKey:@"s7tv_log_irc_injection"];
+    if ([prefs objectForKey:@"s7tv_log_ui_picker"]     != nil) _logUIPicker           = [prefs boolForKey:@"s7tv_log_ui_picker"];
+    if ([prefs objectForKey:@"s7tv_log_favorites"]     != nil) _logFavorites          = [prefs boolForKey:@"s7tv_log_favorites"];
+    if ([prefs objectForKey:@"s7tv_log_resize"]        != nil) _logResize             = [prefs boolForKey:@"s7tv_log_resize"];
+    if ([prefs objectForKey:@"s7tv_log_orientation"]   != nil) _logOrientation        = [prefs boolForKey:@"s7tv_log_orientation"];
+    if ([prefs objectForKey:@"s7tv_log_image_conv"]    != nil) _logImageConversion    = [prefs boolForKey:@"s7tv_log_image_conv"];
+    if ([prefs objectForKey:@"s7tv_log_dump"]          != nil) _logDump               = [prefs boolForKey:@"s7tv_log_dump"];
+
     // Charger les favoris (array d'IDs 7TV)
     NSArray *savedFavs = [prefs arrayForKey:@"s7tv_favorites"];
     if (savedFavs) {
@@ -574,7 +609,22 @@ static const CGFloat kS7TVMenuHeight = 520.0;
     [prefs setBool:self.showPickerAnimations forKey:@"s7tv_picker_anim"];
     [prefs setBool:self.debugLogging         forKey:@"s7tv_debug"];
     [prefs setBool:self.showFloatingButton   forKey:@"s7tv_floating_btn"];
-    [prefs setBool:self.tapLogging           forKey:@"s7tv_tap_log"];
+
+    [prefs setBool:self.logsEnabled          forKey:@"s7tv_logs_enabled"];
+    [prefs setBool:self.logErrors            forKey:@"s7tv_log_errors"];
+    [prefs setBool:self.logTap               forKey:@"s7tv_log_tap"];
+    [prefs setBool:self.logSwizzle           forKey:@"s7tv_log_swizzle"];
+    [prefs setBool:self.logCache             forKey:@"s7tv_log_cache"];
+    [prefs setBool:self.logPrefetch          forKey:@"s7tv_log_prefetch"];
+    [prefs setBool:self.logAPI               forKey:@"s7tv_log_api"];
+    [prefs setBool:self.logIRCChannel        forKey:@"s7tv_log_irc_channel"];
+    [prefs setBool:self.logIRCInjection      forKey:@"s7tv_log_irc_injection"];
+    [prefs setBool:self.logUIPicker          forKey:@"s7tv_log_ui_picker"];
+    [prefs setBool:self.logFavorites         forKey:@"s7tv_log_favorites"];
+    [prefs setBool:self.logResize            forKey:@"s7tv_log_resize"];
+    [prefs setBool:self.logOrientation       forKey:@"s7tv_log_orientation"];
+    [prefs setBool:self.logImageConversion   forKey:@"s7tv_log_image_conv"];
+    [prefs setBool:self.logDump              forKey:@"s7tv_log_dump"];
     [prefs synchronize];
 }
 
@@ -595,21 +645,41 @@ static const CGFloat kS7TVMenuHeight = 520.0;
         self.floatingWindow.hidden = !v;
     });
 }
-- (void)setTapLogging:(BOOL)v {
-    _tapLogging = v;
-    [self savePreferences];
-    extern BOOL s_tapLogEnabled;
-    s_tapLogEnabled = v;
-    [self log:@"👆 Tap logger %@", v ? @"activé" : @"désactivé"];
-}
 - (void)setDebugLogging:(BOOL)v {
     _debugLogging  = v;
     [self savePreferences];
-    // Synchroniser le tap logger avec l'état des logs
-    extern BOOL s_tapLogEnabled;
-    s_tapLogEnabled = v;
-    [self log:@"👆 Tap logger %@", v ? @"activé" : @"désactivé"];
+    // NOTE : ceci ne touche plus s_tapLogEnabled — c'était le bug.
+    // "Logs console" est un simple miroir NSLog, indépendant des catégories.
 }
+
+// --- Logs : interrupteur global ---
+- (void)setLogsEnabled:(BOOL)v {
+    _logsEnabled = v;
+    [self savePreferences];
+    extern BOOL s_tapLogEnabled;
+    s_tapLogEnabled = v && _logTap;
+}
+
+// --- Logs : catégories ---
+- (void)setLogErrors:(BOOL)v         { _logErrors = v;         [self savePreferences]; }
+- (void)setLogTap:(BOOL)v {
+    _logTap = v;
+    [self savePreferences];
+    extern BOOL s_tapLogEnabled;
+    s_tapLogEnabled = _logsEnabled && v;
+}
+- (void)setLogSwizzle:(BOOL)v         { _logSwizzle = v;         [self savePreferences]; }
+- (void)setLogCache:(BOOL)v           { _logCache = v;           [self savePreferences]; }
+- (void)setLogPrefetch:(BOOL)v        { _logPrefetch = v;        [self savePreferences]; }
+- (void)setLogAPI:(BOOL)v             { _logAPI = v;             [self savePreferences]; }
+- (void)setLogIRCChannel:(BOOL)v      { _logIRCChannel = v;      [self savePreferences]; }
+- (void)setLogIRCInjection:(BOOL)v    { _logIRCInjection = v;    [self savePreferences]; }
+- (void)setLogUIPicker:(BOOL)v        { _logUIPicker = v;        [self savePreferences]; }
+- (void)setLogFavorites:(BOOL)v       { _logFavorites = v;       [self savePreferences]; }
+- (void)setLogResize:(BOOL)v          { _logResize = v;          [self savePreferences]; }
+- (void)setLogOrientation:(BOOL)v     { _logOrientation = v;     [self savePreferences]; }
+- (void)setLogImageConversion:(BOOL)v { _logImageConversion = v; [self savePreferences]; }
+- (void)setLogDump:(BOOL)v            { _logDump = v;            [self savePreferences]; }
 
 
 // ============================================================
@@ -2636,6 +2706,119 @@ referenceSizeForHeaderInSection:(NSInteger)section {
 
 
 // ============================================================
+// MARK: - Classification automatique des logs par catégorie
+// ============================================================
+// Le message déjà formaté (après application des arguments) est analysé par
+// simple recherche de sous-chaînes distinctives. L'ordre des tests fait foi :
+// dès qu'une règle matche, la catégorie est retenue (pas de cumul).
+//
+// Erreurs/Avertissements est toujours testé en premier : un ❌/⚠️ dans un log
+// IRC, picker, etc. tombe dans "Erreurs", pas dans sa catégorie d'origine —
+// c'est volontaire (cf. discussion avec l'utilisateur).
+static S7TVLogCategory s7tv_categoryForMessage(NSString *msg) {
+    BOOL (^has)(NSString *) = ^BOOL(NSString *needle) {
+        return [msg rangeOfString:needle].location != NSNotFound;
+    };
+
+    // 1. Erreurs / Avertissements — priorité absolue
+    if (has(@"❌") || has(@"⚠️")) return S7TVLogCategoryError;
+
+    // 2. Dump (architecture/méthodes — très verbeux, à part)
+    if (has(@"[DBG-DUMP]") || has(@"🩻")) return S7TVLogCategoryDump;
+
+    // 3. Tap Logger
+    if (has(@"👆") || has(@"FIRST_RESPONDER") || has(@"SCAN CHAT") ||
+        has(@"FIN SCAN") || (has(@"HIT:") && has(@"frame=")) ||
+        has(@"fin hiérarchie"))
+        return S7TVLogCategoryTap;
+
+    // 4. Resize / CoreText (pipeline de resize des emotes en cours de debug)
+    if (has(@"attachmentBoundsForTextContainer") || has(@"setAttachmentSize") ||
+        has(@"willDisplayCell") || has(@"Hooks resize layout") ||
+        has(@"Tag propagé") || has(@"NSTextAttachment") ||
+        ([msg rangeOfString:@"ImageAttachmentLayer"].location != NSNotFound &&
+         [msg rangeOfString:@"Animated"].location == NSNotFound))
+        return S7TVLogCategoryResize;
+
+    // 5. Orientation Lock
+    if (has(@"Orientation") || has(@"orientation") || has(@"verrou") || has(@"Rotation"))
+        return S7TVLogCategoryOrientation;
+
+    // 6. Conversion Image (pipeline WebP→GIF + hooks d'animation)
+    if (has(@"WebP") || has(@"GIF") || has(@"animatedImageAtURL") ||
+        has(@"imageAtURL:") || has(@"🟢7TV") || has(@"🖼A") || has(@"🖼B") ||
+        has(@"AnimatedImageAttachmentLayer") || has(@"animatedImageLayer") ||
+        has(@"currentImageLayer") || has(@"Réponse CDN") || has(@"Bilan conversion") ||
+        has(@"Cache miss statique"))
+        return S7TVLogCategoryImageConversion;
+
+    // 7. Favoris
+    if (has(@"Favori")) return S7TVLogCategoryFavorites;
+
+    // 8. IRC Injection
+    if (has(@"Injection: emotes=") || has(@"Emote détectée")) return S7TVLogCategoryIRCInjection;
+
+    // 9. IRC / Channel
+    if (has(@"ROOMSTATE") || has(@"room-id") || has(@"broadcaster ID") ||
+        has(@"GQL") || has(@"Mapping sauvé") || has(@"Rejoint le channel") ||
+        has(@"Channel rejoint") || has(@"twitchID en cache") || has(@"twitchID") ||
+        has(@"Pas de twitchID"))
+        return S7TVLogCategoryIRCChannel;
+
+    // 10. Prefetch
+    if (has(@"Prefetch") || has(@"Préfetch") || has(@"Fetch déjà en cours"))
+        return S7TVLogCategoryPrefetch;
+
+    // 11. Cache / Réseau
+    if (has(@"cache hit") || has(@"cache miss") || has(@"Prewarm") ||
+        has(@"Préchauffage") || has(@"Écriture cache") || has(@"sérialiser le cache") ||
+        has(@"URLProtocol"))
+        return S7TVLogCategoryCache;
+
+    // 12. API Emotes
+    if (has(@"emotes globales") || has(@"emotes channel") || has(@"emotes du channel") ||
+        has(@"Chargement emotes") || has(@"emote_set") || has(@"JSON invalide"))
+        return S7TVLogCategoryAPI;
+
+    // 13. UI / Picker
+    if (has(@"TextEntryView") || has(@"picker") || has(@"Picker") ||
+        has(@"Bouton 7TV") || has(@"Bits") || has(@"insertText") ||
+        has(@"paste:") || has(@"didSelect") || has(@"firstResponder") ||
+        has(@"Settings ouvert"))
+        return S7TVLogCategoryUIPicker;
+
+    // 14. Swizzle / Boot
+    if (has(@"swizzle") || has(@"Swizzle") || has(@"Hook ") || has(@"hooké") ||
+        has(@"Chargement TwitchSevenTV") || has(@"SevenTVManager prêt") ||
+        has(@"setup démarré") || has(@"NSURLSession") || has(@"WebSocketTask") ||
+        has(@"sharedSession"))
+        return S7TVLogCategorySwizzle;
+
+    // Par défaut : non classé → Dump (pour ne rien perdre silencieusement)
+    return S7TVLogCategoryDump;
+}
+
+- (BOOL)s7tv_isCategoryEnabled:(S7TVLogCategory)cat {
+    switch (cat) {
+        case S7TVLogCategoryError:           return self.logErrors;
+        case S7TVLogCategoryTap:             return self.logTap;
+        case S7TVLogCategorySwizzle:         return self.logSwizzle;
+        case S7TVLogCategoryCache:           return self.logCache;
+        case S7TVLogCategoryPrefetch:        return self.logPrefetch;
+        case S7TVLogCategoryAPI:             return self.logAPI;
+        case S7TVLogCategoryIRCChannel:      return self.logIRCChannel;
+        case S7TVLogCategoryIRCInjection:    return self.logIRCInjection;
+        case S7TVLogCategoryUIPicker:        return self.logUIPicker;
+        case S7TVLogCategoryFavorites:       return self.logFavorites;
+        case S7TVLogCategoryResize:          return self.logResize;
+        case S7TVLogCategoryOrientation:     return self.logOrientation;
+        case S7TVLogCategoryImageConversion: return self.logImageConversion;
+        case S7TVLogCategoryDump:            return self.logDump;
+    }
+    return NO;
+}
+
+// ============================================================
 // MARK: - Logging
 // ============================================================
 
@@ -2644,6 +2827,14 @@ referenceSizeForHeaderInSection:(NSInteger)section {
     va_start(args, format);
     NSString *msg = [[NSString alloc] initWithFormat:format arguments:args];
     va_end(args);
+
+    // Interrupteur global : si OFF, rien n'est enregistré (buffer, disque, NSLog).
+    if (!self.logsEnabled) return;
+
+    // Classification + filtre par catégorie : si la catégorie est désactivée,
+    // on ignore complètement la ligne (elle n'est même pas écrite sur disque).
+    S7TVLogCategory cat = s7tv_categoryForMessage(msg);
+    if (![self s7tv_isCategoryEnabled:cat]) return;
 
     NSDateFormatter *fmt = [[NSDateFormatter alloc] init];
     fmt.dateFormat = @"HH:mm:ss.SSS";
@@ -2677,7 +2868,7 @@ referenceSizeForHeaderInSection:(NSInteger)section {
     }
     [self.logLock unlock];
 
-    // NSLog console uniquement si debugLogging activé
+    // NSLog console uniquement si debugLogging activé (mirroring Console.app)
     if (self.debugLogging) {
         NSLog(@"[TwitchSevenTV] %@", msg);
     }

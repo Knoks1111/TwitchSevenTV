@@ -1220,8 +1220,18 @@ forRowAtIndexPath:(NSIndexPath *)ip {
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tv { return 3; }
 
+// Section 0 = Options (bouton flottant)
+// Section 1 = Logs (activer logs, voir les logs, logs console, puis 14 catégories)
+// Section 2 = Danger (effacer les logs)
+#define S7TV_LOGS_ROW_ENABLE      0
+#define S7TV_LOGS_ROW_VIEW        1
+#define S7TV_LOGS_ROW_CONSOLE     2
+#define S7TV_LOGS_ROW_FIRST_CAT   3
+#define S7TV_LOGS_CAT_COUNT       14
+#define S7TV_LOGS_ROW_COUNT       (S7TV_LOGS_ROW_FIRST_CAT + S7TV_LOGS_CAT_COUNT)
+
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s {
-    switch (s) { case 0: return 3; case 1: return 1; case 2: return 1; default: return 0; }
+    switch (s) { case 0: return 1; case 1: return S7TV_LOGS_ROW_COUNT; case 2: return 1; default: return 0; }
 }
 
 - (CGFloat)tableView:(UITableView *)tv heightForHeaderInSection:(NSInteger)s {
@@ -1251,65 +1261,113 @@ forRowAtIndexPath:(NSIndexPath *)ip {
     SevenTVManager *mgr = [SevenTVManager sharedManager];
 
     if (ip.section == 0) {
-        switch (ip.row) {
-            case 0: return S7TVSwitchCell(@"Logs console (Console.app)",
+        // Section Options : uniquement le bouton flottant
+        return S7TVSwitchCell(@"Bouton flottant 7TV",
+                    @"circle.grid.2x1.fill",
+                    [UIColor colorWithWhite:0.75 alpha:1.0],
+                    mgr.showFloatingButton,
+                    self, @selector(toggleFloatingButton:));
+    }
+
+    if (ip.section == 1) {
+        NSInteger row = ip.row;
+
+        // --- Activer les logs (interrupteur global) ---
+        if (row == S7TV_LOGS_ROW_ENABLE) {
+            return S7TVSwitchCell(@"Activer les logs",
+                        @"bolt.fill",
+                        [UIColor colorWithWhite:0.75 alpha:1.0],
+                        mgr.logsEnabled,
+                        self, @selector(toggleLogsEnabled:));
+        }
+
+        // --- Voir les logs (toujours accessible, même si logsEnabled == NO) ---
+        if (row == S7TV_LOGS_ROW_VIEW) {
+            UITableViewCell *cell = [[UITableViewCell alloc]
+                initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
+            cell.accessoryType   = UITableViewCellAccessoryDisclosureIndicator;
+            cell.backgroundColor = S7TVCellBg();
+            cell.selectedBackgroundView = [[UIView alloc] init];
+            cell.selectedBackgroundView.backgroundColor =
+                [UIColor colorWithWhite:1.0 alpha:0.06];
+
+            UIImageView *icon = S7TVIcon(@"doc.text.magnifyingglass",
+                                          [UIColor colorWithWhite:0.75 alpha:1.0]);
+            [cell.contentView addSubview:icon];
+
+            UILabel *nameLbl = [[UILabel alloc] init];
+            nameLbl.text = @"Voir les logs";
+            nameLbl.font = [UIFont systemFontOfSize:17 weight:UIFontWeightRegular];
+            nameLbl.textColor = [UIColor whiteColor];
+            nameLbl.numberOfLines = 1;
+            nameLbl.translatesAutoresizingMaskIntoConstraints = NO;
+            [cell.contentView addSubview:nameLbl];
+
+            NSUInteger n = [mgr allLogs].count;
+            UILabel *badge = [[UILabel alloc] init];
+            badge.text = [NSString stringWithFormat:@"%lu", (unsigned long)n];
+            badge.font = [UIFont monospacedDigitSystemFontOfSize:13 weight:UIFontWeightRegular];
+            badge.textColor = S7TVGray();
+            badge.translatesAutoresizingMaskIntoConstraints = NO;
+            [cell.contentView addSubview:badge];
+
+            [NSLayoutConstraint activateConstraints:@[
+                [icon.leadingAnchor    constraintEqualToAnchor:cell.contentView.leadingAnchor constant:16],
+                [icon.centerYAnchor    constraintEqualToAnchor:cell.contentView.centerYAnchor],
+                [nameLbl.leadingAnchor  constraintEqualToAnchor:icon.trailingAnchor constant:14],
+                [nameLbl.topAnchor      constraintEqualToAnchor:cell.contentView.topAnchor constant:10],
+                [nameLbl.bottomAnchor   constraintEqualToAnchor:cell.contentView.bottomAnchor constant:-10],
+                [nameLbl.trailingAnchor constraintLessThanOrEqualToAnchor:badge.leadingAnchor constant:-8],
+                [badge.trailingAnchor   constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-8],
+                [badge.centerYAnchor    constraintEqualToAnchor:cell.contentView.centerYAnchor],
+            ]];
+            return cell;
+        }
+
+        // --- Logs console (Console.app) — grisé si logsEnabled == NO ---
+        if (row == S7TV_LOGS_ROW_CONSOLE) {
+            UITableViewCell *cell = S7TVSwitchCell(@"Logs console (Console.app)",
                         @"terminal.fill",
                         [UIColor colorWithWhite:0.75 alpha:1.0],
                         mgr.debugLogging,
                         self, @selector(toggleDebug:));
-            case 1: return S7TVSwitchCell(@"Tap logger",
-                        @"hand.tap.fill",
-                        [UIColor colorWithWhite:0.75 alpha:1.0],
-                        mgr.tapLogging,
-                        self, @selector(toggleTapLog:));
-            case 2: return S7TVSwitchCell(@"Bouton flottant 7TV",
-                        @"circle.grid.2x1.fill",
-                        [UIColor colorWithWhite:0.75 alpha:1.0],
-                        mgr.showFloatingButton,
-                        self, @selector(toggleFloatingButton:));
+            [self s7tv_applyEnabledState:cell];
+            return cell;
         }
-    }
 
-    if (ip.section == 1) {
-        UITableViewCell *cell = [[UITableViewCell alloc]
-            initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
-        cell.accessoryType   = UITableViewCellAccessoryDisclosureIndicator;
-        cell.backgroundColor = S7TVCellBg();
-        cell.selectedBackgroundView = [[UIView alloc] init];
-        cell.selectedBackgroundView.backgroundColor =
-            [UIColor colorWithWhite:1.0 alpha:0.06];
+        // --- Catégories de logs ---
+        NSInteger catIdx = row - S7TV_LOGS_ROW_FIRST_CAT;
+        NSArray<NSString *> *titles = @[
+            @"Erreurs / Avertissements", @"Tap Logger", @"Swizzle / Boot",
+            @"Cache / Réseau", @"Prefetch", @"API Emotes", @"IRC / Channel",
+            @"IRC Injection", @"UI / Picker", @"Favoris", @"Resize / CoreText",
+            @"Orientation Lock", @"Conversion Image", @"Dump",
+        ];
+        NSArray<NSString *> *icons = @[
+            @"exclamationmark.triangle.fill", @"hand.tap.fill", @"bolt.horizontal.circle.fill",
+            @"network", @"arrow.down.circle.fill", @"globe", @"antenna.radiowaves.left.and.right",
+            @"syringe.fill", @"paintbrush.fill", @"star.fill", @"arrow.up.left.and.arrow.down.right",
+            @"lock.rotation", @"photo.fill", @"trash.fill",
+        ];
+        NSArray<NSNumber *> *values = @[
+            @(mgr.logErrors), @(mgr.logTap), @(mgr.logSwizzle), @(mgr.logCache),
+            @(mgr.logPrefetch), @(mgr.logAPI), @(mgr.logIRCChannel), @(mgr.logIRCInjection),
+            @(mgr.logUIPicker), @(mgr.logFavorites), @(mgr.logResize), @(mgr.logOrientation),
+            @(mgr.logImageConversion), @(mgr.logDump),
+        ];
+        NSArray *selectors = @[
+            @"toggleLogErrors:", @"toggleLogTap:", @"toggleLogSwizzle:", @"toggleLogCache:",
+            @"toggleLogPrefetch:", @"toggleLogAPI:", @"toggleLogIRCChannel:", @"toggleLogIRCInjection:",
+            @"toggleLogUIPicker:", @"toggleLogFavorites:", @"toggleLogResize:", @"toggleLogOrientation:",
+            @"toggleLogImageConversion:", @"toggleLogDump:",
+        ];
 
-        UIImageView *icon = S7TVIcon(@"doc.text.magnifyingglass",
-                                      [UIColor colorWithWhite:0.75 alpha:1.0]);
-        [cell.contentView addSubview:icon];
-
-        UILabel *nameLbl = [[UILabel alloc] init];
-        nameLbl.text = @"Voir les logs";
-        nameLbl.font = [UIFont systemFontOfSize:17 weight:UIFontWeightRegular];
-        nameLbl.textColor = [UIColor whiteColor];
-        nameLbl.numberOfLines = 1;
-        nameLbl.translatesAutoresizingMaskIntoConstraints = NO;
-        [cell.contentView addSubview:nameLbl];
-
-        NSUInteger n = [mgr allLogs].count;
-        UILabel *badge = [[UILabel alloc] init];
-        badge.text = [NSString stringWithFormat:@"%lu", (unsigned long)n];
-        badge.font = [UIFont monospacedDigitSystemFontOfSize:13 weight:UIFontWeightRegular];
-        badge.textColor = S7TVGray();
-        badge.translatesAutoresizingMaskIntoConstraints = NO;
-        [cell.contentView addSubview:badge];
-
-        [NSLayoutConstraint activateConstraints:@[
-            [icon.leadingAnchor    constraintEqualToAnchor:cell.contentView.leadingAnchor constant:16],
-            [icon.centerYAnchor    constraintEqualToAnchor:cell.contentView.centerYAnchor],
-            [nameLbl.leadingAnchor  constraintEqualToAnchor:icon.trailingAnchor constant:14],
-            // CRITIQUE : top+bottom pour que nameLbl soit visible
-            [nameLbl.topAnchor      constraintEqualToAnchor:cell.contentView.topAnchor constant:10],
-            [nameLbl.bottomAnchor   constraintEqualToAnchor:cell.contentView.bottomAnchor constant:-10],
-            [nameLbl.trailingAnchor constraintLessThanOrEqualToAnchor:badge.leadingAnchor constant:-8],
-            [badge.trailingAnchor   constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-8],
-            [badge.centerYAnchor    constraintEqualToAnchor:cell.contentView.centerYAnchor],
-        ]];
+        UITableViewCell *cell = S7TVSwitchCell(titles[catIdx],
+                    icons[catIdx],
+                    [UIColor colorWithWhite:0.75 alpha:1.0],
+                    values[catIdx].boolValue,
+                    self, NSSelectorFromString(selectors[catIdx]));
+        [self s7tv_applyEnabledState:cell];
         return cell;
     }
 
@@ -1346,7 +1404,7 @@ forRowAtIndexPath:(NSIndexPath *)ip {
 - (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
     [tv deselectRowAtIndexPath:ip animated:YES];
 
-    if (ip.section == 1 && ip.row == 0) {
+    if (ip.section == 1 && ip.row == S7TV_LOGS_ROW_VIEW) {
         [self.navigationController
             pushViewController:[[SevenTVLogsController alloc] init] animated:YES];
         return;
@@ -1368,8 +1426,42 @@ forRowAtIndexPath:(NSIndexPath *)ip {
     }
 }
 
-- (void)toggleDebug:(UISwitch *)sw        { [SevenTVManager sharedManager].debugLogging    = sw.isOn; }
-- (void)toggleTapLog:(UISwitch *)sw       { [SevenTVManager sharedManager].tapLogging       = sw.isOn; }
-- (void)toggleFloatingButton:(UISwitch *)sw { [SevenTVManager sharedManager].showFloatingButton = sw.isOn; }
+// Grise visuellement une cellule de catégorie/console quand logsEnabled == NO,
+// sans jamais modifier la valeur stockée dans NSUserDefaults.
+- (void)s7tv_applyEnabledState:(UITableViewCell *)cell {
+    BOOL enabled = [SevenTVManager sharedManager].logsEnabled;
+    cell.userInteractionEnabled = enabled;
+    cell.contentView.alpha = enabled ? 1.0 : 0.4;
+    for (UIView *v in cell.contentView.subviews) {
+        if ([v isKindOfClass:[UISwitch class]]) {
+            ((UISwitch *)v).enabled = enabled;
+            break;
+        }
+    }
+}
+
+- (void)toggleLogsEnabled:(UISwitch *)sw {
+    [SevenTVManager sharedManager].logsEnabled = sw.isOn;
+    // Reload pour griser/dégriser les autres lignes de la section Logs
+    [self.tableView reloadSections:[NSIndexSet indexSetWithIndex:1]
+                   withRowAnimation:UITableViewRowAnimationNone];
+}
+- (void)toggleDebug:(UISwitch *)sw                  { [SevenTVManager sharedManager].debugLogging        = sw.isOn; }
+- (void)toggleFloatingButton:(UISwitch *)sw         { [SevenTVManager sharedManager].showFloatingButton  = sw.isOn; }
+
+- (void)toggleLogErrors:(UISwitch *)sw           { [SevenTVManager sharedManager].logErrors           = sw.isOn; }
+- (void)toggleLogTap:(UISwitch *)sw              { [SevenTVManager sharedManager].logTap              = sw.isOn; }
+- (void)toggleLogSwizzle:(UISwitch *)sw          { [SevenTVManager sharedManager].logSwizzle          = sw.isOn; }
+- (void)toggleLogCache:(UISwitch *)sw            { [SevenTVManager sharedManager].logCache            = sw.isOn; }
+- (void)toggleLogPrefetch:(UISwitch *)sw         { [SevenTVManager sharedManager].logPrefetch         = sw.isOn; }
+- (void)toggleLogAPI:(UISwitch *)sw              { [SevenTVManager sharedManager].logAPI              = sw.isOn; }
+- (void)toggleLogIRCChannel:(UISwitch *)sw       { [SevenTVManager sharedManager].logIRCChannel       = sw.isOn; }
+- (void)toggleLogIRCInjection:(UISwitch *)sw     { [SevenTVManager sharedManager].logIRCInjection     = sw.isOn; }
+- (void)toggleLogUIPicker:(UISwitch *)sw         { [SevenTVManager sharedManager].logUIPicker         = sw.isOn; }
+- (void)toggleLogFavorites:(UISwitch *)sw        { [SevenTVManager sharedManager].logFavorites        = sw.isOn; }
+- (void)toggleLogResize:(UISwitch *)sw           { [SevenTVManager sharedManager].logResize           = sw.isOn; }
+- (void)toggleLogOrientation:(UISwitch *)sw      { [SevenTVManager sharedManager].logOrientation      = sw.isOn; }
+- (void)toggleLogImageConversion:(UISwitch *)sw  { [SevenTVManager sharedManager].logImageConversion  = sw.isOn; }
+- (void)toggleLogDump:(UISwitch *)sw             { [SevenTVManager sharedManager].logDump             = sw.isOn; }
 
 @end
