@@ -1771,31 +1771,29 @@ static void s7tv_hook_displayLayer(void) {
             if ([selfObj respondsToSelector:startSel]) {
                 ((void(*)(id,SEL))objc_msgSend)(selfObj, startSel);
             }
-            // Resize du superlayer (ImageAttachmentLayer) si pas encore fait.
-            // On utilise selfObj.frame (AnimatedImageAttachmentLayer inner) pour
-            // le ratio — Twitch y stocke les vraies dimensions de l'image source
-            // ({24,18}, {18,18}, etc.) alors que outer.frame est déjà écrasé
-            // à {30,30} carré par CoreText via attachmentBoundsForTextContainer:.
+            // Resize du superlayer (ImageAttachmentLayer).
+            // Ratio depuis selfObj.frame (inner) = vraies dimensions image Twitch.
+            // Garde : comparaison largeur/hauteur courante vs cible — pas de
+            // seuil <= 22pt qui raterait les frames déjà modifiés par BOUNDS.
             CALayer *outer = [(CALayer *)selfObj superlayer];
             if (outer) {
                 CGRect outerFrame = outer.frame;
-                CGFloat oh = outerFrame.size.height;
-                if (oh > 0 && oh <= 22.0) {
+                CGRect innerFrame = [(CALayer *)selfObj frame];
+                if (innerFrame.size.height > 0 && innerFrame.size.width > 0 && outerFrame.size.height > 0) {
                     CGFloat targetSize = [[SevenTVManager sharedManager] targetEmoteSize];
-                    // Ratio depuis le inner layer (vraies proportions image)
-                    CGRect innerFrame = [(CALayer *)selfObj frame];
-                    CGFloat ratio = (innerFrame.size.height > 0 && innerFrame.size.width > 0)
-                        ? innerFrame.size.width / innerFrame.size.height
-                        : 1.0;
+                    CGFloat ratio = innerFrame.size.width / innerFrame.size.height;
                     CGFloat newW = targetSize * ratio;
-                    CGRect corrected = CGRectMake(
-                        outerFrame.origin.x,
-                        outerFrame.origin.y + (oh - targetSize) / 2.0,
-                        newW, targetSize);
-                    [CATransaction begin];
-                    [CATransaction setDisableActions:YES];
-                    outer.frame = corrected;
-                    [CATransaction commit];
+                    // Skip si déjà à la bonne taille (±1pt de tolérance)
+                    if (fabs(outer.frame.size.width - newW) > 1.0 || fabs(outer.frame.size.height - targetSize) > 1.0) {
+                        CGRect corrected = CGRectMake(
+                            outerFrame.origin.x,
+                            outerFrame.origin.y + (outerFrame.size.height - targetSize) / 2.0,
+                            newW, targetSize);
+                        [CATransaction begin];
+                        [CATransaction setDisableActions:YES];
+                        outer.frame = corrected;
+                        [CATransaction commit];
+                    }
                 }
             }
         } @catch(...) {}
