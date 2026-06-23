@@ -1772,34 +1772,36 @@ static void s7tv_hook_displayLayer(void) {
                 ((void(*)(id,SEL))objc_msgSend)(selfObj, startSel);
             }
             // Resize du superlayer (ImageAttachmentLayer).
-            // Source du ratio : le NSTextAttachment tagué dans BOUNDS.
-            // Le delegate du CALayer est typiquement l'objet qui a créé le layer,
-            // ici le NSTextAttachment → on y lit kS7TVEmoteRatioKey.
+            // Source du ratio : UNIQUEMENT le NSTextAttachment tagué dans BOUNDS.
+            // On n'utilise PLUS innerFrame comme fallback — inner est resizé par
+            // Twitch pour remplir outer, créant une boucle : inner={40,30} →
+            // ratio=1.0 → outer={30,30} carré. Pas de fallback = pas de boucle.
             CALayer *outer = [(CALayer *)selfObj superlayer];
             if (outer) {
                 CGRect outerFrame = outer.frame;
                 if (outerFrame.size.height > 0) {
-                    CGFloat targetSize = [[SevenTVManager sharedManager] targetEmoteSize];
-
-                    // Priorité 1 : ratio depuis NSTextAttachment (delegate ou delegate du outer)
-                    CGFloat ratio = 0;
+                    // Lire le ratio depuis le NSTextAttachment tagué dans BOUNDS
                     id delegate1 = [(CALayer *)selfObj delegate];
                     id delegate2 = [outer delegate];
                     NSNumber *ratioNum = objc_getAssociatedObject(delegate1, &kS7TVEmoteRatioKey)
                                      ?: objc_getAssociatedObject(delegate2, &kS7TVEmoteRatioKey);
-                    if (ratioNum) {
-                        ratio = ratioNum.floatValue;
+
+                    // Log diagnostic : classe des delegates (10 fois max)
+                    static NSInteger s_delegateLog = 0;
+                    if (s_delegateLog < 10) {
+                        s_delegateLog++;
+                        [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
+                            @"[DELEGATE] #%ld del1=%@ del2=%@ ratioNum=%@",
+                            (long)s_delegateLog,
+                            delegate1 ? NSStringFromClass([delegate1 class]) : @"nil",
+                            delegate2 ? NSStringFromClass([delegate2 class]) : @"nil",
+                            ratioNum ?: @"nil"]];
                     }
 
-                    // Priorité 2 : fallback sur innerFrame si ratio pas encore tagué
-                    if (ratio <= 0) {
-                        CGRect innerFrame = [(CALayer *)selfObj frame];
-                        if (innerFrame.size.height > 0 && innerFrame.size.width > 0)
-                            ratio = innerFrame.size.width / innerFrame.size.height;
-                    }
+                    if (!ratioNum) return; // ratio non disponible → ne pas resizer
 
-                    if (ratio <= 0) ratio = 1.0;
-
+                    CGFloat targetSize = [[SevenTVManager sharedManager] targetEmoteSize];
+                    CGFloat ratio = ratioNum.floatValue;
                     CGFloat newW = targetSize * ratio;
                     // Skip si déjà à la bonne taille (±1pt)
                     if (fabs(outer.frame.size.width - newW) > 1.0 || fabs(outer.frame.size.height - targetSize) > 1.0) {
