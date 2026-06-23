@@ -2116,56 +2116,7 @@ static void s7tv_debug_dump_layout_system(void) {
         s7tv_dbg_hookAddAttribute();
         s7tv_hook_displayLayer(); // installé tôt → actif dès le premier message
 
-        // ── Hook setFrame: sur Twitch.ImageAttachmentLayer ────────────────
-        // Twitch ignore attachmentBoundsForTextContainer: pour positionner ses
-        // layers — il utilise sa propre logique (taille naturelle de l'image).
-        // En hookant setFrame:, on intercepte synchronement au moment exact où
-        // Twitch fixe le frame du layer → resize immédiat, zéro délai.
-        Class ialClass = NSClassFromString(@"Twitch.ImageAttachmentLayer");
-        if (ialClass) {
-            SEL sfSel = @selector(setFrame:);
-            Method sfM = class_getInstanceMethod(ialClass, sfSel);
-            if (sfM) {
-                IMP sfOrig = method_getImplementation(sfM);
-                method_setImplementation(sfM, imp_implementationWithBlock(^void(CALayer *self_, CGRect newFrame) {
-                    // Appel original d'abord
-                    ((void(*)(id,SEL,CGRect))sfOrig)(self_, sfSel, newFrame);
-
-                    // Twitch peut rappeler setFrame: juste après (image load async).
-                    // On schedule la correction pour APRÈS que Twitch ait fini
-                    // tous ses appels synchrones dans ce runloop.
-                    CGFloat h = newFrame.size.height;
-                    if (h <= 0 || h > 22.0) return;
-
-                    CGFloat targetSize = [[SevenTVManager sharedManager] targetEmoteSize];
-                    CGFloat ratio = (newFrame.size.width > 0) ? newFrame.size.width / h : 1.0;
-                    CGFloat newW = targetSize * ratio;
-                    CGRect corrected = CGRectMake(newFrame.origin.x,
-                                                  newFrame.origin.y + (h - targetSize) / 2.0,
-                                                  newW, targetSize);
-
-                    __weak CALayer *weakLayer = self_;
-                    dispatch_async(dispatch_get_main_queue(), ^{
-                        CALayer *l = weakLayer;
-                        if (!l) return;
-                        // Si Twitch a réécrasé notre frame (encore <= 22pt), on corrige
-                        if (l.frame.size.height <= 22.0) {
-                            [CATransaction begin];
-                            [CATransaction setDisableActions:YES];
-                            ((void(*)(id,SEL,CGRect))sfOrig)(l, sfSel, corrected);
-                            [CATransaction commit];
-                        }
-                    });
-                }));
-                [[SevenTVManager sharedManager] log:@"✅ Hook setFrame: sur ImageAttachmentLayer OK (resize async-safe)"];
-            } else {
-                [[SevenTVManager sharedManager] log:@"⚠️ setFrame: introuvable sur ImageAttachmentLayer"];
-            }
-        } else {
-            [[SevenTVManager sharedManager] log:@"⚠️ Twitch.ImageAttachmentLayer introuvable (hook setFrame: ignoré)"];
-        }
-
-        [[SevenTVManager sharedManager] log:@"✅ Hooks resize layout (bounds + attachmentSize + addAttribute + setFrame) actifs"];
+        [[SevenTVManager sharedManager] log:@"✅ Hooks resize layout (bounds + attachmentSize + addAttribute + displayLayer) actifs"];
     });
 }
 
@@ -2249,9 +2200,8 @@ static void TwitchSevenTVInit(void) {
                 // Seulement pour ChatMessageTableViewCell
                 if (![NSStringFromClass([cell class]) isEqualToString:@"Twitch.ChatMessageTableViewCell"]) return;
 
-                // setFrame: hook gère le resize synchrone — dispatch_async
-                // sert juste à laisser le runloop finir le layout courant avant
-                // le BFS, sans délai visible.
+                // dispatch_async : laisser le runloop finir le layout courant
+                // avant le BFS. displayLayer: hook gère le resize des layers.
                 __weak UITableViewCell *weakCell = cell;
                 __weak UITableView     *weakTV   = tableView;
                 dispatch_async(dispatch_get_main_queue(), ^{
@@ -2522,7 +2472,7 @@ static void TwitchSevenTVInit(void) {
             });
 
             method_setImplementation(origMethod, newIMP);
-            [[SevenTVManager sharedManager] log:@"✅ willDisplayCell hooké (dispatch_async, setFrame: hook actif)"];
+            [[SevenTVManager sharedManager] log:@"✅ willDisplayCell hooké (dispatch_async)"];
 
             // Observer : quand le slider change la taille, on force un reloadData
             // sur toutes les ChatTranscriptView visibles.
