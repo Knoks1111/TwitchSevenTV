@@ -1771,34 +1771,37 @@ static void s7tv_hook_displayLayer(void) {
             if ([selfObj respondsToSelector:startSel]) {
                 ((void(*)(id,SEL))objc_msgSend)(selfObj, startSel);
             }
-            // LOG DIAGNOSTIC : vérifier inner/outer frames au moment de displayLayer:
-            CALayer *outerDbg = [(CALayer *)selfObj superlayer];
-            static NSInteger s_contentLog = 0;
-            if (s_contentLog < 10 && outerDbg) {
-                s_contentLog++;
-                CGRect innerDbg = [(CALayer *)selfObj frame];
-                CGRect outerDbgF = outerDbg.frame;
-                [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
-                    @"[DIAG-RATIO] #%ld inner={%.0f,%.0f} outer={%.0f,%.0f} outerClass=%@",
-                    (long)s_contentLog,
-                    innerDbg.size.width, innerDbg.size.height,
-                    outerDbgF.size.width, outerDbgF.size.height,
-                    NSStringFromClass([outerDbg class])]];
-            }
-
             // Resize du superlayer (ImageAttachmentLayer).
-            // Ratio depuis selfObj.frame (inner) = vraies dimensions image Twitch.
-            // Garde : comparaison largeur/hauteur courante vs cible — pas de
-            // seuil <= 22pt qui raterait les frames déjà modifiés par BOUNDS.
+            // Source du ratio : le NSTextAttachment tagué dans BOUNDS.
+            // Le delegate du CALayer est typiquement l'objet qui a créé le layer,
+            // ici le NSTextAttachment → on y lit kS7TVEmoteRatioKey.
             CALayer *outer = [(CALayer *)selfObj superlayer];
             if (outer) {
                 CGRect outerFrame = outer.frame;
-                CGRect innerFrame = [(CALayer *)selfObj frame];
-                if (innerFrame.size.height > 0 && innerFrame.size.width > 0 && outerFrame.size.height > 0) {
+                if (outerFrame.size.height > 0) {
                     CGFloat targetSize = [[SevenTVManager sharedManager] targetEmoteSize];
-                    CGFloat ratio = innerFrame.size.width / innerFrame.size.height;
+
+                    // Priorité 1 : ratio depuis NSTextAttachment (delegate ou delegate du outer)
+                    CGFloat ratio = 0;
+                    id delegate1 = [(CALayer *)selfObj delegate];
+                    id delegate2 = [outer delegate];
+                    NSNumber *ratioNum = objc_getAssociatedObject(delegate1, &kS7TVEmoteRatioKey)
+                                     ?: objc_getAssociatedObject(delegate2, &kS7TVEmoteRatioKey);
+                    if (ratioNum) {
+                        ratio = ratioNum.floatValue;
+                    }
+
+                    // Priorité 2 : fallback sur innerFrame si ratio pas encore tagué
+                    if (ratio <= 0) {
+                        CGRect innerFrame = [(CALayer *)selfObj frame];
+                        if (innerFrame.size.height > 0 && innerFrame.size.width > 0)
+                            ratio = innerFrame.size.width / innerFrame.size.height;
+                    }
+
+                    if (ratio <= 0) ratio = 1.0;
+
                     CGFloat newW = targetSize * ratio;
-                    // Skip si déjà à la bonne taille (±1pt de tolérance)
+                    // Skip si déjà à la bonne taille (±1pt)
                     if (fabs(outer.frame.size.width - newW) > 1.0 || fabs(outer.frame.size.height - targetSize) > 1.0) {
                         CGRect corrected = CGRectMake(
                             outerFrame.origin.x,
@@ -1910,6 +1913,8 @@ static void s7tv_dbg_hookAttachmentBounds(void) {
             CGFloat targetSize = [[SevenTVManager sharedManager] targetEmoteSize];
             CGFloat ratio = (r.size.width > 0) ? r.size.width / r.size.height : 1.0;
             CGRect newRect = CGRectMake(0, -6.0, targetSize * ratio, targetSize);
+            // Stocker le ratio sur le NSTextAttachment → récupérable depuis displayLayer:
+            objc_setAssociatedObject(self_, &kS7TVEmoteRatioKey, @(ratio), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             s_resized++;
             if (s_resized <= 30) {
                 [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
