@@ -1753,29 +1753,7 @@ static void s7tv_hook_displayLayer(void) {
         return;
     }
 
-    // ── Hook setBounds: ───────────────────────────────────────────────────
-    // Quand Twitch fixe les bounds naturels de l'image sur AnimatedImageAttachmentLayer
-    // (ex: {0,0,24,18}), on tague le layer avec le ratio original.
-    // C'est la source de vérité — avant toute modification par notre code ou Twitch.
-    SEL setBoundsSel = @selector(setBounds:);
-    Method sbM = class_getInstanceMethod(animLayerCls, setBoundsSel);
-    if (sbM) {
-        IMP sbOrig = method_getImplementation(sbM);
-        method_setImplementation(sbM, imp_implementationWithBlock(^void(CALayer *self_, CGRect bounds) {
-            ((void(*)(id,SEL,CGRect))sbOrig)(self_, setBoundsSel, bounds);
-            // Tagger avec le ratio si les bounds ont une taille valide
-            // et ne sont pas encore taguées (on garde le ratio original)
-            if (bounds.size.width > 0 && bounds.size.height > 0) {
-                NSNumber *existing = objc_getAssociatedObject(self_, &kS7TVEmoteRatioKey);
-                if (!existing) {
-                    CGFloat ratio = bounds.size.width / bounds.size.height;
-                    objc_setAssociatedObject(self_, &kS7TVEmoteRatioKey, @(ratio),
-                                            OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                }
-            }
-        }));
-        [[SevenTVManager sharedManager] log:@"✅ Hook setBounds: sur AnimatedImageAttachmentLayer OK (ratio tagging)"];
-    }
+
     if (!animLayerCls) {
         [[SevenTVManager sharedManager] log:@"⚠️ [displayLayer hook] AnimatedImageAttachmentLayer introuvable à t=3s — sera installé lazily"];
         return;
@@ -1796,19 +1774,21 @@ static void s7tv_hook_displayLayer(void) {
                 ((void(*)(id,SEL))objc_msgSend)(selfObj, startSel);
             }
             // Resize du superlayer (ImageAttachmentLayer).
-            // Ratio depuis le tag kS7TVEmoteRatioKey posé sur selfObj dans setBounds:.
-            // selfObj = AnimatedImageAttachmentLayer → même objet → lecture directe,
-            // zéro dépendance sur delegate, innerFrame ou outerFrame.
+            // Ratio depuis selfObj.bounds au moment exact où displayLayer: fire.
+            // À ce moment l'image est prête → Twitch a fixé les vraies bounds
+            // de l'AnimatedImageAttachmentLayer ({24,18}, {22,22}, etc.).
+            // Pas de tag, pas de feedback loop : après notre resize de outer,
+            // inner prend les mêmes proportions → skip condition stable.
             CALayer *outer = [(CALayer *)selfObj superlayer];
             if (outer) {
-                NSNumber *ratioNum = objc_getAssociatedObject(selfObj, &kS7TVEmoteRatioKey);
-                if (!ratioNum) return; // setBounds: pas encore appelé avec taille valide
+                CGRect selfBounds = [(CALayer *)selfObj bounds];
+                if (selfBounds.size.height <= 0 || selfBounds.size.width <= 0) return;
 
                 CGFloat targetSize = [[SevenTVManager sharedManager] targetEmoteSize];
-                CGFloat ratio = ratioNum.floatValue;
+                CGFloat ratio = selfBounds.size.width / selfBounds.size.height;
                 CGFloat newW = targetSize * ratio;
                 CGRect outerFrame = outer.frame;
-                // Skip si déjà à la bonne taille (±1pt)
+                // Skip si déjà à la bonne taille (±1pt) → évite la boucle
                 if (fabs(outerFrame.size.width - newW) > 1.0 || fabs(outerFrame.size.height - targetSize) > 1.0) {
                     CGRect corrected = CGRectMake(
                         outerFrame.origin.x,
@@ -2480,14 +2460,15 @@ static void TwitchSevenTVInit(void) {
                                 f.origin.x, f.origin.y]];
                         }
 
-                        // Ratio depuis le tag kS7TVEmoteRatioKey posé sur le sublayer
-                        // 'Animated' (AnimatedImageAttachmentLayer) par setBounds: hook.
-                        // Source fiable : ratio original AVANT tout resize.
+                        // Ratio depuis sub.bounds (AnimatedImageAttachmentLayer).
+                        // bounds = coordonnées propres du layer, non affectées par
+                        // le resize de outer → ratio original toujours fiable.
                         CGFloat ratio = 1.0;
                         for (CALayer *sub in caLayer.sublayers) {
                             if ([NSStringFromClass(object_getClass(sub)) containsString:@"Animated"]) {
-                                NSNumber *ratioNum = objc_getAssociatedObject(sub, &kS7TVEmoteRatioKey);
-                                if (ratioNum) ratio = ratioNum.floatValue;
+                                CGRect subBounds = sub.bounds;
+                                if (subBounds.size.height > 0 && subBounds.size.width > 0)
+                                    ratio = subBounds.size.width / subBounds.size.height;
                                 break;
                             }
                         }
