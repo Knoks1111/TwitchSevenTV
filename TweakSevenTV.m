@@ -1773,29 +1773,23 @@ static void s7tv_hook_displayLayer(void) {
             if ([selfObj respondsToSelector:startSel]) {
                 ((void(*)(id,SEL))objc_msgSend)(selfObj, startSel);
             }
-            // LOG : classe du delegate de outer pour savoir si c'est NSTextAttachment
-            static NSInteger s_delLog = 0;
-            if (s_delLog < 10) {
-                s_delLog++;
-                id outerDel = [outer delegate];
-                id selfDel  = [(CALayer *)selfObj delegate];
-                [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
-                    @"[DEL] #%ld outerDel=%@ selfDel=%@ selfBounds={%.0f,%.0f}",
-                    (long)s_delLog,
-                    outerDel ? NSStringFromClass([outerDel class]) : @"nil",
-                    selfDel  ? NSStringFromClass([selfDel  class]) : @"nil",
-                    [(CALayer *)selfObj bounds].size.width,
-                    [(CALayer *)selfObj bounds].size.height]];
-            }
-
-            // Resize du superlayer (ImageAttachmentLayer).
-            // Ratio depuis selfObj.bounds au moment exact où displayLayer: fire.
-            // À ce moment l'image est prête → Twitch a fixé les vraies bounds
-            // de l'AnimatedImageAttachmentLayer ({24,18}, {22,22}, etc.).
-            // Pas de tag, pas de feedback loop : après notre resize de outer,
-            // inner prend les mêmes proportions → skip condition stable.
             CALayer *outer = [(CALayer *)selfObj superlayer];
             if (outer) {
+                // LOG : classe du delegate de outer pour savoir si c'est NSTextAttachment
+                static NSInteger s_delLog = 0;
+                if (s_delLog < 10) {
+                    s_delLog++;
+                    id outerDel = [outer delegate];
+                    id selfDel  = [(CALayer *)selfObj delegate];
+                    [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
+                        @"[DEL] #%ld outerDel=%@ selfDel=%@ selfBounds={%.0f,%.0f}",
+                        (long)s_delLog,
+                        outerDel ? NSStringFromClass([outerDel class]) : @"nil",
+                        selfDel  ? NSStringFromClass([selfDel  class]) : @"nil",
+                        [(CALayer *)selfObj bounds].size.width,
+                        [(CALayer *)selfObj bounds].size.height]];
+                }
+
                 CGRect selfBounds = [(CALayer *)selfObj bounds];
                 if (selfBounds.size.height <= 0 || selfBounds.size.width <= 0) return;
 
