@@ -1771,6 +1771,23 @@ static void s7tv_hook_displayLayer(void) {
             if ([selfObj respondsToSelector:startSel]) {
                 ((void(*)(id,SEL))objc_msgSend)(selfObj, startSel);
             }
+            // LOG DIAGNOSTIC : inspecter l'ivar 'content' de outer
+            // pour vérifier si c'est le NSTextAttachment avec les vraies dimensions
+            CALayer *outerDbg = [(CALayer *)selfObj superlayer];
+            static NSInteger s_contentLog = 0;
+            if (s_contentLog < 10 && outerDbg) {
+                s_contentLog++;
+                id content = s7tv_getObjectIvar(outerDbg, "content");
+                CGRect innerDbg = [(CALayer *)selfObj frame];
+                CGRect outerDbgF = outerDbg.frame;
+                [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
+                    @"[DIAG-RATIO] #%ld inner={%.0f,%.0f} outer={%.0f,%.0f} content=%@",
+                    (long)s_contentLog,
+                    innerDbg.size.width, innerDbg.size.height,
+                    outerDbgF.size.width, outerDbgF.size.height,
+                    content ? NSStringFromClass([content class]) : @"nil"]];
+            }
+
             // Resize du superlayer (ImageAttachmentLayer).
             // Ratio depuis selfObj.frame (inner) = vraies dimensions image Twitch.
             // Garde : comparaison largeur/hauteur courante vs cible — pas de
