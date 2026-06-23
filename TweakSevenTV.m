@@ -1771,15 +1771,22 @@ static void s7tv_hook_displayLayer(void) {
             if ([selfObj respondsToSelector:startSel]) {
                 ((void(*)(id,SEL))objc_msgSend)(selfObj, startSel);
             }
-            // Resize du superlayer (ImageAttachmentLayer) si pas encore fait
+            // Resize du superlayer (ImageAttachmentLayer) si pas encore fait.
+            // On utilise selfObj.frame (AnimatedImageAttachmentLayer inner) pour
+            // le ratio — Twitch y stocke les vraies dimensions de l'image source
+            // ({24,18}, {18,18}, etc.) alors que outer.frame est déjà écrasé
+            // à {30,30} carré par CoreText via attachmentBoundsForTextContainer:.
             CALayer *outer = [(CALayer *)selfObj superlayer];
             if (outer) {
                 CGRect outerFrame = outer.frame;
                 CGFloat oh = outerFrame.size.height;
                 if (oh > 0 && oh <= 22.0) {
                     CGFloat targetSize = [[SevenTVManager sharedManager] targetEmoteSize];
-                    CGFloat ratio = (outerFrame.size.width > 0)
-                        ? outerFrame.size.width / oh : 1.0;
+                    // Ratio depuis le inner layer (vraies proportions image)
+                    CGRect innerFrame = [(CALayer *)selfObj frame];
+                    CGFloat ratio = (innerFrame.size.height > 0 && innerFrame.size.width > 0)
+                        ? innerFrame.size.width / innerFrame.size.height
+                        : 1.0;
                     CGFloat newW = targetSize * ratio;
                     CGRect corrected = CGRectMake(
                         outerFrame.origin.x,
@@ -2449,9 +2456,19 @@ static void TwitchSevenTVInit(void) {
                                 f.origin.x, f.origin.y]];
                         }
 
-                        // Ratio depuis le frame ACTUEL du layer (= taille naturelle Twitch)
-                        // Même source que BOUNDS (r.size.width/r.size.height) → sync parfait.
-                        CGFloat ratio = (f.size.height > 0) ? f.size.width / f.size.height : 1.0;
+                        // Ratio depuis le sublayer 'Animated' (AnimatedImageAttachmentLayer)
+                        // qui contient les vraies dimensions image fixées par Twitch.
+                        // outer.frame est déjà {30,30} carré (écrasé par CoreText via BOUNDS)
+                        // donc on ne peut pas l'utiliser pour le ratio.
+                        CGFloat ratio = 1.0;
+                        for (CALayer *sub in caLayer.sublayers) {
+                            if ([NSStringFromClass(object_getClass(sub)) containsString:@"Animated"]) {
+                                CGRect innerF = sub.frame;
+                                if (innerF.size.height > 0 && innerF.size.width > 0)
+                                    ratio = innerF.size.width / innerF.size.height;
+                                break;
+                            }
+                        }
 
                         // Largeur cible = min(targetSize * ratio, targetSize * boundsRatio)
                         // On clamp à la largeur que CoreText a réservée (= ce que BOUNDS a retourné)
