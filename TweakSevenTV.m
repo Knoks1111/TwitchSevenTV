@@ -1775,41 +1775,29 @@ static void s7tv_hook_displayLayer(void) {
             }
             CALayer *outer = [(CALayer *)selfObj superlayer];
             if (outer) {
-                // Log delegate (10 fois) pour diagnostic
+                // LOG : classe du delegate de outer pour savoir si c'est NSTextAttachment
                 static NSInteger s_delLog = 0;
                 if (s_delLog < 10) {
                     s_delLog++;
-                    id od = [outer delegate];
-                    id sd = [(CALayer*)selfObj delegate];
-                    NSNumber *rn = objc_getAssociatedObject(od, &kS7TVEmoteRatioKey)
-                                ?: objc_getAssociatedObject(sd, &kS7TVEmoteRatioKey);
+                    id outerDel = [outer delegate];
+                    id selfDel  = [(CALayer *)selfObj delegate];
                     [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
-                        @"[DEL] #%ld outerDel=%@ selfDel=%@ tagRatio=%@ selfBounds={%.0f,%.0f}",
+                        @"[DEL] #%ld outerDel=%@ selfDel=%@ selfBounds={%.0f,%.0f}",
                         (long)s_delLog,
-                        od ? NSStringFromClass([od class]) : @"nil",
-                        sd ? NSStringFromClass([sd class]) : @"nil",
-                        rn ?: @"nil",
-                        [(CALayer*)selfObj bounds].size.width,
-                        [(CALayer*)selfObj bounds].size.height]];
+                        outerDel ? NSStringFromClass([outerDel class]) : @"nil",
+                        selfDel  ? NSStringFromClass([selfDel  class]) : @"nil",
+                        [(CALayer *)selfObj bounds].size.width,
+                        [(CALayer *)selfObj bounds].size.height]];
                 }
 
-                // Ratio : tag BOUNDS en priorité, selfObj.bounds en fallback
-                CGFloat ratio = 0;
-                id outerDel = [outer delegate];
-                id selfDel  = [(CALayer*)selfObj delegate];
-                NSNumber *ratioNum = objc_getAssociatedObject(outerDel, &kS7TVEmoteRatioKey)
-                                  ?: objc_getAssociatedObject(selfDel,  &kS7TVEmoteRatioKey);
-                if (ratioNum) ratio = ratioNum.floatValue;
-                if (ratio <= 0) {
-                    CGRect sb = [(CALayer*)selfObj bounds];
-                    if (sb.size.height > 0 && sb.size.width > 0)
-                        ratio = sb.size.width / sb.size.height;
-                }
-                if (ratio <= 0) ratio = 1.0;
+                CGRect selfBounds = [(CALayer *)selfObj bounds];
+                if (selfBounds.size.height <= 0 || selfBounds.size.width <= 0) return;
 
                 CGFloat targetSize = [[SevenTVManager sharedManager] targetEmoteSize];
+                CGFloat ratio = selfBounds.size.width / selfBounds.size.height;
                 CGFloat newW = targetSize * ratio;
                 CGRect outerFrame = outer.frame;
+                // Skip si déjà à la bonne taille (±1pt) → évite la boucle
                 if (fabs(outerFrame.size.width - newW) > 1.0 || fabs(outerFrame.size.height - targetSize) > 1.0) {
                     CGRect corrected = CGRectMake(
                         outerFrame.origin.x,
@@ -1918,19 +1906,16 @@ static void s7tv_dbg_hookAttachmentBounds(void) {
             }
 
             CGFloat targetSize = [[SevenTVManager sharedManager] targetEmoteSize];
-            // Ratio fixe 1.0 pour BOUNDS — garantit que CoreText réserve
-            // targetSize×targetSize pour chaque emote → anti-chevauchement stable.
-            // Le ratio réel (wide vs carré) est appliqué visuellement dans
-            // displayLayer: et willDisplayCell via orderedRatios/emoteRatios.
-            CGFloat ratio = 1.0;
+            CGFloat ratio = (r.size.width > 0) ? r.size.width / r.size.height : 1.0;
             CGRect newRect = CGRectMake(0, -6.0, targetSize * ratio, targetSize);
+            // Stocker le ratio sur le NSTextAttachment → récupérable depuis displayLayer:
             objc_setAssociatedObject(self_, &kS7TVEmoteRatioKey, @(ratio), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             s_resized++;
-            if (s_resized <= 10) {
+            if (s_resized <= 30) {
                 [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
-                    @"[BOUNDS] v3 resize #%lu targetSize=%.0f orig=%@ new=%@",
-                    (unsigned long)s_resized, targetSize,
-                    NSStringFromCGRect(r), NSStringFromCGRect(newRect)]];
+                    @"[BOUNDS] v3 resize #%lu origSize={%.0f,%.0f} ratio=%.2f orig=%@ new=%@",
+                    (unsigned long)s_resized, r.size.width, r.size.height,
+                    ratio, NSStringFromCGRect(r), NSStringFromCGRect(newRect)]];
             }
             return newRect;
         }
@@ -2462,26 +2447,82 @@ static void TwitchSevenTVInit(void) {
 
                     // ─────────────────────────────────────────────────────────────
 
-                    NSInteger emoteLayerIdx = 0;
                     [CATransaction begin];
                     [CATransaction setDisableActions:YES];
+                    // Index dans orderedRatios — incrémenté uniquement pour les layers
+                    // qui passent les filtres ci-dessous (donc qui correspondent à une
+                    // vraie emote affichée dans le message, dans l'ordre du texte).
+                    // orderedRatios est calculé plus haut depuis cellText → emoteForName:
+                    // → dimensions réelles de l'API 7TV. C'est la SEULE source fiable :
+                    // sub.bounds (AnimatedImageAttachmentLayer) ne reflète PAS le ratio
+                    // réel de l'image (logs : frame identique pour toutes les emotes,
+                    // peu importe leur forme native) — donc on ne s'en sert plus que
+                    // comme fallback si jamais l'index dépasse orderedRatios.
+                    NSInteger ratioIdx = 0;
                     for (CALayer *caLayer in emoteLayers) {
                         CGRect f = caLayer.frame;
-                        if (f.size.width <= 0 || f.size.height <= 0) { emoteLayerIdx++; continue; }
-                        if (f.origin.x < 60.0) { emoteLayerIdx++; continue; }
+                        if (f.size.width <= 0 || f.size.height <= 0) { continue; }
 
-                        // Ratio depuis orderedRatios (dimensions réelles API 7TV via cellText).
-                        // orderedRatios est calculé depuis cellText.componentsSeparatedByString:
-                        // en appelant emoteForName: → mêmes dimensions que l'API.
-                        CGFloat ratio = (emoteLayerIdx < (NSInteger)orderedRatios.count)
-                            ? orderedRatios[emoteLayerIdx].floatValue : 1.0;
-                        emoteLayerIdx++;
+                        // Badges Twitch : toujours à gauche de la ligne (x < 60pt),
+                        // avant le username. Les emotes sont après le username (x > 100pt).
+                        if (f.origin.x < 60.0) { continue; }
+
+                        // LOG DIAGNOSTIC : frame AVANT resize
+                        // → si f.size = 30x30, BOUNDS hook est respecté par Twitch (bon)
+                        // → si f.size = 18x18, Twitch ignore BOUNDS hook (problème)
+                        static NSInteger s_preLog = 0;
+                        if (s_preLog < 20) {
+                            s_preLog++;
+                            [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
+                                @"[RESIZE] pre #%ld frame AVANT={%.0f,%.0f} pos={%.0f,%.0f}",
+                                (long)s_preLog, f.size.width, f.size.height,
+                                f.origin.x, f.origin.y]];
+                        }
+
+                        // Ratio réel = orderedRatios[ratioIdx] (vraies dims API 7TV),
+                        // aligné par position dans le texte. Fallback sur sub.bounds
+                        // uniquement si l'index dépasse (sécurité, ne devrait pas arriver
+                        // si emoteLayers ne contient que des emotes 7TV après filtre badges).
+                        CGFloat ratio = 1.0;
+                        BOOL gotRatioFromOrdered = NO;
+                        if (ratioIdx < (NSInteger)orderedRatios.count) {
+                            ratio = orderedRatios[ratioIdx].floatValue;
+                            gotRatioFromOrdered = YES;
+                        } else {
+                            for (CALayer *sub in caLayer.sublayers) {
+                                if ([NSStringFromClass(object_getClass(sub)) containsString:@"Animated"]) {
+                                    CGRect subBounds = sub.bounds;
+                                    if (subBounds.size.height > 0 && subBounds.size.width > 0)
+                                        ratio = subBounds.size.width / subBounds.size.height;
+                                    break;
+                                }
+                            }
+                        }
+                        ratioIdx++;
+
+                        static NSInteger s_ratioLog = 0;
+                        if (s_ratioLog < 20) {
+                            s_ratioLog++;
+                            [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
+                                @"[RESIZE] ratio #%ld src=%@ ratio=%.3f",
+                                (long)s_ratioLog, gotRatioFromOrdered ? @"orderedRatios" : @"sub.bounds(fallback)",
+                                ratio]];
+                        }
 
                         CGFloat newWidth = targetSize * ratio;
+
                         caLayer.bounds = CGRectMake(0, 0, newWidth, targetSize);
                         caLayer.frame  = CGRectMake(f.origin.x,
                                                     f.origin.y + (f.size.height - targetSize) / 2.0,
                                                     newWidth, targetSize);
+
+                        static NSInteger s_postLog = 0;
+                        if (s_postLog < 20) {
+                            s_postLog++;
+                            [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
+                                @"[RESIZE] post #%ld frame APRÈS={%.0f,%.0f}",
+                                (long)s_postLog, newWidth, targetSize]];
+                        }
                     }
                     [CATransaction commit];
 
