@@ -1906,15 +1906,49 @@ static void s7tv_dbg_hookAttachmentBounds(void) {
             }
 
             CGFloat targetSize = [[SevenTVManager sharedManager] targetEmoteSize];
-            CGFloat ratio = (r.size.width > 0) ? r.size.width / r.size.height : 1.0;
+
+            // ── Vrai ratio 7TV ────────────────────────────────────────────
+            // r (le rect retourné par Twitch) est un PLACEHOLDER FIXE
+            // ({18,18} pour les emotes, {24,18} pour les badges) — il ne
+            // varie JAMAIS d'une emote à l'autre, donc r.width/r.height
+            // ne peut PAS donner le vrai ratio (c'est la cause du bug :
+            // toutes les emotes ressortaient avec le même ratio).
+            // La vraie source : SevenTVURLProtocol tague la NSData brute
+            // de l'emote avec son emoteID (kS7TVEmoteIDOnDataKey). Cette
+            // NSData est accessible via attachment.contents — on la lit
+            // directement ici pour retrouver le ratio réel dans
+            // mgr.emoteRatios (dimensions API 7TV), sans dépendre du
+            // décodage UIImage (cassé pour les GIFs animés, qui passent
+            // par ImageIO et ne déclenchent jamais +[UIImage imageWithData:]).
+            SevenTVManager *mgr = [SevenTVManager sharedManager];
+            NSString *emoteID = nil;
+            if ([attachment respondsToSelector:@selector(contents)]) {
+                id contents = attachment.contents;
+                if ([contents isKindOfClass:[NSData class]]) {
+                    emoteID = objc_getAssociatedObject(contents, &kS7TVEmoteIDOnDataKey);
+                }
+            }
+            NSString *ratioSrc;
+            CGFloat ratio;
+            if (emoteID && mgr.emoteRatios[emoteID]) {
+                ratio = mgr.emoteRatios[emoteID].floatValue;
+                ratioSrc = @"emoteRatios(tag)";
+            } else if (image && image.size.width > 0 && image.size.height > 0) {
+                ratio = image.size.width / image.size.height;
+                ratioSrc = @"image.size";
+            } else {
+                ratio = (r.size.width > 0) ? r.size.width / r.size.height : 1.0;
+                ratioSrc = @"placeholder(fallback)";
+            }
+
             CGRect newRect = CGRectMake(0, -6.0, targetSize * ratio, targetSize);
             // Stocker le ratio sur le NSTextAttachment → récupérable depuis displayLayer:
             objc_setAssociatedObject(self_, &kS7TVEmoteRatioKey, @(ratio), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             s_resized++;
             if (s_resized <= 30) {
                 [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
-                    @"[BOUNDS] v3 resize #%lu origSize={%.0f,%.0f} ratio=%.2f orig=%@ new=%@",
-                    (unsigned long)s_resized, r.size.width, r.size.height,
+                    @"[BOUNDS] v3 resize #%lu src=%@ emoteID=%@ origSize={%.0f,%.0f} ratio=%.2f orig=%@ new=%@",
+                    (unsigned long)s_resized, ratioSrc, emoteID ?: @"?", r.size.width, r.size.height,
                     ratio, NSStringFromCGRect(r), NSStringFromCGRect(newRect)]];
             }
             return newRect;
@@ -1959,16 +1993,35 @@ static void s7tv_dbg_hookLayoutManagerAttachmentSize(void) {
                     ? ((NSTextAttachment *)attachment).image : nil;
 
                 // Condition : size "par defaut" (hauteur <=22pt)
-                // Meme logique que hookAttachmentBounds — ratio depuis size originale.
                 if (size.height > 0 && size.height <= 22.0) {
                     CGFloat targetSize = [[SevenTVManager sharedManager] targetEmoteSize];
-                    CGFloat ratio = (size.width > 0) ? size.width / size.height : 1.0;
+
+                    // Même correctif que attachmentBoundsForTextContainer: —
+                    // size (param Twitch) est un placeholder fixe, pas le vrai
+                    // ratio. On lit le tag emoteID sur attachment.contents.
+                    SevenTVManager *mgr = [SevenTVManager sharedManager];
+                    NSString *emoteID = nil;
+                    if (attachment && [attachment respondsToSelector:@selector(contents)]) {
+                        id contents = ((NSTextAttachment *)attachment).contents;
+                        if ([contents isKindOfClass:[NSData class]]) {
+                            emoteID = objc_getAssociatedObject(contents, &kS7TVEmoteIDOnDataKey);
+                        }
+                    }
+                    CGFloat ratio;
+                    if (emoteID && mgr.emoteRatios[emoteID]) {
+                        ratio = mgr.emoteRatios[emoteID].floatValue;
+                    } else if (image && image.size.width > 0 && image.size.height > 0) {
+                        ratio = image.size.width / image.size.height;
+                    } else {
+                        ratio = (size.width > 0) ? size.width / size.height : 1.0;
+                    }
+
                     finalSize = CGSizeMake(targetSize * ratio, targetSize);
                     s_resized++;
                     if (s_resized <= 30) {
                         [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
-                            @"[ATTSIZE] v3 resize #%lu origSize={%.0f,%.0f} ratio=%.2f new=%@",
-                            (unsigned long)s_resized, size.width, size.height,
+                            @"[ATTSIZE] v3 resize #%lu emoteID=%@ origSize={%.0f,%.0f} ratio=%.2f new=%@",
+                            (unsigned long)s_resized, emoteID ?: @"?", size.width, size.height,
                             ratio, NSStringFromCGSize(finalSize)]];
                     }
                 } else {
