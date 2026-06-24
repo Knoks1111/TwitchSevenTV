@@ -1918,43 +1918,18 @@ static void s7tv_dbg_hookAttachmentBounds(void) {
             }
 
             CGFloat targetSize = [[SevenTVManager sharedManager] targetEmoteSize];
-
-            // Ratio depuis emoteRatios (dimensions réelles API 7TV) via emotePositions.
-            // charIdx = position dans l'attributed string (badges + username + ": " + message)
-            // On trouve contentStart (début du message) en cherchant ": " dans textStorage,
-            // puis msgCharIdx = charIdx - contentStart → lookup dans emotePositions.
+            // Ratio fixe 1.0 pour BOUNDS — garantit que CoreText réserve
+            // targetSize×targetSize pour chaque emote → anti-chevauchement stable.
+            // Le ratio réel (wide vs carré) est appliqué visuellement dans
+            // displayLayer: et willDisplayCell via orderedRatios/emoteRatios.
             CGFloat ratio = 1.0;
-            if (ts2 && ts2.length > 0) {
-                // Trouver contentStart : première occurrence de ": " après le début du texte
-                NSUInteger contentStart = NSNotFound;
-                NSString *fullStr = ts2.string;
-                for (NSUInteger i = 0; i + 1 < fullStr.length; i++) {
-                    if ([fullStr characterAtIndex:i] == ':' &&
-                        [fullStr characterAtIndex:i+1] == ' ') {
-                        contentStart = i + 2;
-                        break;
-                    }
-                }
-                if (contentStart != NSNotFound && charIdx >= contentStart) {
-                    NSUInteger msgCharIdx = charIdx - contentStart;
-                    SevenTVManager *mgr = [SevenTVManager sharedManager];
-                    NSString *emoteID = mgr.emotePositions[@(msgCharIdx)];
-                    if (emoteID) {
-                        NSNumber *ratioNum = mgr.emoteRatios[emoteID];
-                        if (ratioNum && ratioNum.floatValue > 0) {
-                            ratio = ratioNum.floatValue;
-                        }
-                    }
-                }
-            }
-
             CGRect newRect = CGRectMake(0, -6.0, targetSize * ratio, targetSize);
             objc_setAssociatedObject(self_, &kS7TVEmoteRatioKey, @(ratio), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             s_resized++;
-            if (s_resized <= 30) {
+            if (s_resized <= 10) {
                 [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
-                    @"[BOUNDS] v3 resize #%lu ratio=%.2f orig=%@ new=%@",
-                    (unsigned long)s_resized, ratio,
+                    @"[BOUNDS] v3 resize #%lu targetSize=%.0f orig=%@ new=%@",
+                    (unsigned long)s_resized, targetSize,
                     NSStringFromCGRect(r), NSStringFromCGRect(newRect)]];
             }
             return newRect;
@@ -2487,57 +2462,22 @@ static void TwitchSevenTVInit(void) {
 
                     // ─────────────────────────────────────────────────────────────
 
+                    NSInteger emoteLayerIdx = 0;
                     [CATransaction begin];
                     [CATransaction setDisableActions:YES];
                     for (CALayer *caLayer in emoteLayers) {
                         CGRect f = caLayer.frame;
-                        if (f.size.width <= 0 || f.size.height <= 0) { continue; }
+                        if (f.size.width <= 0 || f.size.height <= 0) { emoteLayerIdx++; continue; }
+                        if (f.origin.x < 60.0) { emoteLayerIdx++; continue; }
 
-                        // Badges Twitch : toujours à gauche de la ligne (x < 60pt),
-                        // avant le username. Les emotes sont après le username (x > 100pt).
-                        if (f.origin.x < 60.0) { continue; }
+                        // Ratio depuis orderedRatios (dimensions réelles API 7TV via cellText).
+                        // orderedRatios est calculé depuis cellText.componentsSeparatedByString:
+                        // en appelant emoteForName: → mêmes dimensions que l'API.
+                        CGFloat ratio = (emoteLayerIdx < (NSInteger)orderedRatios.count)
+                            ? orderedRatios[emoteLayerIdx].floatValue : 1.0;
+                        emoteLayerIdx++;
 
-                        // LOG DIAGNOSTIC : frame AVANT resize
-                        // → si f.size = 30x30, BOUNDS hook est respecté par Twitch (bon)
-                        // → si f.size = 18x18, Twitch ignore BOUNDS hook (problème)
-                        static NSInteger s_preLog = 0;
-                        if (s_preLog < 20) {
-                            s_preLog++;
-                            [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
-                                @"[RESIZE] pre #%ld frame AVANT={%.0f,%.0f} pos={%.0f,%.0f}",
-                                (long)s_preLog, f.size.width, f.size.height,
-                                f.origin.x, f.origin.y]];
-                        }
-
-                        // Ratio depuis emoteRatios (dimensions réelles API 7TV).
-                        // On utilise le tag posé sur le NSTextAttachment dans BOUNDS
-                        // via objc_getAssociatedObject sur le sublayer 'Animated'
-                        // n'est plus fiable (bounds recyclées). À la place on lit
-                        // directement depuis SevenTVManager.emoteRatios via le
-                        // texte de la cell pour trouver les emoteIDs en ordre.
-                        CGFloat ratio = 1.0;
-                        // Fallback : sub.bounds si emoteRatios pas disponible
-                        for (CALayer *sub in caLayer.sublayers) {
-                            if ([NSStringFromClass(object_getClass(sub)) containsString:@"Animated"]) {
-                                NSNumber *ratioNum = objc_getAssociatedObject(sub, &kS7TVEmoteRatioKey);
-                                if (ratioNum && ratioNum.floatValue > 0) {
-                                    ratio = ratioNum.floatValue;
-                                } else {
-                                    CGRect subB = sub.bounds;
-                                    if (subB.size.height > 0 && subB.size.width > 0)
-                                        ratio = subB.size.width / subB.size.height;
-                                }
-                                break;
-                            }
-                        }
-
-                        // Largeur cible = min(targetSize * ratio, targetSize * boundsRatio)
-                        // On clamp à la largeur que CoreText a réservée (= ce que BOUNDS a retourné)
-                        // pour éviter tout overflow → chevauchement.
-                        // BOUNDS retourne toujours ratio=1.0 (30x30) donc la largeur max réservée
-                        // est targetSize. On utilise la même valeur pour garantir la cohérence.
                         CGFloat newWidth = targetSize * ratio;
-
                         caLayer.bounds = CGRectMake(0, 0, newWidth, targetSize);
                         caLayer.frame  = CGRectMake(f.origin.x,
                                                     f.origin.y + (f.size.height - targetSize) / 2.0,
