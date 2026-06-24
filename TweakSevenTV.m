@@ -1922,11 +1922,30 @@ static void s7tv_dbg_hookAttachmentBounds(void) {
             // par ImageIO et ne déclenchent jamais +[UIImage imageWithData:]).
             SevenTVManager *mgr = [SevenTVManager sharedManager];
             NSString *emoteID = nil;
-            if ([attachment respondsToSelector:@selector(contents)]) {
-                id contents = attachment.contents;
-                if ([contents isKindOfClass:[NSData class]]) {
-                    emoteID = objc_getAssociatedObject(contents, &kS7TVEmoteIDOnDataKey);
-                }
+            id contents = [attachment respondsToSelector:@selector(contents)] ? attachment.contents : nil;
+            if ([contents isKindOfClass:[NSData class]]) {
+                emoteID = objc_getAssociatedObject(contents, &kS7TVEmoteIDOnDataKey);
+            }
+            if (!emoteID && image) {
+                emoteID = objc_getAssociatedObject(image, &kS7TVEmoteIDOnDataKey);
+            }
+
+            // ── DIAGNOSTIC TEMPORAIRE : où vit vraiment la donnée ? ──────────
+            static NSUInteger s_contentsDiag = 0;
+            if (s_contentsDiag < 15) {
+                s_contentsDiag++;
+                id fw = [attachment respondsToSelector:@selector(fileWrapper)] ? attachment.fileWrapper : nil;
+                NSData *fwData = [fw respondsToSelector:@selector(regularFileContents)] ? [fw regularFileContents] : nil;
+                NSString *emoteIDFromFW = fwData ? objc_getAssociatedObject(fwData, &kS7TVEmoteIDOnDataKey) : nil;
+                [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
+                    @"🐛 [CONTENTS-DIAG] #%lu attClass=%@ contents=%@(%@) image=%@ fileWrapper=%@ fwData=%@(%@) emoteIDfromFW=%@",
+                    (unsigned long)s_contentsDiag,
+                    NSStringFromClass([attachment class]),
+                    contents ? @"non-nil" : @"NIL", NSStringFromClass([contents class]),
+                    image ? [NSString stringWithFormat:@"%@ %@", NSStringFromClass([image class]), NSStringFromCGSize(image.size)] : @"NIL",
+                    fw ? NSStringFromClass([fw class]) : @"NIL",
+                    fwData ? @"non-nil" : @"NIL", fwData ? [NSString stringWithFormat:@"%lu bytes", (unsigned long)fwData.length] : @"-",
+                    emoteIDFromFW ?: @"nil"]];
             }
             NSString *ratioSrc;
             CGFloat ratio;
