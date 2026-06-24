@@ -1930,8 +1930,9 @@ static void s7tv_dbg_hookAttachmentBounds(void) {
             }
             NSString *ratioSrc;
             CGFloat ratio;
-            if (emoteID && mgr.emoteRatios[emoteID]) {
-                ratio = mgr.emoteRatios[emoteID].floatValue;
+            NSNumber *ratioNumFromTag = emoteID ? (NSNumber *)mgr.emoteRatios[emoteID] : nil;
+            if (ratioNumFromTag) {
+                ratio = ratioNumFromTag.floatValue;
                 ratioSrc = @"emoteRatios(tag)";
             } else if (image && image.size.width > 0 && image.size.height > 0) {
                 ratio = image.size.width / image.size.height;
@@ -2008,8 +2009,9 @@ static void s7tv_dbg_hookLayoutManagerAttachmentSize(void) {
                         }
                     }
                     CGFloat ratio;
-                    if (emoteID && mgr.emoteRatios[emoteID]) {
-                        ratio = mgr.emoteRatios[emoteID].floatValue;
+                    NSNumber *ratioNumFromTag = emoteID ? (NSNumber *)mgr.emoteRatios[emoteID] : nil;
+                    if (ratioNumFromTag) {
+                        ratio = ratioNumFromTag.floatValue;
                     } else if (image && image.size.width > 0 && image.size.height > 0) {
                         ratio = image.size.width / image.size.height;
                     } else {
