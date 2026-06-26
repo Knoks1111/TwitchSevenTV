@@ -34,6 +34,13 @@ static const char kS7TVEmoteRatioKey   = 9;   // associated object sur UIImage/o
 static const char kS7TVBitsHijacked    = 6;
 static const char kS7TVOrigSectionCount = 7;
 static const char kS7TVShareHijacked   = 8;   // verrou orientation
+static const char kS7TVEmoteIDDirectKey = 10;  // associated object sur NSTextAttachment → NSString(emoteID), tagué à la création (addAttribute:value:range:)
+
+// Déclaration des méthodes FIFO ajoutées dans SevenTVManager.m (pas dans le .h)
+@interface SevenTVManager (S7TVRatioQueue)
+- (void)s7tv_enqueuePendingEmoteID:(NSString *)emoteID;
+- (NSString *)s7tv_dequeuePendingEmoteID;
+@end
 
 // État global verrou d'orientation
 static BOOL s_orientationLocked             = NO;
@@ -1921,9 +1928,12 @@ static void s7tv_dbg_hookAttachmentBounds(void) {
             // décodage UIImage (cassé pour les GIFs animés, qui passent
             // par ImageIO et ne déclenchent jamais +[UIImage imageWithData:]).
             SevenTVManager *mgr = [SevenTVManager sharedManager];
-            NSString *emoteID = nil;
+            // Priorité 1 : tag posé à la CRÉATION de l'attachment (addAttribute:value:range:),
+            // disponible même si l'image réseau n'est pas encore chargée (c'est le cas ici :
+            // image.size={0,0} à ce stade — confirmé par les logs CONTENTS-DIAG).
+            NSString *emoteID = objc_getAssociatedObject(attachment, &kS7TVEmoteIDDirectKey);
             id contents = [attachment respondsToSelector:@selector(contents)] ? attachment.contents : nil;
-            if ([contents isKindOfClass:[NSData class]]) {
+            if (!emoteID && [contents isKindOfClass:[NSData class]]) {
                 emoteID = objc_getAssociatedObject(contents, &kS7TVEmoteIDOnDataKey);
             }
             if (!emoteID && image) {
@@ -2020,8 +2030,8 @@ static void s7tv_dbg_hookLayoutManagerAttachmentSize(void) {
                     // size (param Twitch) est un placeholder fixe, pas le vrai
                     // ratio. On lit le tag emoteID sur attachment.contents.
                     SevenTVManager *mgr = [SevenTVManager sharedManager];
-                    NSString *emoteID = nil;
-                    if (attachment && [attachment respondsToSelector:@selector(contents)]) {
+                    NSString *emoteID = objc_getAssociatedObject(attachment, &kS7TVEmoteIDDirectKey);
+                    if (!emoteID && attachment && [attachment respondsToSelector:@selector(contents)]) {
                         id contents = ((NSTextAttachment *)attachment).contents;
                         if ([contents isKindOfClass:[NSData class]]) {
                             emoteID = objc_getAssociatedObject(contents, &kS7TVEmoteIDOnDataKey);
@@ -2075,10 +2085,18 @@ static void s7tv_dbg_hookAddAttribute(void) {
         method_setImplementation(m1, imp_implementationWithBlock(^void(id self_, NSString *attrName, id value, NSRange range) {
             if ([attrName isEqualToString:NSAttachmentAttributeName] || [value isKindOfClass:[NSTextAttachment class]]) {
                 s_count1++;
+                // Tag direct : on dépile la file FIFO (ordre = ordre du texte,
+                // rempli pendant injectSevenTVEmotesIntoIRCMessage: pour CE message)
+                // et on l'attache sur l'attachment lui-même. C'est le seul moment
+                // où on a accès à l'attachment ET à l'emoteID correct au même endroit.
+                NSString *emoteID = [[SevenTVManager sharedManager] s7tv_dequeuePendingEmoteID];
+                if (emoteID && [value respondsToSelector:@selector(image)]) {
+                    objc_setAssociatedObject(value, &kS7TVEmoteIDDirectKey, emoteID, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                }
                 if (s_count1 <= 40) {
-                    [[SevenTVManager sharedManager] log:@"🐛 [DBG] addAttribute: NSTextAttachment #%lu class=%@ range={%lu,%lu} attrName=%@",
+                    [[SevenTVManager sharedManager] log:@"🐛 [DBG] addAttribute: NSTextAttachment #%lu class=%@ range={%lu,%lu} attrName=%@ emoteIDtagué=%@",
                         (unsigned long)s_count1, NSStringFromClass([value class]),
-                        (unsigned long)range.location, (unsigned long)range.length, attrName];
+                        (unsigned long)range.location, (unsigned long)range.length, attrName, emoteID ?: @"nil"];
                 }
             }
             ((void(*)(id,SEL,NSString*,id,NSRange))orig1)(self_, sel1, attrName, value, range);
@@ -2094,10 +2112,15 @@ static void s7tv_dbg_hookAddAttribute(void) {
             id att = attrs[NSAttachmentAttributeName];
             if (att) {
                 s_count2++;
+                NSString *emoteID = [[SevenTVManager sharedManager] s7tv_dequeuePendingEmoteID];
+                if (emoteID && [att respondsToSelector:@selector(image)] &&
+                    !objc_getAssociatedObject(att, &kS7TVEmoteIDDirectKey)) {
+                    objc_setAssociatedObject(att, &kS7TVEmoteIDDirectKey, emoteID, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                }
                 if (s_count2 <= 40) {
-                    [[SevenTVManager sharedManager] log:@"🐛 [DBG] setAttributes: NSTextAttachment #%lu class=%@ range={%lu,%lu}",
+                    [[SevenTVManager sharedManager] log:@"🐛 [DBG] setAttributes: NSTextAttachment #%lu class=%@ range={%lu,%lu} emoteIDtagué=%@",
                         (unsigned long)s_count2, NSStringFromClass([att class]),
-                        (unsigned long)range.location, (unsigned long)range.length];
+                        (unsigned long)range.location, (unsigned long)range.length, emoteID ?: @"nil"];
                 }
             }
             ((void(*)(id,SEL,NSDictionary*,NSRange))orig2)(self_, sel2, attrs, range);
