@@ -1916,21 +1916,38 @@ static void s7tv_dbg_hookAttachmentBounds(void) {
 
             // ── Tag emoteID directement ICI ─────────────────────────────
             // CONFIRMÉ par les logs : addAttribute:/setAttributes: ne sont
-            // JAMAIS appelés par Twitch pour insérer ses attachments (le
-            // log d'install apparaît, mais aucun log par-instance ne suit,
-            // même avec des dizaines d'emotes affichées). La queue FIFO
-            // n'était donc jamais dépilée. CE hook, en revanche, est
-            // confirmé appelé pour CHAQUE attachment réel (BOUNDS-DIAG /
-            // BOUNDS le montrent), et on vient juste de filtrer les
-            // badges au-dessus (inBadgeZone) — donc à ce point, on est
-            // sûr d'avoir une vraie emote, dans l'ordre du texte. On
-            // dépile la queue ICI, une seule fois par attachment (on
-            // tague l'instance pour ne plus jamais redépiler dessus).
-            NSString *emoteID = objc_getAssociatedObject(attachment, &kS7TVEmoteIDDirectKey);
-            if (!emoteID) {
-                emoteID = [[SevenTVManager sharedManager] s7tv_dequeuePendingEmoteID];
-                if (emoteID) {
-                    objc_setAssociatedObject(attachment, &kS7TVEmoteIDDirectKey, emoteID, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            // JAMAIS appelés par Twitch pour insérer ses attachments.
+            // ATTENTION : l'attachment lui-même peut être RECRÉÉ à chaque
+            // passe de layout CoreText (BOUNDS-DIAG montre charIdx=1 revu
+            // plusieurs fois) — si on tague l'instance attachment, le tag
+            // ne survit pas d'une passe à l'autre → on redépile la queue
+            // à chaque passe → désalignement total (c'est ce qui a cassé
+            // le rendu). Le textStorage (ts2), lui, EST stable pour toute
+            // la durée de vie du message → on tague un dictionnaire
+            // {charIdx: emoteID} dessus à la place. Un seul dequeue par
+            // (message, position), peu importe le nombre de passes.
+            NSString *emoteID = nil;
+            static const char kS7TVCharIdxToEmoteIDKey = 11;
+            NSMutableDictionary<NSNumber *, NSString *> *idMap = ts2 ? objc_getAssociatedObject(ts2, &kS7TVCharIdxToEmoteIDKey) : nil;
+            if (ts2 && !idMap) {
+                idMap = [NSMutableDictionary dictionary];
+                objc_setAssociatedObject(ts2, &kS7TVCharIdxToEmoteIDKey, idMap, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            }
+            if (idMap) {
+                emoteID = idMap[@(charIdx)];
+                if (!emoteID) {
+                    emoteID = [[SevenTVManager sharedManager] s7tv_dequeuePendingEmoteID];
+                    if (emoteID) idMap[@(charIdx)] = emoteID;
+                }
+            } else {
+                // Pas de textStorage exploitable (cas rare) → fallback
+                // sur l'ancien comportement (tag sur l'attachment).
+                emoteID = objc_getAssociatedObject(attachment, &kS7TVEmoteIDDirectKey);
+                if (!emoteID) {
+                    emoteID = [[SevenTVManager sharedManager] s7tv_dequeuePendingEmoteID];
+                    if (emoteID) {
+                        objc_setAssociatedObject(attachment, &kS7TVEmoteIDDirectKey, emoteID, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                    }
                 }
             }
 
@@ -1980,6 +1997,11 @@ static void s7tv_dbg_hookAttachmentBounds(void) {
                 ratioSrc = @"placeholder(fallback)";
             }
 
+            // Clamp de sécurité : un mauvais emoteID (désalignement de
+            // queue FIFO entre messages/passes de layout) peut renvoyer
+            // un ratio totalement hors-norme → largeur énorme/nulle qui
+            // casse tout le rendu du chat. On borne à une plage raisonnable.
+            ratio = MAX(0.4, MIN(3.0, ratio));
             CGRect newRect = CGRectMake(0, -6.0, targetSize * ratio, targetSize);
             // Stocker le ratio sur le NSTextAttachment → récupérable depuis displayLayer:
             objc_setAssociatedObject(self_, &kS7TVEmoteRatioKey, @(ratio), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -2056,6 +2078,7 @@ static void s7tv_dbg_hookLayoutManagerAttachmentSize(void) {
                         ratio = (size.width > 0) ? size.width / size.height : 1.0;
                     }
 
+                    ratio = MAX(0.4, MIN(3.0, ratio));
                     finalSize = CGSizeMake(targetSize * ratio, targetSize);
                     s_resized++;
                     if (s_resized <= 30) {
