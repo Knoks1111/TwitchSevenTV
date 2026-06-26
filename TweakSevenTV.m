@@ -1914,24 +1914,33 @@ static void s7tv_dbg_hookAttachmentBounds(void) {
 
             CGFloat targetSize = [[SevenTVManager sharedManager] targetEmoteSize];
 
+            // ── Tag emoteID directement ICI ─────────────────────────────
+            // CONFIRMÉ par les logs : addAttribute:/setAttributes: ne sont
+            // JAMAIS appelés par Twitch pour insérer ses attachments (le
+            // log d'install apparaît, mais aucun log par-instance ne suit,
+            // même avec des dizaines d'emotes affichées). La queue FIFO
+            // n'était donc jamais dépilée. CE hook, en revanche, est
+            // confirmé appelé pour CHAQUE attachment réel (BOUNDS-DIAG /
+            // BOUNDS le montrent), et on vient juste de filtrer les
+            // badges au-dessus (inBadgeZone) — donc à ce point, on est
+            // sûr d'avoir une vraie emote, dans l'ordre du texte. On
+            // dépile la queue ICI, une seule fois par attachment (on
+            // tague l'instance pour ne plus jamais redépiler dessus).
+            NSString *emoteID = objc_getAssociatedObject(attachment, &kS7TVEmoteIDDirectKey);
+            if (!emoteID) {
+                emoteID = [[SevenTVManager sharedManager] s7tv_dequeuePendingEmoteID];
+                if (emoteID) {
+                    objc_setAssociatedObject(attachment, &kS7TVEmoteIDDirectKey, emoteID, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                }
+            }
+
             // ── Vrai ratio 7TV ────────────────────────────────────────────
             // r (le rect retourné par Twitch) est un PLACEHOLDER FIXE
             // ({18,18} pour les emotes, {24,18} pour les badges) — il ne
             // varie JAMAIS d'une emote à l'autre, donc r.width/r.height
             // ne peut PAS donner le vrai ratio (c'est la cause du bug :
             // toutes les emotes ressortaient avec le même ratio).
-            // La vraie source : SevenTVURLProtocol tague la NSData brute
-            // de l'emote avec son emoteID (kS7TVEmoteIDOnDataKey). Cette
-            // NSData est accessible via attachment.contents — on la lit
-            // directement ici pour retrouver le ratio réel dans
-            // mgr.emoteRatios (dimensions API 7TV), sans dépendre du
-            // décodage UIImage (cassé pour les GIFs animés, qui passent
-            // par ImageIO et ne déclenchent jamais +[UIImage imageWithData:]).
             SevenTVManager *mgr = [SevenTVManager sharedManager];
-            // Priorité 1 : tag posé à la CRÉATION de l'attachment (addAttribute:value:range:),
-            // disponible même si l'image réseau n'est pas encore chargée (c'est le cas ici :
-            // image.size={0,0} à ce stade — confirmé par les logs CONTENTS-DIAG).
-            NSString *emoteID = objc_getAssociatedObject(attachment, &kS7TVEmoteIDDirectKey);
             id contents = [attachment respondsToSelector:@selector(contents)] ? attachment.contents : nil;
             if (!emoteID && [contents isKindOfClass:[NSData class]]) {
                 emoteID = objc_getAssociatedObject(contents, &kS7TVEmoteIDOnDataKey);
