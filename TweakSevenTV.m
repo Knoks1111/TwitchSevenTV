@@ -1928,25 +1928,34 @@ static void s7tv_dbg_hookAttachmentBounds(void) {
             // (message, position), peu importe le nombre de passes.
             NSString *emoteID = nil;
             static const char kS7TVCharIdxToEmoteIDKey = 11;
-            NSMutableDictionary<NSNumber *, NSString *> *idMap = ts2 ? objc_getAssociatedObject(ts2, &kS7TVCharIdxToEmoteIDKey) : nil;
-            if (ts2 && !idMap) {
-                idMap = [NSMutableDictionary dictionary];
-                objc_setAssociatedObject(ts2, &kS7TVCharIdxToEmoteIDKey, idMap, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            }
-            if (idMap) {
-                emoteID = idMap[@(charIdx)];
-                if (!emoteID) {
-                    emoteID = [[SevenTVManager sharedManager] s7tv_dequeuePendingEmoteID];
-                    if (emoteID) idMap[@(charIdx)] = emoteID;
+            // ATTENTION THREAD-SAFETY : NSLayoutManager peut appeler ce hook
+            // depuis un thread autre que le main thread. NSMutableDictionary
+            // n'est PAS thread-safe — une mutation concurrente ici peut
+            // corrompre/crasher silencieusement le layout (cause probable
+            // du chat cassé après le dernier changement). On verrouille
+            // tout l'accès lecture+écriture sur l'objet manager (même
+            // pattern que pendingEmoteIDQueue).
+            @synchronized ([SevenTVManager sharedManager]) {
+                NSMutableDictionary<NSNumber *, NSString *> *idMap = ts2 ? objc_getAssociatedObject(ts2, &kS7TVCharIdxToEmoteIDKey) : nil;
+                if (ts2 && !idMap) {
+                    idMap = [NSMutableDictionary dictionary];
+                    objc_setAssociatedObject(ts2, &kS7TVCharIdxToEmoteIDKey, idMap, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                 }
-            } else {
-                // Pas de textStorage exploitable (cas rare) → fallback
-                // sur l'ancien comportement (tag sur l'attachment).
-                emoteID = objc_getAssociatedObject(attachment, &kS7TVEmoteIDDirectKey);
-                if (!emoteID) {
-                    emoteID = [[SevenTVManager sharedManager] s7tv_dequeuePendingEmoteID];
-                    if (emoteID) {
-                        objc_setAssociatedObject(attachment, &kS7TVEmoteIDDirectKey, emoteID, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                if (idMap) {
+                    emoteID = idMap[@(charIdx)];
+                    if (!emoteID) {
+                        emoteID = [[SevenTVManager sharedManager] s7tv_dequeuePendingEmoteID];
+                        if (emoteID) idMap[@(charIdx)] = emoteID;
+                    }
+                } else {
+                    // Pas de textStorage exploitable (cas rare) → fallback
+                    // sur l'ancien comportement (tag sur l'attachment).
+                    emoteID = objc_getAssociatedObject(attachment, &kS7TVEmoteIDDirectKey);
+                    if (!emoteID) {
+                        emoteID = [[SevenTVManager sharedManager] s7tv_dequeuePendingEmoteID];
+                        if (emoteID) {
+                            objc_setAssociatedObject(attachment, &kS7TVEmoteIDDirectKey, emoteID, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                        }
                     }
                 }
             }
