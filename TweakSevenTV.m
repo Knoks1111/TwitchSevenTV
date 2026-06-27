@@ -2379,6 +2379,38 @@ static void TwitchSevenTVInit(void) {
                         }
                     }
 
+                    // ── DIAGNOSTIC : la cellule contient-elle vraiment un UILabel/UITextView
+                    // avec attachments, ou bien Twitch.MessageStringView fait du CoreText
+                    // direct (hypothèse à confirmer/infirmer) ? Dump une seule fois.
+                    static BOOL s_viewDumpDone = NO;
+                    if (!s_viewDumpDone) {
+                        s_viewDumpDone = YES;
+                        NSMutableArray *dumpStack = [NSMutableArray arrayWithObject:@[cell, @0]];
+                        while (dumpStack.count > 0) {
+                            NSArray *pair = dumpStack[0];
+                            [dumpStack removeObjectAtIndex:0];
+                            UIView *v = pair[0];
+                            NSInteger depth = [pair[1] integerValue];
+                            NSString *attrInfo = @"";
+                            if ([v respondsToSelector:@selector(attributedText)]) {
+                                NSAttributedString *a = [v performSelector:@selector(attributedText)];
+                                if (a.length > 0) {
+                                    __block BOOL hasA = NO;
+                                    [a enumerateAttribute:NSAttachmentAttributeName inRange:NSMakeRange(0, a.length) options:0 usingBlock:^(id val, NSRange r, BOOL *stop) {
+                                        if (val) { hasA = YES; *stop = YES; }
+                                    }];
+                                    attrInfo = [NSString stringWithFormat:@" attributedText.length=%lu hasAttachment=%@", (unsigned long)a.length, hasA ? @"OUI" : @"non"];
+                                }
+                            }
+                            [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
+                                @"🌳 [VIEWDUMP] %@%@%@", [@"" stringByPaddingToLength:depth*2 withString:@" " startingAtIndex:0],
+                                NSStringFromClass([v class]), attrInfo]];
+                            if (depth < 6) {
+                                for (UIView *sub in v.subviews) [dumpStack addObject:@[sub, @(depth+1)]];
+                            }
+                        }
+                    }
+
                     // ── Piste 3 : modifier NSTextAttachment.bounds AVANT re-layout ────────
                     // ANCIEN comportement : orderedRatios construit depuis cellText (mots du
                     // texte) — TOUJOURS VIDE car un NSTextAttachment apparaît dans .text comme
