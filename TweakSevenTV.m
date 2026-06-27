@@ -2380,15 +2380,16 @@ static void TwitchSevenTVInit(void) {
                     }
 
                     // ── Piste 3 : modifier NSTextAttachment.bounds AVANT re-layout ────────
-                    // orderedRatios est déjà calculé ci-dessus depuis cellText.
-                    // On walk les subviews pour trouver le UILabel dont l'attributedText
-                    // contient des NSTextAttachment (= les emotes dans le message).
-                    // On modifie les bounds directement sur chaque attachment puis on
-                    // ré-assigne attributedText → force CoreText à relayouter avec les
-                    // bonnes dimensions → fin des chevauchements.
-                    // NOTE : badges Twitch sont rendus dans un label séparé ; le label
-                    // message ne devrait contenir que les emotes 7TV comme attachments.
-                    if (orderedRatios.count > 0) {
+                    // ANCIEN comportement : orderedRatios construit depuis cellText (mots du
+                    // texte) — TOUJOURS VIDE car un NSTextAttachment apparaît dans .text comme
+                    // le caractère de remplacement \uFFFC, jamais comme le nom de l'emote.
+                    // NOUVEAU : on dépile pendingEmoteIDQueue ICI, dans cette unique passe
+                    // synchrone sur le main thread (pas de course multi-thread comme dans les
+                    // hooks CoreText — c'est pour ça que c'est sûr de le faire ici). On tague
+                    // le résultat (ms) avec kS7TVWidthFixedKey pour ne jamais retraiter le même
+                    // contenu si la cellule est réaffichée (scroll, recyclage) sans changement.
+                    static const char kS7TVWidthFixedKey = 12;
+                    {
                         NSMutableArray *vStack = [NSMutableArray arrayWithObject:cell];
                         while (vStack.count > 0) {
                             UIView *v = vStack[0];
@@ -2413,7 +2414,12 @@ static void TwitchSevenTVInit(void) {
                             }
 
                             if (attrStr.length > 0) {
-                                // Vérifier si ce label contient au moins un NSTextAttachment
+                                // Déjà traité pour CE contenu exact → ne pas redépiler la queue.
+                                if (objc_getAssociatedObject(attrStr, &kS7TVWidthFixedKey)) {
+                                    [vStack removeAllObjects];
+                                    continue;
+                                }
+
                                 __block BOOL hasAtt = NO;
                                 [attrStr enumerateAttribute:NSAttachmentAttributeName
                                                     inRange:NSMakeRange(0, attrStr.length)
@@ -2423,7 +2429,6 @@ static void TwitchSevenTVInit(void) {
                                 }];
 
                                 if (hasAtt) {
-                                    // Copie mutable pour modifier sans crasher le layout en cours
                                     NSMutableAttributedString *ms = [attrStr mutableCopy];
                                     __block NSInteger attachIdx = 0;
                                     [ms enumerateAttribute:NSAttachmentAttributeName
@@ -2432,13 +2437,14 @@ static void TwitchSevenTVInit(void) {
                                                 usingBlock:^(id val, NSRange r, BOOL *stop) {
                                         if (!val) return;
                                         if (![val respondsToSelector:@selector(setBounds:)]) return;
-                                        if (attachIdx >= (NSInteger)orderedRatios.count) {
-                                            // Plus de ratios connus → on ne touche pas
-                                            return;
-                                        }
-                                        CGFloat ratio   = orderedRatios[attachIdx].floatValue;
-                                        CGFloat w       = targetSize * ratio;
-                                        // descent=6 : décale vers le bas pour aligner sur la baseline
+
+                                        // Dépilage direct, dans l'ordre, en une passe unique.
+                                        NSString *emoteID = [[SevenTVManager sharedManager] s7tv_dequeuePendingEmoteID];
+                                        NSNumber *ratioNum = emoteID ? (NSNumber *)[[SevenTVManager sharedManager] emoteRatios][emoteID] : nil;
+                                        CGFloat ratio = ratioNum ? ratioNum.floatValue : 1.0;
+                                        ratio = MAX(0.4, MIN(3.0, ratio)); // garde-fou
+
+                                        CGFloat w = targetSize * ratio;
                                         CGRect  nb = CGRectMake(0, -6.0, w, targetSize + 6.0);
                                         [(NSTextAttachment *)val setBounds:nb];
 
@@ -2447,13 +2453,14 @@ static void TwitchSevenTVInit(void) {
                                             s_bl++;
                                             [[SevenTVManager sharedManager] log:
                                                 [NSString stringWithFormat:
-                                                    @"🔧 [ATTBOUNDS] att#%ld bounds={0,-6,%.0f,%.0f} ratio=%.2f",
-                                                    (long)s_bl, w, targetSize + 6.0, ratio]];
+                                                    @"🔧 [ATTBOUNDS] att#%ld emoteID=%@ bounds={0,-6,%.0f,%.0f} ratio=%.2f",
+                                                    (long)s_bl, emoteID ?: @"?", w, targetSize + 6.0, ratio]];
                                         }
                                         attachIdx++;
                                     }];
 
-                                    // Ré-assigner → CoreText relayoute avec les nouvelles bounds
+                                    objc_setAssociatedObject(ms, &kS7TVWidthFixedKey, @(YES), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
                                     dispatch_async(dispatch_get_main_queue(), ^{
                                         if (!weakCell || !weakCell.window) return;
                                         if (foundLabel)    foundLabel.attributedText    = ms;
@@ -2464,7 +2471,6 @@ static void TwitchSevenTVInit(void) {
                                                 (long)attachIdx, targetSize]];
                                     });
 
-                                    // On a trouvé et traité le label → arrêter le walk
                                     [vStack removeAllObjects];
                                     continue;
                                 }
