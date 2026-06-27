@@ -1914,27 +1914,35 @@ static void s7tv_dbg_hookAttachmentBounds(void) {
 
             CGFloat targetSize = [[SevenTVManager sharedManager] targetEmoteSize];
 
-            // ── Tag emoteID directement ICI ─────────────────────────────
-            // CONFIRMÉ par les logs : addAttribute:/setAttributes: ne sont
-            // JAMAIS appelés par Twitch pour insérer ses attachments.
-            // ATTENTION : l'attachment lui-même peut être RECRÉÉ à chaque
-            // passe de layout CoreText (BOUNDS-DIAG montre charIdx=1 revu
-            // plusieurs fois) — si on tague l'instance attachment, le tag
-            // ne survit pas d'une passe à l'autre → on redépile la queue
-            // à chaque passe → désalignement total (c'est ce qui a cassé
-            // le rendu). Le textStorage (ts2), lui, EST stable pour toute
-            // la durée de vie du message → on tague un dictionnaire
-            // {charIdx: emoteID} dessus à la place. Un seul dequeue par
-            // (message, position), peu importe le nombre de passes.
-            // ── Tag emoteID : DÉSACTIVÉ TEMPORAIREMENT ───────────────────
-            // Le dépilage de la queue FIFO ici cassait le rendu du chat
-            // (emotes manquantes, écarts entre messages) — désynchronisation
-            // entre l'ordre de remplissage de la queue et l'ordre réel des
-            // appels à ce hook. On revient à un comportement simple et
-            // stable : ratio depuis image.size si dispo, sinon placeholder.
-            // À reprendre proprement plus tard (sans toucher à la queue
-            // pendant qu'on diagnostique).
+            // ── Tag emoteID ICI, dans le hook qui gère déjà la hauteur avec succès ──
+            // addAttribute:/setAttributes: ne sont jamais appelés (confirmé). Piste 3
+            // (UILabel/UITextView) ne marche pas non plus : Twitch.MessageStringView
+            // fait du CoreText direct, sans UILabel/UITextView enfant (confirmé par
+            // VIEWDUMP). DONC : on tague ici, dans le SEUL hook confirmé fiable.
+            // On cache par (textStorage, charIdx) — PAS sur l'instance attachment
+            // (qui peut être recréée à chaque passe de layout CoreText, ce qui avait
+            // cassé le rendu la dernière fois) — le textStorage, lui, est stable pour
+            // toute la durée de vie du message.
             NSString *emoteID = nil;
+            {
+                NSLayoutManager *lm3 = tc ? tc.layoutManager : nil;
+                NSTextStorage *ts3 = lm3 ? lm3.textStorage : nil;
+                if (ts3) {
+                    static const char kS7TVCharIdxToEmoteIDKey = 11;
+                    @synchronized ([SevenTVManager sharedManager]) {
+                        NSMutableDictionary<NSNumber *, NSString *> *idMap = objc_getAssociatedObject(ts3, &kS7TVCharIdxToEmoteIDKey);
+                        if (!idMap) {
+                            idMap = [NSMutableDictionary dictionary];
+                            objc_setAssociatedObject(ts3, &kS7TVCharIdxToEmoteIDKey, idMap, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                        }
+                        emoteID = idMap[@(charIdx)];
+                        if (!emoteID) {
+                            emoteID = [[SevenTVManager sharedManager] s7tv_dequeuePendingEmoteID];
+                            if (emoteID) idMap[@(charIdx)] = emoteID;
+                        }
+                    }
+                }
+            }
 
             // ── Vrai ratio 7TV ────────────────────────────────────────────
             // r (le rect retourné par Twitch) est un PLACEHOLDER FIXE
@@ -2379,139 +2387,6 @@ static void TwitchSevenTVInit(void) {
                         }
                     }
 
-                    // ── DIAGNOSTIC : la cellule contient-elle vraiment un UILabel/UITextView
-                    // avec attachments, ou bien Twitch.MessageStringView fait du CoreText
-                    // direct (hypothèse à confirmer/infirmer) ? Dump une seule fois.
-                    static BOOL s_viewDumpDone = NO;
-                    if (!s_viewDumpDone) {
-                        s_viewDumpDone = YES;
-                        NSMutableArray *dumpStack = [NSMutableArray arrayWithObject:@[cell, @0]];
-                        while (dumpStack.count > 0) {
-                            NSArray *pair = dumpStack[0];
-                            [dumpStack removeObjectAtIndex:0];
-                            UIView *v = pair[0];
-                            NSInteger depth = [pair[1] integerValue];
-                            NSString *attrInfo = @"";
-                            if ([v respondsToSelector:@selector(attributedText)]) {
-                                NSAttributedString *a = [v performSelector:@selector(attributedText)];
-                                if (a.length > 0) {
-                                    __block BOOL hasA = NO;
-                                    [a enumerateAttribute:NSAttachmentAttributeName inRange:NSMakeRange(0, a.length) options:0 usingBlock:^(id val, NSRange r, BOOL *stop) {
-                                        if (val) { hasA = YES; *stop = YES; }
-                                    }];
-                                    attrInfo = [NSString stringWithFormat:@" attributedText.length=%lu hasAttachment=%@", (unsigned long)a.length, hasA ? @"OUI" : @"non"];
-                                }
-                            }
-                            [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
-                                @"🌳 [VIEWDUMP] %@%@%@", [@"" stringByPaddingToLength:depth*2 withString:@" " startingAtIndex:0],
-                                NSStringFromClass([v class]), attrInfo]];
-                            if (depth < 6) {
-                                for (UIView *sub in v.subviews) [dumpStack addObject:@[sub, @(depth+1)]];
-                            }
-                        }
-                    }
-
-                    // ── Piste 3 : modifier NSTextAttachment.bounds AVANT re-layout ────────
-                    // ANCIEN comportement : orderedRatios construit depuis cellText (mots du
-                    // texte) — TOUJOURS VIDE car un NSTextAttachment apparaît dans .text comme
-                    // le caractère de remplacement \uFFFC, jamais comme le nom de l'emote.
-                    // NOUVEAU : on dépile pendingEmoteIDQueue ICI, dans cette unique passe
-                    // synchrone sur le main thread (pas de course multi-thread comme dans les
-                    // hooks CoreText — c'est pour ça que c'est sûr de le faire ici). On tague
-                    // le résultat (ms) avec kS7TVWidthFixedKey pour ne jamais retraiter le même
-                    // contenu si la cellule est réaffichée (scroll, recyclage) sans changement.
-                    static const char kS7TVWidthFixedKey = 12;
-                    {
-                        NSMutableArray *vStack = [NSMutableArray arrayWithObject:cell];
-                        while (vStack.count > 0) {
-                            UIView *v = vStack[0];
-                            [vStack removeObjectAtIndex:0];
-
-                            NSAttributedString *attrStr = nil;
-                            UILabel   *foundLabel    = nil;
-                            UITextView *foundTextView = nil;
-
-                            if ([v isKindOfClass:[UITextView class]]) {
-                                UITextView *tv2 = (UITextView *)v;
-                                if (tv2.attributedText.length > 0) {
-                                    attrStr       = tv2.attributedText;
-                                    foundTextView = tv2;
-                                }
-                            } else if ([v isKindOfClass:[UILabel class]]) {
-                                UILabel *lbl = (UILabel *)v;
-                                if (lbl.attributedText.length > 0) {
-                                    attrStr    = lbl.attributedText;
-                                    foundLabel = lbl;
-                                }
-                            }
-
-                            if (attrStr.length > 0) {
-                                // Déjà traité pour CE contenu exact → ne pas redépiler la queue.
-                                if (objc_getAssociatedObject(attrStr, &kS7TVWidthFixedKey)) {
-                                    [vStack removeAllObjects];
-                                    continue;
-                                }
-
-                                __block BOOL hasAtt = NO;
-                                [attrStr enumerateAttribute:NSAttachmentAttributeName
-                                                    inRange:NSMakeRange(0, attrStr.length)
-                                                    options:0
-                                                 usingBlock:^(id val, NSRange r, BOOL *stop) {
-                                    if (val) { hasAtt = YES; *stop = YES; }
-                                }];
-
-                                if (hasAtt) {
-                                    NSMutableAttributedString *ms = [attrStr mutableCopy];
-                                    __block NSInteger attachIdx = 0;
-                                    [ms enumerateAttribute:NSAttachmentAttributeName
-                                                   inRange:NSMakeRange(0, ms.length)
-                                                   options:0
-                                                usingBlock:^(id val, NSRange r, BOOL *stop) {
-                                        if (!val) return;
-                                        if (![val respondsToSelector:@selector(setBounds:)]) return;
-
-                                        // Dépilage direct, dans l'ordre, en une passe unique.
-                                        NSString *emoteID = [[SevenTVManager sharedManager] s7tv_dequeuePendingEmoteID];
-                                        NSNumber *ratioNum = emoteID ? (NSNumber *)[[SevenTVManager sharedManager] emoteRatios][emoteID] : nil;
-                                        CGFloat ratio = ratioNum ? ratioNum.floatValue : 1.0;
-                                        ratio = MAX(0.4, MIN(3.0, ratio)); // garde-fou
-
-                                        CGFloat w = targetSize * ratio;
-                                        CGRect  nb = CGRectMake(0, -6.0, w, targetSize + 6.0);
-                                        [(NSTextAttachment *)val setBounds:nb];
-
-                                        static NSInteger s_bl = 0;
-                                        if (s_bl < 30) {
-                                            s_bl++;
-                                            [[SevenTVManager sharedManager] log:
-                                                [NSString stringWithFormat:
-                                                    @"🔧 [ATTBOUNDS] att#%ld emoteID=%@ bounds={0,-6,%.0f,%.0f} ratio=%.2f",
-                                                    (long)s_bl, emoteID ?: @"?", w, targetSize + 6.0, ratio]];
-                                        }
-                                        attachIdx++;
-                                    }];
-
-                                    objc_setAssociatedObject(ms, &kS7TVWidthFixedKey, @(YES), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-
-                                    dispatch_async(dispatch_get_main_queue(), ^{
-                                        if (!weakCell || !weakCell.window) return;
-                                        if (foundLabel)    foundLabel.attributedText    = ms;
-                                        else if (foundTextView) foundTextView.attributedText = ms;
-                                        [[SevenTVManager sharedManager] log:
-                                            [NSString stringWithFormat:
-                                                @"🔧 [ATTBOUNDS] %ld attachments bounds réassignés (%.0fpt)",
-                                                (long)attachIdx, targetSize]];
-                                    });
-
-                                    [vStack removeAllObjects];
-                                    continue;
-                                }
-                            }
-
-                            for (UIView *sub in v.subviews) [vStack addObject:sub];
-                        }
-                    }
-                    // ─────────────────────────────────────────────────────────────────
 
                     // Collecter les emote layers via l'API publique CALayer uniquement
                     // (plus de raw pointer → élimine le crash objc_retain sur Swift storage)
