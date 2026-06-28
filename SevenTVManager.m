@@ -1259,10 +1259,23 @@ static const CGFloat kS7TVMenuHeight = 520.0;
     // Scanner chaque mot et construire le tag emotes=
     NSMutableArray<NSString *> *entries = [NSMutableArray array];
     NSMutableDictionary<NSNumber *, NSString *> *localPositions = [NSMutableDictionary dictionary];
+    // ── Texte SQUELETTE ──────────────────────────────────────────────────
+    // Un NSTextAttachment occupe TOUJOURS exactement 1 caractère dans le
+    // texte affiché, quelle que soit la longueur du nom de l'emote dans le
+    // message brut (ex. "LMDAO peepoSitting" → rendu = "LMDAO ￼", le mot
+    // "peepoSitting" devient 1 seul caractère \uFFFC). Stocker messageText
+    // brut ne peut donc JAMAIS matcher renderedText (confirmé par logs
+    // LOOKUP-FAIL). On construit ici le même texte mais avec chaque mot-emote
+    // remplacé par \uFFFC — CE texte-là doit matcher exactement ce qui
+    // s'affiche (après le préfixe pseudo/badges, inchangé sinon).
+    NSMutableString *skeleton = [NSMutableString string];
+    NSMutableDictionary<NSNumber *, NSString *> *skeletonPositions = [NSMutableDictionary dictionary];
     NSArray<NSString *> *words = [messageText componentsSeparatedByString:@" "];
     NSUInteger pos = 0;
 
-    for (NSString *word in words) {
+    for (NSUInteger wi = 0; wi < words.count; wi++) {
+        NSString *word = words[wi];
+        if (wi > 0) [skeleton appendString:@" "];
         if (word.length > 0) {
             SevenTVEmote *emote = channel[word] ?: global[word];
             if (emote) {
@@ -1280,11 +1293,13 @@ static const CGFloat kS7TVMenuHeight = 520.0;
                     // Ratio carré par défaut si dimensions inconnues
                     self.emoteRatios[emote.emoteID] = @(1.0);
                 }
-                // NOUVEAU : position relative à CE message uniquement (clé = start,
-                // mais stockée dans localPositions, qui sera attachée à messageText
-                // tout entier — pas dans une structure globale partagée entre messages).
                 localPositions[@(start)] = emote.emoteID;
+                // Position dans le SQUELETTE (où sera le \uFFFC une fois rendu).
+                skeletonPositions[@(skeleton.length)] = emote.emoteID;
+                [skeleton appendString:@"\uFFFC"];
                 [self log:@"✅ Emote détectée: %@ → %@", word, entry];
+            } else {
+                [skeleton appendString:word];
             }
         }
         pos += word.length + 1;
@@ -1292,9 +1307,10 @@ static const CGFloat kS7TVMenuHeight = 520.0;
 
     if (entries.count == 0) return raw;
 
-    // Stocker la map per-message (remplace emotePositions/pendingEmoteIDQueue
-    // globaux — voir s7tv_storeEmotePositionsForMessage: pour le pourquoi).
-    [self s7tv_storeEmotePositionsForMessage:messageText positions:localPositions];
+    // Stocker la map per-message, clé = texte SQUELETTE (remplace
+    // emotePositions/pendingEmoteIDQueue globaux — voir
+    // s7tv_storeEmotePositionsForMessage: pour le pourquoi).
+    [self s7tv_storeEmotePositionsForMessage:skeleton positions:skeletonPositions];
 
     NSString *emoteTag = [entries componentsJoinedByString:@"/"];
     [self log:@"💉 Injection: emotes=%@", emoteTag];
