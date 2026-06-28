@@ -40,6 +40,7 @@ static const char kS7TVEmoteIDDirectKey = 10;  // associated object sur NSTextAt
 @interface SevenTVManager (S7TVRatioQueue)
 - (void)s7tv_enqueuePendingEmoteID:(NSString *)emoteID;
 - (NSString *)s7tv_dequeuePendingEmoteID;
+- (NSString *)s7tv_emoteIDForRenderedText:(NSString *)renderedText charIdx:(NSUInteger)charIdx;
 @end
 
 // État global verrou d'orientation
@@ -1917,30 +1918,20 @@ static void s7tv_dbg_hookAttachmentBounds(void) {
             // ── Tag emoteID ICI, dans le hook qui gère déjà la hauteur avec succès ──
             // addAttribute:/setAttributes: ne sont jamais appelés (confirmé). Piste 3
             // (UILabel/UITextView) ne marche pas non plus : Twitch.MessageStringView
-            // fait du CoreText direct, sans UILabel/UITextView enfant (confirmé par
-            // VIEWDUMP). DONC : on tague ici, dans le SEUL hook confirmé fiable.
-            // On cache par (textStorage, charIdx) — PAS sur l'instance attachment
-            // (qui peut être recréée à chaque passe de layout CoreText, ce qui avait
-            // cassé le rendu la dernière fois) — le textStorage, lui, est stable pour
-            // toute la durée de vie du message.
+            // fait du CoreText direct (confirmé par VIEWDUMP).
+            // ANCIEN comportement (queue FIFO globale + cache par textStorage) cassait
+            // le rendu dès que plusieurs messages étaient mis en page en même temps
+            // (scroll, chat actif) — la queue n'avait aucune notion de "à quel message
+            // appartient cet ID". NOUVEAU : lookup direct par CONTENU du message
+            // (s7tv_emoteIDForRenderedText:charIdx:) — chaque message a sa propre
+            // table de positions, donc aucune interférence possible entre messages
+            // traités en concurrence.
             NSString *emoteID = nil;
             {
                 NSLayoutManager *lm3 = tc ? tc.layoutManager : nil;
                 NSTextStorage *ts3 = lm3 ? lm3.textStorage : nil;
                 if (ts3) {
-                    static const char kS7TVCharIdxToEmoteIDKey = 11;
-                    @synchronized ([SevenTVManager sharedManager]) {
-                        NSMutableDictionary<NSNumber *, NSString *> *idMap = objc_getAssociatedObject(ts3, &kS7TVCharIdxToEmoteIDKey);
-                        if (!idMap) {
-                            idMap = [NSMutableDictionary dictionary];
-                            objc_setAssociatedObject(ts3, &kS7TVCharIdxToEmoteIDKey, idMap, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                        }
-                        emoteID = idMap[@(charIdx)];
-                        if (!emoteID) {
-                            emoteID = [[SevenTVManager sharedManager] s7tv_dequeuePendingEmoteID];
-                            if (emoteID) idMap[@(charIdx)] = emoteID;
-                        }
-                    }
+                    emoteID = [[SevenTVManager sharedManager] s7tv_emoteIDForRenderedText:ts3.string charIdx:charIdx];
                 }
             }
 
@@ -2052,15 +2043,10 @@ static void s7tv_dbg_hookLayoutManagerAttachmentSize(void) {
 
                     // Même correctif que attachmentBoundsForTextContainer: —
                     // size (param Twitch) est un placeholder fixe, pas le vrai
-                    // ratio. On lit le tag emoteID sur attachment.contents.
+                    // ratio. Lookup par contenu du message (pas par ordre
+                    // global) — voir s7tv_emoteIDForRenderedText:charIdx:.
                     SevenTVManager *mgr = [SevenTVManager sharedManager];
-                    NSString *emoteID = objc_getAssociatedObject(attachment, &kS7TVEmoteIDDirectKey);
-                    if (!emoteID && attachment && [attachment respondsToSelector:@selector(contents)]) {
-                        id contents = ((NSTextAttachment *)attachment).contents;
-                        if ([contents isKindOfClass:[NSData class]]) {
-                            emoteID = objc_getAssociatedObject(contents, &kS7TVEmoteIDOnDataKey);
-                        }
-                    }
+                    NSString *emoteID = [mgr s7tv_emoteIDForRenderedText:textStorage.string charIdx:charRange.location];
                     CGFloat ratio;
                     NSNumber *ratioNumFromTag = emoteID ? (NSNumber *)mgr.emoteRatios[emoteID] : nil;
                     if (ratioNumFromTag) {

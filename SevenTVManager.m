@@ -107,6 +107,24 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSNumber *> *emoteRatios;
 // Dictionnaire { @(characterIndex): emoteID } pour sizeOfImageAttachmentAtCharacterIndex:
 @property (nonatomic, strong) NSMutableDictionary<NSNumber *, NSString *> *emotePositions;
+// File FIFO { emoteID } dans l'ordre d'apparition dans le message en cours
+// d'injection IRC. Consommée par le hook addAttribute:value:range: au moment
+// EXACT où Twitch crée le NSTextAttachment correspondant — c'est le seul
+// point fiable, car l'attachment lui-même (.contents/.image/.fileWrapper)
+// ne contient JAMAIS la vraie donnée de l'emote (confirmé par logs CONTENTS-DIAG :
+// image={0,0}, contents=nil, fileWrapper vide).
+@property (nonatomic, strong) NSMutableArray<NSString *> *pendingEmoteIDQueue;
+// ── NOUVEAU : map PAR MESSAGE { messageText : {relativePos: emoteID} } ──────
+// Remplace le FIFO global (pendingEmoteIDQueue) et emotePositions (global lui
+// aussi) pour le calcul du ratio de largeur. Les deux anciennes structures
+// étaient indexées par ORDRE/POSITION GLOBALE → désynchronisation dès que
+// plusieurs messages sont mis en page en même temps (scroll, chat actif).
+// Ici, la clé est le texte EXACT du message (messageText, sans pseudo) — donc
+// chaque message a sa propre table de positions, aucune interférence possible
+// entre messages concurrents. messageOrderQueue garde l'ordre d'insertion pour
+// purger les plus anciens (taille bornée, évite une fuite mémoire).
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSDictionary<NSNumber *, NSString *> *> *messageEmoteMaps;
+@property (nonatomic, strong) NSMutableArray<NSString *> *messageOrderQueue;
 @property (nonatomic, strong) NSLock *logLock;
 
 // Dossier racine du cache JSON (créé à la demande)
@@ -342,6 +360,9 @@ static const CGFloat kS7TVMenuHeight = 520.0;
         _logBuffer = [NSMutableArray arrayWithCapacity:256];
     _emoteRatios = [NSMutableDictionary dictionary];
     _emotePositions = [NSMutableDictionary dictionary];
+    _pendingEmoteIDQueue = [NSMutableArray array];
+    _messageEmoteMaps    = [NSMutableDictionary dictionary];
+    _messageOrderQueue   = [NSMutableArray array];
         _logLock   = [[NSLock alloc] init];
 
         _favoriteEmoteIDs        = [NSMutableSet set];
@@ -1237,6 +1258,7 @@ static const CGFloat kS7TVMenuHeight = 520.0;
 
     // Scanner chaque mot et construire le tag emotes=
     NSMutableArray<NSString *> *entries = [NSMutableArray array];
+    NSMutableDictionary<NSNumber *, NSString *> *localPositions = [NSMutableDictionary dictionary];
     NSArray<NSString *> *words = [messageText componentsSeparatedByString:@" "];
     NSUInteger pos = 0;
 
@@ -1258,8 +1280,10 @@ static const CGFloat kS7TVMenuHeight = 520.0;
                     // Ratio carré par défaut si dimensions inconnues
                     self.emoteRatios[emote.emoteID] = @(1.0);
                 }
-                // Stocker { characterIndex → emoteID } pour sizeOfImageAttachmentAtCharacterIndex:
-                self.emotePositions[@(start)] = emote.emoteID;
+                // NOUVEAU : position relative à CE message uniquement (clé = start,
+                // mais stockée dans localPositions, qui sera attachée à messageText
+                // tout entier — pas dans une structure globale partagée entre messages).
+                localPositions[@(start)] = emote.emoteID;
                 [self log:@"✅ Emote détectée: %@ → %@", word, entry];
             }
         }
@@ -1267,6 +1291,10 @@ static const CGFloat kS7TVMenuHeight = 520.0;
     }
 
     if (entries.count == 0) return raw;
+
+    // Stocker la map per-message (remplace emotePositions/pendingEmoteIDQueue
+    // globaux — voir s7tv_storeEmotePositionsForMessage: pour le pourquoi).
+    [self s7tv_storeEmotePositionsForMessage:messageText positions:localPositions];
 
     NSString *emoteTag = [entries componentsJoinedByString:@"/"];
     [self log:@"💉 Injection: emotes=%@", emoteTag];
@@ -2816,6 +2844,72 @@ static S7TVLogCategory s7tv_categoryForMessage(NSString *msg) {
         case S7TVLogCategoryDump:            return self.logDump;
     }
     return NO;
+}
+
+// ============================================================
+// MARK: - File FIFO emoteID en attente (pour tag à la création de l'attachment)
+// ============================================================
+
+- (void)s7tv_enqueuePendingEmoteID:(NSString *)emoteID {
+    if (!emoteID) return;
+    @synchronized (self) {
+        [self.pendingEmoteIDQueue addObject:emoteID];
+    }
+}
+
+- (NSString *)s7tv_dequeuePendingEmoteID {
+    @synchronized (self) {
+        if (self.pendingEmoteIDQueue.count == 0) return nil;
+        NSString *first = self.pendingEmoteIDQueue.firstObject;
+        [self.pendingEmoteIDQueue removeObjectAtIndex:0];
+        return first;
+    }
+}
+
+// ============================================================
+// MARK: - Map PAR MESSAGE { messageText : {relativePos: emoteID} }
+// ============================================================
+// Remplace le FIFO global + emotePositions (globale) pour le calcul du ratio
+// de largeur. Clé = texte exact du message (sans pseudo) → aucune interférence
+// possible entre messages traités en même temps (scroll, chat actif).
+
+- (void)s7tv_storeEmotePositionsForMessage:(NSString *)messageText positions:(NSDictionary<NSNumber *, NSString *> *)positions {
+    if (!messageText || positions.count == 0) return;
+    @synchronized (self) {
+        // Taille bornée : purge le plus ancien si on dépasse 40 messages en attente.
+        if (self.messageOrderQueue.count >= 40) {
+            NSString *oldest = self.messageOrderQueue.firstObject;
+            [self.messageOrderQueue removeObjectAtIndex:0];
+            [self.messageEmoteMaps removeObjectForKey:oldest];
+        }
+        self.messageEmoteMaps[messageText] = positions;
+        [self.messageOrderQueue addObject:messageText];
+    }
+}
+
+// Recherche : ts3.string (texte final affiché, ex. "pseudo: message") contient
+// quel messageText connu comme sous-chaîne ? Si trouvé, renvoie l'emoteID au
+// charIdx demandé (en tenant compte du décalage = position où messageText
+// commence dans renderedText).
+- (NSString *)s7tv_emoteIDForRenderedText:(NSString *)renderedText charIdx:(NSUInteger)charIdx {
+    if (!renderedText || renderedText.length == 0) return nil;
+    @synchronized (self) {
+        // On part des messages les plus récents (les plus probables) en
+        // remontant — meilleure chance de trouver vite + privilégie le plus
+        // récent en cas de collision improbable (deux messages identiques).
+        for (NSInteger i = (NSInteger)self.messageOrderQueue.count - 1; i >= 0; i--) {
+            NSString *msgText = self.messageOrderQueue[i];
+            NSRange found = [renderedText rangeOfString:msgText];
+            if (found.location == NSNotFound) continue;
+            NSUInteger offset = found.location;
+            if (charIdx < offset) continue; // charIdx tombe dans le pseudo, pas le message
+            NSUInteger relPos = charIdx - offset;
+            NSDictionary<NSNumber *, NSString *> *positions = self.messageEmoteMaps[msgText];
+            NSString *emoteID = positions[@(relPos)];
+            if (emoteID) return emoteID;
+        }
+        return nil;
+    }
 }
 
 // ============================================================
