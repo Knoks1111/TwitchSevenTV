@@ -2894,19 +2894,24 @@ static S7TVLogCategory s7tv_categoryForMessage(NSString *msg) {
 - (NSString *)s7tv_emoteIDForRenderedText:(NSString *)renderedText charIdx:(NSUInteger)charIdx {
     if (!renderedText || renderedText.length == 0) return nil;
     @synchronized (self) {
-        // On part des messages les plus récents (les plus probables) en
-        // remontant — meilleure chance de trouver vite + privilégie le plus
-        // récent en cas de collision improbable (deux messages identiques).
         for (NSInteger i = (NSInteger)self.messageOrderQueue.count - 1; i >= 0; i--) {
             NSString *msgText = self.messageOrderQueue[i];
             NSRange found = [renderedText rangeOfString:msgText];
             if (found.location == NSNotFound) continue;
             NSUInteger offset = found.location;
-            if (charIdx < offset) continue; // charIdx tombe dans le pseudo, pas le message
+            if (charIdx < offset) continue;
             NSUInteger relPos = charIdx - offset;
             NSDictionary<NSNumber *, NSString *> *positions = self.messageEmoteMaps[msgText];
             NSString *emoteID = positions[@(relPos)];
             if (emoteID) return emoteID;
+        }
+        // DIAGNOSTIC TEMPORAIRE : aucun match → dump pour comprendre pourquoi.
+        static NSUInteger s_lookupFailDiag = 0;
+        if (s_lookupFailDiag < 10) {
+            s_lookupFailDiag++;
+            [self log:@"🔎 [LOOKUP-FAIL] #%lu renderedText=\"%@\" (len=%lu) charIdx=%lu — %lu messages en mémoire: %@",
+                (unsigned long)s_lookupFailDiag, renderedText, (unsigned long)renderedText.length,
+                (unsigned long)charIdx, (unsigned long)self.messageOrderQueue.count, self.messageOrderQueue];
         }
         return nil;
     }
