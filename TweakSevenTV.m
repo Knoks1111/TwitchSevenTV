@@ -1888,30 +1888,14 @@ static void s7tv_dbg_hookAttachmentBounds(void) {
             }
 
             CGFloat targetSize = [[SevenTVManager sharedManager] targetEmoteSize];
-
-            // Priorité 1 : tag ratio posé par le hook UIImage decode (emoteRatios → NSData → UIImage)
-            // Priorité 2 : image.size réelle quand l'image est déjà chargée
-            // Fallback   : 1.0 (image pas encore chargée → corrigé par setAttachmentSize: hook au chargement)
-            // NE PAS utiliser r.size : r vient de l'original Twitch = placeholder fixe {18,18} → ratio=1.0 toujours
-            CGFloat ratio = 1.0;
-            NSNumber *taggedRatio = image ? objc_getAssociatedObject(image, &kS7TVEmoteRatioKey) : nil;
-            if (taggedRatio && taggedRatio.floatValue > 0.1f) {
-                ratio = taggedRatio.floatValue;
-            } else if (image && image.size.width > 0 && image.size.height > 0
-                       && ABS(image.size.width - image.size.height) > 0.5f) {
-                ratio = image.size.width / image.size.height;
-            }
-
+            CGFloat ratio = (r.size.width > 0) ? r.size.width / r.size.height : 1.0;
             CGRect newRect = CGRectMake(0, -6.0, targetSize * ratio, targetSize);
             s_resized++;
             if (s_resized <= 30) {
                 [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
-                    @"[BOUNDS] v4 resize #%lu imgSize={%.0f,%.0f} ratio=%.2f src=%@ new=%@",
-                    (unsigned long)s_resized,
-                    image ? image.size.width : 0.0f, image ? image.size.height : 0.0f,
-                    ratio,
-                    taggedRatio ? @"tag" : (image ? @"imgSize" : @"fallback1.0"),
-                    NSStringFromCGRect(newRect)]];
+                    @"[BOUNDS] v3 resize #%lu origSize={%.0f,%.0f} ratio=%.2f orig=%@ new=%@",
+                    (unsigned long)s_resized, r.size.width, r.size.height,
+                    ratio, NSStringFromCGRect(r), NSStringFromCGRect(newRect)]];
             }
             return newRect;
         }
@@ -1955,30 +1939,17 @@ static void s7tv_dbg_hookLayoutManagerAttachmentSize(void) {
                     ? ((NSTextAttachment *)attachment).image : nil;
 
                 // Condition : size "par defaut" (hauteur <=22pt)
-                // NE PAS utiliser size.width/size.height : size vient de Twitch = placeholder {18,18} → ratio=1.0
-                // Même logique que hookAttachmentBounds v4 : lire le ratio depuis l'image chargée.
+                // Meme logique que hookAttachmentBounds — ratio depuis size originale.
                 if (size.height > 0 && size.height <= 22.0) {
                     CGFloat targetSize = [[SevenTVManager sharedManager] targetEmoteSize];
-
-                    CGFloat ratio = 1.0;
-                    NSNumber *taggedRatio = image ? objc_getAssociatedObject(image, &kS7TVEmoteRatioKey) : nil;
-                    if (taggedRatio && taggedRatio.floatValue > 0.1f) {
-                        ratio = taggedRatio.floatValue;
-                    } else if (image && image.size.width > 0 && image.size.height > 0
-                               && ABS(image.size.width - image.size.height) > 0.5f) {
-                        ratio = image.size.width / image.size.height;
-                    }
-
+                    CGFloat ratio = (size.width > 0) ? size.width / size.height : 1.0;
                     finalSize = CGSizeMake(targetSize * ratio, targetSize);
                     s_resized++;
                     if (s_resized <= 30) {
                         [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
-                            @"[ATTSIZE] v4 resize #%lu imgSize={%.0f,%.0f} ratio=%.2f src=%@ new=%@",
-                            (unsigned long)s_resized,
-                            image ? image.size.width : 0.0f, image ? image.size.height : 0.0f,
-                            ratio,
-                            taggedRatio ? @"tag" : (image ? @"imgSize" : @"fallback1.0"),
-                            NSStringFromCGSize(finalSize)]];
+                            @"[ATTSIZE] v3 resize #%lu origSize={%.0f,%.0f} ratio=%.2f new=%@",
+                            (unsigned long)s_resized, size.width, size.height,
+                            ratio, NSStringFromCGSize(finalSize)]];
                     }
                 } else {
                     s_skipped++;
