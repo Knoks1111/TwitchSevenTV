@@ -34,14 +34,6 @@ static const char kS7TVEmoteRatioKey   = 9;   // associated object sur UIImage/o
 static const char kS7TVBitsHijacked    = 6;
 static const char kS7TVOrigSectionCount = 7;
 static const char kS7TVShareHijacked   = 8;   // verrou orientation
-static const char kS7TVEmoteIDDirectKey = 10;  // associated object sur NSTextAttachment → NSString(emoteID), tagué à la création (addAttribute:value:range:)
-
-// Déclaration des méthodes FIFO ajoutées dans SevenTVManager.m (pas dans le .h)
-@interface SevenTVManager (S7TVRatioQueue)
-- (void)s7tv_enqueuePendingEmoteID:(NSString *)emoteID;
-- (NSString *)s7tv_dequeuePendingEmoteID;
-- (NSString *)s7tv_emoteIDForRenderedText:(NSString *)renderedText charIdx:(NSUInteger)charIdx;
-@end
 
 // État global verrou d'orientation
 static BOOL s_orientationLocked             = NO;
@@ -1755,13 +1747,11 @@ static void s7tv_dbg_dumpMethodsForClass(Class cls, NSString *label) {
 }
 
 static void s7tv_hook_displayLayer(void) {
+    // Hook displayLayer: sur Twitch.AnimatedImageAttachmentLayer.
+    // Installé tôt (à t=3s) pour être actif dès le premier message avec emote.
+    // Fire quand l'image est prête → Twitch a fini tous ses setFrame: → bon timing
+    // pour corriger le frame du superlayer (ImageAttachmentLayer) sans conflit.
     Class animLayerCls = NSClassFromString(@"Twitch.AnimatedImageAttachmentLayer");
-    if (!animLayerCls) {
-        [[SevenTVManager sharedManager] log:@"⚠️ [displayLayer hook] AnimatedImageAttachmentLayer introuvable à t=3s — sera installé lazily"];
-        return;
-    }
-
-
     if (!animLayerCls) {
         [[SevenTVManager sharedManager] log:@"⚠️ [displayLayer hook] AnimatedImageAttachmentLayer introuvable à t=3s — sera installé lazily"];
         return;
@@ -1781,35 +1771,19 @@ static void s7tv_hook_displayLayer(void) {
             if ([selfObj respondsToSelector:startSel]) {
                 ((void(*)(id,SEL))objc_msgSend)(selfObj, startSel);
             }
+            // Resize du superlayer (ImageAttachmentLayer) si pas encore fait
             CALayer *outer = [(CALayer *)selfObj superlayer];
             if (outer) {
-                // LOG : classe du delegate de outer pour savoir si c'est NSTextAttachment
-                static NSInteger s_delLog = 0;
-                if (s_delLog < 10) {
-                    s_delLog++;
-                    id outerDel = [outer delegate];
-                    id selfDel  = [(CALayer *)selfObj delegate];
-                    [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
-                        @"[DEL] #%ld outerDel=%@ selfDel=%@ selfBounds={%.0f,%.0f}",
-                        (long)s_delLog,
-                        outerDel ? NSStringFromClass([outerDel class]) : @"nil",
-                        selfDel  ? NSStringFromClass([selfDel  class]) : @"nil",
-                        [(CALayer *)selfObj bounds].size.width,
-                        [(CALayer *)selfObj bounds].size.height]];
-                }
-
-                CGRect selfBounds = [(CALayer *)selfObj bounds];
-                if (selfBounds.size.height <= 0 || selfBounds.size.width <= 0) return;
-
-                CGFloat targetSize = [[SevenTVManager sharedManager] targetEmoteSize];
-                CGFloat ratio = selfBounds.size.width / selfBounds.size.height;
-                CGFloat newW = targetSize * ratio;
                 CGRect outerFrame = outer.frame;
-                // Skip si déjà à la bonne taille (±1pt) → évite la boucle
-                if (fabs(outerFrame.size.width - newW) > 1.0 || fabs(outerFrame.size.height - targetSize) > 1.0) {
+                CGFloat oh = outerFrame.size.height;
+                if (oh > 0 && oh <= 22.0) {
+                    CGFloat targetSize = [[SevenTVManager sharedManager] targetEmoteSize];
+                    CGFloat ratio = (outerFrame.size.width > 0)
+                        ? outerFrame.size.width / oh : 1.0;
+                    CGFloat newW = targetSize * ratio;
                     CGRect corrected = CGRectMake(
                         outerFrame.origin.x,
-                        outerFrame.origin.y + (outerFrame.size.height - targetSize) / 2.0,
+                        outerFrame.origin.y + (oh - targetSize) / 2.0,
                         newW, targetSize);
                     [CATransaction begin];
                     [CATransaction setDisableActions:YES];
@@ -1915,86 +1889,29 @@ static void s7tv_dbg_hookAttachmentBounds(void) {
 
             CGFloat targetSize = [[SevenTVManager sharedManager] targetEmoteSize];
 
-            // ── Tag emoteID ICI, dans le hook qui gère déjà la hauteur avec succès ──
-            // addAttribute:/setAttributes: ne sont jamais appelés (confirmé). Piste 3
-            // (UILabel/UITextView) ne marche pas non plus : Twitch.MessageStringView
-            // fait du CoreText direct (confirmé par VIEWDUMP).
-            // ANCIEN comportement (queue FIFO globale + cache par textStorage) cassait
-            // le rendu dès que plusieurs messages étaient mis en page en même temps
-            // (scroll, chat actif) — la queue n'avait aucune notion de "à quel message
-            // appartient cet ID". NOUVEAU : lookup direct par CONTENU du message
-            // (s7tv_emoteIDForRenderedText:charIdx:) — chaque message a sa propre
-            // table de positions, donc aucune interférence possible entre messages
-            // traités en concurrence.
-            NSString *emoteID = nil;
-            {
-                NSLayoutManager *lm3 = tc ? tc.layoutManager : nil;
-                NSTextStorage *ts3 = lm3 ? lm3.textStorage : nil;
-                if (ts3) {
-                    emoteID = [[SevenTVManager sharedManager] s7tv_emoteIDForRenderedText:ts3.string charIdx:charIdx];
-                }
-            }
-
-            // ── Vrai ratio 7TV ────────────────────────────────────────────
-            // r (le rect retourné par Twitch) est un PLACEHOLDER FIXE
-            // ({18,18} pour les emotes, {24,18} pour les badges) — il ne
-            // varie JAMAIS d'une emote à l'autre, donc r.width/r.height
-            // ne peut PAS donner le vrai ratio (c'est la cause du bug :
-            // toutes les emotes ressortaient avec le même ratio).
-            SevenTVManager *mgr = [SevenTVManager sharedManager];
-            id contents = [attachment respondsToSelector:@selector(contents)] ? attachment.contents : nil;
-            if (!emoteID && [contents isKindOfClass:[NSData class]]) {
-                emoteID = objc_getAssociatedObject(contents, &kS7TVEmoteIDOnDataKey);
-            }
-            if (!emoteID && image) {
-                emoteID = objc_getAssociatedObject(image, &kS7TVEmoteIDOnDataKey);
-            }
-
-            // ── DIAGNOSTIC TEMPORAIRE : où vit vraiment la donnée ? ──────────
-            static NSUInteger s_contentsDiag = 0;
-            if (s_contentsDiag < 15) {
-                s_contentsDiag++;
-                id fw = [attachment respondsToSelector:@selector(fileWrapper)] ? attachment.fileWrapper : nil;
-                NSData *fwData = [fw respondsToSelector:@selector(regularFileContents)] ? [fw regularFileContents] : nil;
-                NSString *emoteIDFromFW = fwData ? objc_getAssociatedObject(fwData, &kS7TVEmoteIDOnDataKey) : nil;
-                [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
-                    @"🐛 [CONTENTS-DIAG] #%lu attClass=%@ contents=%@(%@) image=%@ fileWrapper=%@ fwData=%@(%@) emoteIDfromFW=%@",
-                    (unsigned long)s_contentsDiag,
-                    NSStringFromClass([attachment class]),
-                    contents ? @"non-nil" : @"NIL", NSStringFromClass([contents class]),
-                    image ? [NSString stringWithFormat:@"%@ %@", NSStringFromClass([image class]), NSStringFromCGSize(image.size)] : @"NIL",
-                    fw ? NSStringFromClass([fw class]) : @"NIL",
-                    fwData ? @"non-nil" : @"NIL", fwData ? [NSString stringWithFormat:@"%lu bytes", (unsigned long)fwData.length] : @"-",
-                    emoteIDFromFW ?: @"nil"]];
-            }
-            NSString *ratioSrc;
-            CGFloat ratio;
-            NSNumber *ratioNumFromTag = emoteID ? (NSNumber *)mgr.emoteRatios[emoteID] : nil;
-            if (ratioNumFromTag) {
-                ratio = ratioNumFromTag.floatValue;
-                ratioSrc = @"emoteRatios(tag)";
-            } else if (image && image.size.width > 0 && image.size.height > 0) {
+            // Priorité 1 : tag ratio posé par le hook UIImage decode (emoteRatios → NSData → UIImage)
+            // Priorité 2 : image.size réelle quand l'image est déjà chargée
+            // Fallback   : 1.0 (image pas encore chargée → corrigé par setAttachmentSize: hook au chargement)
+            // NE PAS utiliser r.size : r vient de l'original Twitch = placeholder fixe {18,18} → ratio=1.0 toujours
+            CGFloat ratio = 1.0;
+            NSNumber *taggedRatio = image ? objc_getAssociatedObject(image, &kS7TVEmoteRatioKey) : nil;
+            if (taggedRatio && taggedRatio.floatValue > 0.1f) {
+                ratio = taggedRatio.floatValue;
+            } else if (image && image.size.width > 0 && image.size.height > 0
+                       && ABS(image.size.width - image.size.height) > 0.5f) {
                 ratio = image.size.width / image.size.height;
-                ratioSrc = @"image.size";
-            } else {
-                ratio = (r.size.width > 0) ? r.size.width / r.size.height : 1.0;
-                ratioSrc = @"placeholder(fallback)";
             }
 
-            // Clamp de sécurité : un mauvais emoteID (désalignement de
-            // queue FIFO entre messages/passes de layout) peut renvoyer
-            // un ratio totalement hors-norme → largeur énorme/nulle qui
-            // casse tout le rendu du chat. On borne à une plage raisonnable.
-            ratio = MAX(0.4, MIN(3.0, ratio));
             CGRect newRect = CGRectMake(0, -6.0, targetSize * ratio, targetSize);
-            // Stocker le ratio sur le NSTextAttachment → récupérable depuis displayLayer:
-            objc_setAssociatedObject(self_, &kS7TVEmoteRatioKey, @(ratio), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             s_resized++;
             if (s_resized <= 30) {
                 [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
-                    @"[BOUNDS] v3 resize #%lu src=%@ emoteID=%@ origSize={%.0f,%.0f} ratio=%.2f orig=%@ new=%@",
-                    (unsigned long)s_resized, ratioSrc, emoteID ?: @"?", r.size.width, r.size.height,
-                    ratio, NSStringFromCGRect(r), NSStringFromCGRect(newRect)]];
+                    @"[BOUNDS] v4 resize #%lu imgSize={%.0f,%.0f} ratio=%.2f src=%@ new=%@",
+                    (unsigned long)s_resized,
+                    image ? image.size.width : 0.0f, image ? image.size.height : 0.0f,
+                    ratio,
+                    taggedRatio ? @"tag" : (image ? @"imgSize" : @"fallback1.0"),
+                    NSStringFromCGRect(newRect)]];
             }
             return newRect;
         }
@@ -2038,33 +1955,30 @@ static void s7tv_dbg_hookLayoutManagerAttachmentSize(void) {
                     ? ((NSTextAttachment *)attachment).image : nil;
 
                 // Condition : size "par defaut" (hauteur <=22pt)
+                // NE PAS utiliser size.width/size.height : size vient de Twitch = placeholder {18,18} → ratio=1.0
+                // Même logique que hookAttachmentBounds v4 : lire le ratio depuis l'image chargée.
                 if (size.height > 0 && size.height <= 22.0) {
                     CGFloat targetSize = [[SevenTVManager sharedManager] targetEmoteSize];
 
-                    // Même correctif que attachmentBoundsForTextContainer: —
-                    // size (param Twitch) est un placeholder fixe, pas le vrai
-                    // ratio. Lookup par contenu du message (pas par ordre
-                    // global) — voir s7tv_emoteIDForRenderedText:charIdx:.
-                    SevenTVManager *mgr = [SevenTVManager sharedManager];
-                    NSString *emoteID = [mgr s7tv_emoteIDForRenderedText:textStorage.string charIdx:charRange.location];
-                    CGFloat ratio;
-                    NSNumber *ratioNumFromTag = emoteID ? (NSNumber *)mgr.emoteRatios[emoteID] : nil;
-                    if (ratioNumFromTag) {
-                        ratio = ratioNumFromTag.floatValue;
-                    } else if (image && image.size.width > 0 && image.size.height > 0) {
+                    CGFloat ratio = 1.0;
+                    NSNumber *taggedRatio = image ? objc_getAssociatedObject(image, &kS7TVEmoteRatioKey) : nil;
+                    if (taggedRatio && taggedRatio.floatValue > 0.1f) {
+                        ratio = taggedRatio.floatValue;
+                    } else if (image && image.size.width > 0 && image.size.height > 0
+                               && ABS(image.size.width - image.size.height) > 0.5f) {
                         ratio = image.size.width / image.size.height;
-                    } else {
-                        ratio = (size.width > 0) ? size.width / size.height : 1.0;
                     }
 
-                    ratio = MAX(0.4, MIN(3.0, ratio));
                     finalSize = CGSizeMake(targetSize * ratio, targetSize);
                     s_resized++;
                     if (s_resized <= 30) {
                         [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
-                            @"[ATTSIZE] v3 resize #%lu emoteID=%@ origSize={%.0f,%.0f} ratio=%.2f new=%@",
-                            (unsigned long)s_resized, emoteID ?: @"?", size.width, size.height,
-                            ratio, NSStringFromCGSize(finalSize)]];
+                            @"[ATTSIZE] v4 resize #%lu imgSize={%.0f,%.0f} ratio=%.2f src=%@ new=%@",
+                            (unsigned long)s_resized,
+                            image ? image.size.width : 0.0f, image ? image.size.height : 0.0f,
+                            ratio,
+                            taggedRatio ? @"tag" : (image ? @"imgSize" : @"fallback1.0"),
+                            NSStringFromCGSize(finalSize)]];
                     }
                 } else {
                     s_skipped++;
@@ -2096,18 +2010,10 @@ static void s7tv_dbg_hookAddAttribute(void) {
         method_setImplementation(m1, imp_implementationWithBlock(^void(id self_, NSString *attrName, id value, NSRange range) {
             if ([attrName isEqualToString:NSAttachmentAttributeName] || [value isKindOfClass:[NSTextAttachment class]]) {
                 s_count1++;
-                // Tag direct : on dépile la file FIFO (ordre = ordre du texte,
-                // rempli pendant injectSevenTVEmotesIntoIRCMessage: pour CE message)
-                // et on l'attache sur l'attachment lui-même. C'est le seul moment
-                // où on a accès à l'attachment ET à l'emoteID correct au même endroit.
-                NSString *emoteID = [[SevenTVManager sharedManager] s7tv_dequeuePendingEmoteID];
-                if (emoteID && [value respondsToSelector:@selector(image)]) {
-                    objc_setAssociatedObject(value, &kS7TVEmoteIDDirectKey, emoteID, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                }
                 if (s_count1 <= 40) {
-                    [[SevenTVManager sharedManager] log:@"🐛 [DBG] addAttribute: NSTextAttachment #%lu class=%@ range={%lu,%lu} attrName=%@ emoteIDtagué=%@",
+                    [[SevenTVManager sharedManager] log:@"🐛 [DBG] addAttribute: NSTextAttachment #%lu class=%@ range={%lu,%lu} attrName=%@",
                         (unsigned long)s_count1, NSStringFromClass([value class]),
-                        (unsigned long)range.location, (unsigned long)range.length, attrName, emoteID ?: @"nil"];
+                        (unsigned long)range.location, (unsigned long)range.length, attrName];
                 }
             }
             ((void(*)(id,SEL,NSString*,id,NSRange))orig1)(self_, sel1, attrName, value, range);
@@ -2123,15 +2029,10 @@ static void s7tv_dbg_hookAddAttribute(void) {
             id att = attrs[NSAttachmentAttributeName];
             if (att) {
                 s_count2++;
-                NSString *emoteID = [[SevenTVManager sharedManager] s7tv_dequeuePendingEmoteID];
-                if (emoteID && [att respondsToSelector:@selector(image)] &&
-                    !objc_getAssociatedObject(att, &kS7TVEmoteIDDirectKey)) {
-                    objc_setAssociatedObject(att, &kS7TVEmoteIDDirectKey, emoteID, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                }
                 if (s_count2 <= 40) {
-                    [[SevenTVManager sharedManager] log:@"🐛 [DBG] setAttributes: NSTextAttachment #%lu class=%@ range={%lu,%lu} emoteIDtagué=%@",
+                    [[SevenTVManager sharedManager] log:@"🐛 [DBG] setAttributes: NSTextAttachment #%lu class=%@ range={%lu,%lu}",
                         (unsigned long)s_count2, NSStringFromClass([att class]),
-                        (unsigned long)range.location, (unsigned long)range.length, emoteID ?: @"nil"];
+                        (unsigned long)range.location, (unsigned long)range.length];
                 }
             }
             ((void(*)(id,SEL,NSDictionary*,NSRange))orig2)(self_, sel2, attrs, range);
@@ -2244,7 +2145,56 @@ static void s7tv_debug_dump_layout_system(void) {
         s7tv_dbg_hookAddAttribute();
         s7tv_hook_displayLayer(); // installé tôt → actif dès le premier message
 
-        [[SevenTVManager sharedManager] log:@"✅ Hooks resize layout (bounds + attachmentSize + addAttribute + displayLayer) actifs"];
+        // ── Hook setFrame: sur Twitch.ImageAttachmentLayer ────────────────
+        // Twitch ignore attachmentBoundsForTextContainer: pour positionner ses
+        // layers — il utilise sa propre logique (taille naturelle de l'image).
+        // En hookant setFrame:, on intercepte synchronement au moment exact où
+        // Twitch fixe le frame du layer → resize immédiat, zéro délai.
+        Class ialClass = NSClassFromString(@"Twitch.ImageAttachmentLayer");
+        if (ialClass) {
+            SEL sfSel = @selector(setFrame:);
+            Method sfM = class_getInstanceMethod(ialClass, sfSel);
+            if (sfM) {
+                IMP sfOrig = method_getImplementation(sfM);
+                method_setImplementation(sfM, imp_implementationWithBlock(^void(CALayer *self_, CGRect newFrame) {
+                    // Appel original d'abord
+                    ((void(*)(id,SEL,CGRect))sfOrig)(self_, sfSel, newFrame);
+
+                    // Twitch peut rappeler setFrame: juste après (image load async).
+                    // On schedule la correction pour APRÈS que Twitch ait fini
+                    // tous ses appels synchrones dans ce runloop.
+                    CGFloat h = newFrame.size.height;
+                    if (h <= 0 || h > 22.0) return;
+
+                    CGFloat targetSize = [[SevenTVManager sharedManager] targetEmoteSize];
+                    CGFloat ratio = (newFrame.size.width > 0) ? newFrame.size.width / h : 1.0;
+                    CGFloat newW = targetSize * ratio;
+                    CGRect corrected = CGRectMake(newFrame.origin.x,
+                                                  newFrame.origin.y + (h - targetSize) / 2.0,
+                                                  newW, targetSize);
+
+                    __weak CALayer *weakLayer = self_;
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        CALayer *l = weakLayer;
+                        if (!l) return;
+                        // Si Twitch a réécrasé notre frame (encore <= 22pt), on corrige
+                        if (l.frame.size.height <= 22.0) {
+                            [CATransaction begin];
+                            [CATransaction setDisableActions:YES];
+                            ((void(*)(id,SEL,CGRect))sfOrig)(l, sfSel, corrected);
+                            [CATransaction commit];
+                        }
+                    });
+                }));
+                [[SevenTVManager sharedManager] log:@"✅ Hook setFrame: sur ImageAttachmentLayer OK (resize async-safe)"];
+            } else {
+                [[SevenTVManager sharedManager] log:@"⚠️ setFrame: introuvable sur ImageAttachmentLayer"];
+            }
+        } else {
+            [[SevenTVManager sharedManager] log:@"⚠️ Twitch.ImageAttachmentLayer introuvable (hook setFrame: ignoré)"];
+        }
+
+        [[SevenTVManager sharedManager] log:@"✅ Hooks resize layout (bounds + attachmentSize + addAttribute + setFrame) actifs"];
     });
 }
 
@@ -2328,8 +2278,9 @@ static void TwitchSevenTVInit(void) {
                 // Seulement pour ChatMessageTableViewCell
                 if (![NSStringFromClass([cell class]) isEqualToString:@"Twitch.ChatMessageTableViewCell"]) return;
 
-                // dispatch_async : laisser le runloop finir le layout courant
-                // avant le BFS. displayLayer: hook gère le resize des layers.
+                // setFrame: hook gère le resize synchrone — dispatch_async
+                // sert juste à laisser le runloop finir le layout courant avant
+                // le BFS, sans délai visible.
                 __weak UITableViewCell *weakCell = cell;
                 __weak UITableView     *weakTV   = tableView;
                 dispatch_async(dispatch_get_main_queue(), ^{
@@ -2373,6 +2324,101 @@ static void TwitchSevenTVInit(void) {
                         }
                     }
 
+                    // ── Piste 3 : modifier NSTextAttachment.bounds AVANT re-layout ────────
+                    // orderedRatios est déjà calculé ci-dessus depuis cellText.
+                    // On walk les subviews pour trouver le UILabel dont l'attributedText
+                    // contient des NSTextAttachment (= les emotes dans le message).
+                    // On modifie les bounds directement sur chaque attachment puis on
+                    // ré-assigne attributedText → force CoreText à relayouter avec les
+                    // bonnes dimensions → fin des chevauchements.
+                    // NOTE : badges Twitch sont rendus dans un label séparé ; le label
+                    // message ne devrait contenir que les emotes 7TV comme attachments.
+                    if (orderedRatios.count > 0) {
+                        NSMutableArray *vStack = [NSMutableArray arrayWithObject:cell];
+                        while (vStack.count > 0) {
+                            UIView *v = vStack[0];
+                            [vStack removeObjectAtIndex:0];
+
+                            NSAttributedString *attrStr = nil;
+                            UILabel   *foundLabel    = nil;
+                            UITextView *foundTextView = nil;
+
+                            if ([v isKindOfClass:[UITextView class]]) {
+                                UITextView *tv2 = (UITextView *)v;
+                                if (tv2.attributedText.length > 0) {
+                                    attrStr       = tv2.attributedText;
+                                    foundTextView = tv2;
+                                }
+                            } else if ([v isKindOfClass:[UILabel class]]) {
+                                UILabel *lbl = (UILabel *)v;
+                                if (lbl.attributedText.length > 0) {
+                                    attrStr    = lbl.attributedText;
+                                    foundLabel = lbl;
+                                }
+                            }
+
+                            if (attrStr.length > 0) {
+                                // Vérifier si ce label contient au moins un NSTextAttachment
+                                __block BOOL hasAtt = NO;
+                                [attrStr enumerateAttribute:NSAttachmentAttributeName
+                                                    inRange:NSMakeRange(0, attrStr.length)
+                                                    options:0
+                                                 usingBlock:^(id val, NSRange r, BOOL *stop) {
+                                    if (val) { hasAtt = YES; *stop = YES; }
+                                }];
+
+                                if (hasAtt) {
+                                    // Copie mutable pour modifier sans crasher le layout en cours
+                                    NSMutableAttributedString *ms = [attrStr mutableCopy];
+                                    __block NSInteger attachIdx = 0;
+                                    [ms enumerateAttribute:NSAttachmentAttributeName
+                                                   inRange:NSMakeRange(0, ms.length)
+                                                   options:0
+                                                usingBlock:^(id val, NSRange r, BOOL *stop) {
+                                        if (!val) return;
+                                        if (![val respondsToSelector:@selector(setBounds:)]) return;
+                                        if (attachIdx >= (NSInteger)orderedRatios.count) {
+                                            // Plus de ratios connus → on ne touche pas
+                                            return;
+                                        }
+                                        CGFloat ratio   = orderedRatios[attachIdx].floatValue;
+                                        CGFloat w       = targetSize * ratio;
+                                        // descent=6 : décale vers le bas pour aligner sur la baseline
+                                        CGRect  nb = CGRectMake(0, -6.0, w, targetSize + 6.0);
+                                        [(NSTextAttachment *)val setBounds:nb];
+
+                                        static NSInteger s_bl = 0;
+                                        if (s_bl < 30) {
+                                            s_bl++;
+                                            [[SevenTVManager sharedManager] log:
+                                                [NSString stringWithFormat:
+                                                    @"🔧 [ATTBOUNDS] att#%ld bounds={0,-6,%.0f,%.0f} ratio=%.2f",
+                                                    (long)s_bl, w, targetSize + 6.0, ratio]];
+                                        }
+                                        attachIdx++;
+                                    }];
+
+                                    // Ré-assigner → CoreText relayoute avec les nouvelles bounds
+                                    dispatch_async(dispatch_get_main_queue(), ^{
+                                        if (!weakCell || !weakCell.window) return;
+                                        if (foundLabel)    foundLabel.attributedText    = ms;
+                                        else if (foundTextView) foundTextView.attributedText = ms;
+                                        [[SevenTVManager sharedManager] log:
+                                            [NSString stringWithFormat:
+                                                @"🔧 [ATTBOUNDS] %ld attachments bounds réassignés (%.0fpt)",
+                                                (long)attachIdx, targetSize]];
+                                    });
+
+                                    // On a trouvé et traité le label → arrêter le walk
+                                    [vStack removeAllObjects];
+                                    continue;
+                                }
+                            }
+
+                            for (UIView *sub in v.subviews) [vStack addObject:sub];
+                        }
+                    }
+                    // ─────────────────────────────────────────────────────────────────
 
                     // Collecter les emote layers via l'API publique CALayer uniquement
                     // (plus de raw pointer → élimine le crash objc_retain sur Swift storage)
@@ -2462,16 +2508,6 @@ static void TwitchSevenTVInit(void) {
 
                     [CATransaction begin];
                     [CATransaction setDisableActions:YES];
-                    // Index dans orderedRatios — incrémenté uniquement pour les layers
-                    // qui passent les filtres ci-dessous (donc qui correspondent à une
-                    // vraie emote affichée dans le message, dans l'ordre du texte).
-                    // orderedRatios est calculé plus haut depuis cellText → emoteForName:
-                    // → dimensions réelles de l'API 7TV. C'est la SEULE source fiable :
-                    // sub.bounds (AnimatedImageAttachmentLayer) ne reflète PAS le ratio
-                    // réel de l'image (logs : frame identique pour toutes les emotes,
-                    // peu importe leur forme native) — donc on ne s'en sert plus que
-                    // comme fallback si jamais l'index dépasse orderedRatios.
-                    NSInteger ratioIdx = 0;
                     for (CALayer *caLayer in emoteLayers) {
                         CGRect f = caLayer.frame;
                         if (f.size.width <= 0 || f.size.height <= 0) { continue; }
@@ -2492,50 +2528,21 @@ static void TwitchSevenTVInit(void) {
                                 f.origin.x, f.origin.y]];
                         }
 
-                        // Ratio réel = orderedRatios[ratioIdx] (vraies dims API 7TV),
-                        // aligné par position dans le texte. Fallback sur sub.bounds
-                        // uniquement si l'index dépasse (sécurité, ne devrait pas arriver
-                        // si emoteLayers ne contient que des emotes 7TV après filtre badges).
-                        CGFloat ratio = 1.0;
-                        BOOL gotRatioFromOrdered = NO;
-                        if (ratioIdx < (NSInteger)orderedRatios.count) {
-                            ratio = orderedRatios[ratioIdx].floatValue;
-                            gotRatioFromOrdered = YES;
-                        } else {
-                            for (CALayer *sub in caLayer.sublayers) {
-                                if ([NSStringFromClass(object_getClass(sub)) containsString:@"Animated"]) {
-                                    CGRect subBounds = sub.bounds;
-                                    if (subBounds.size.height > 0 && subBounds.size.width > 0)
-                                        ratio = subBounds.size.width / subBounds.size.height;
-                                    break;
-                                }
-                            }
-                        }
-                        ratioIdx++;
+                        // Ratio depuis le frame ACTUEL du layer (= taille naturelle Twitch)
+                        // Même source que BOUNDS (r.size.width/r.size.height) → sync parfait.
+                        CGFloat ratio = (f.size.height > 0) ? f.size.width / f.size.height : 1.0;
 
-                        static NSInteger s_ratioLog = 0;
-                        if (s_ratioLog < 20) {
-                            s_ratioLog++;
-                            [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
-                                @"[RESIZE] ratio #%ld src=%@ ratio=%.3f",
-                                (long)s_ratioLog, gotRatioFromOrdered ? @"orderedRatios" : @"sub.bounds(fallback)",
-                                ratio]];
-                        }
-
+                        // Largeur cible = min(targetSize * ratio, targetSize * boundsRatio)
+                        // On clamp à la largeur que CoreText a réservée (= ce que BOUNDS a retourné)
+                        // pour éviter tout overflow → chevauchement.
+                        // BOUNDS retourne toujours ratio=1.0 (30x30) donc la largeur max réservée
+                        // est targetSize. On utilise la même valeur pour garantir la cohérence.
                         CGFloat newWidth = targetSize * ratio;
 
                         caLayer.bounds = CGRectMake(0, 0, newWidth, targetSize);
                         caLayer.frame  = CGRectMake(f.origin.x,
                                                     f.origin.y + (f.size.height - targetSize) / 2.0,
                                                     newWidth, targetSize);
-
-                        static NSInteger s_postLog = 0;
-                        if (s_postLog < 20) {
-                            s_postLog++;
-                            [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
-                                @"[RESIZE] post #%ld frame APRÈS={%.0f,%.0f}",
-                                (long)s_postLog, newWidth, targetSize]];
-                        }
                     }
                     [CATransaction commit];
 
@@ -2544,7 +2551,7 @@ static void TwitchSevenTVInit(void) {
             });
 
             method_setImplementation(origMethod, newIMP);
-            [[SevenTVManager sharedManager] log:@"✅ willDisplayCell hooké (dispatch_async)"];
+            [[SevenTVManager sharedManager] log:@"✅ willDisplayCell hooké (dispatch_async, setFrame: hook actif)"];
 
             // Observer : quand le slider change la taille, on force un reloadData
             // sur toutes les ChatTranscriptView visibles.
