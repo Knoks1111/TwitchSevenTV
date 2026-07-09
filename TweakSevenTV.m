@@ -1931,24 +1931,35 @@ static void s7tv_dbg_hookAttachmentBounds(void) {
             }
 
             CGFloat targetSize = [[SevenTVManager sharedManager] targetEmoteSize];
-            // Source de vérité : la vraie image de l'attachment (image.size),
-            // pas r (le rect que Twitch vient de proposer) — r reflète souvent
-            // une taille par défaut/pas encore réelle, d'où le bug carré.
+            // Priorité 1 : tag posé à l'insertion (s7tv_dbg_hookAddAttribute),
+            // dérivé de emote.width/height via l'API 7TV — connu de façon
+            // SYNCHRONE, bien avant que l'image ne soit chargée. C'est la
+            // source qui corrige le chevauchement (espace réservé = taille
+            // réelle dès le premier passage, plus de désync avec le rendu
+            // visuel corrigé plus tard par displayLayer:/setFrame:).
+            // Priorité 2 : image.size si déjà chargée (emotes natives Twitch,
+            // ou 7TV si jamais le tag a manqué).
+            // Priorité 3 : r (dernier recours, carré la plupart du temps).
+            NSNumber *taggedRatio = objc_getAssociatedObject(attachment, &kS7TVEmoteRatioKey);
             CGFloat ratio;
-            if (image && image.size.width > 0 && image.size.height > 0) {
+            NSString *ratioSource;
+            if (taggedRatio) {
+                ratio = taggedRatio.floatValue;
+                ratioSource = @"tag";
+            } else if (image && image.size.width > 0 && image.size.height > 0) {
                 ratio = image.size.width / image.size.height;
+                ratioSource = @"image";
             } else {
-                // Pas d'image dispo à cet instant → on garde l'ancien calcul
-                // en dernier recours plutôt que de planter.
                 ratio = (r.size.width > 0 && r.size.height > 0) ? r.size.width / r.size.height : 1.0;
+                ratioSource = @"fallback";
             }
             CGRect newRect = CGRectMake(0, -6.0, targetSize * ratio, targetSize);
             s_resized++;
             if (s_resized <= 30) {
                 [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
-                    @"[BOUNDS] v3 resize #%lu origSize={%.0f,%.0f} ratio=%.2f orig=%@ new=%@",
+                    @"[BOUNDS] v3 resize #%lu origSize={%.0f,%.0f} ratio=%.2f (%@) orig=%@ new=%@",
                     (unsigned long)s_resized, r.size.width, r.size.height,
-                    ratio, NSStringFromCGRect(r), NSStringFromCGRect(newRect)]];
+                    ratio, ratioSource, NSStringFromCGRect(r), NSStringFromCGRect(newRect)]];
             }
             return newRect;
         }
@@ -1997,19 +2008,28 @@ static void s7tv_dbg_hookLayoutManagerAttachmentSize(void) {
                 // qui reste bloquée à ratio=1.00 (18x18) dans les faits.
                 if (size.height > 0 && size.height <= 22.0) {
                     CGFloat targetSize = [[SevenTVManager sharedManager] targetEmoteSize];
+                    // Même priorité que BOUNDS : tag précoce (synchrone, API 7TV)
+                    // avant image.size (peut encore être nil ici) avant fallback carré.
+                    NSNumber *taggedRatio = attachment ? objc_getAssociatedObject(attachment, &kS7TVEmoteRatioKey) : nil;
                     CGFloat ratio;
-                    if (image && image.size.width > 0 && image.size.height > 0) {
+                    NSString *ratioSource;
+                    if (taggedRatio) {
+                        ratio = taggedRatio.floatValue;
+                        ratioSource = @"tag";
+                    } else if (image && image.size.width > 0 && image.size.height > 0) {
                         ratio = image.size.width / image.size.height;
+                        ratioSource = @"image";
                     } else {
                         ratio = (size.width > 0 && size.height > 0) ? size.width / size.height : 1.0;
+                        ratioSource = @"fallback";
                     }
                     finalSize = CGSizeMake(targetSize * ratio, targetSize);
                     s_resized++;
                     if (s_resized <= 30) {
                         [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
-                            @"[ATTSIZE] v3 resize #%lu origSize={%.0f,%.0f} ratio=%.2f new=%@",
+                            @"[ATTSIZE] v3 resize #%lu origSize={%.0f,%.0f} ratio=%.2f (%@) new=%@",
                             (unsigned long)s_resized, size.width, size.height,
-                            ratio, NSStringFromCGSize(finalSize)]];
+                            ratio, ratioSource, NSStringFromCGSize(finalSize)]];
                     }
                 } else {
                     s_skipped++;
@@ -2033,6 +2053,51 @@ static void s7tv_dbg_hookAddAttribute(void) {
     // et la range exacte où elle est insérée.
     Class cls = [NSMutableAttributedString class];
 
+    // ── Tag ratio à l'insertion (fix chevauchement) ────────────────────
+    // BOUNDS/ATTSIZE se déclenchent AVANT que l'image soit chargée
+    // (attachment.image == nil) → ratio toujours carré en fallback, d'où
+    // le chevauchement (le rendu visuel, lui, est corrigé plus tard par
+    // displayLayer:/setFrame: une fois l'image prête — désync entre
+    // "espace réservé" et "taille affichée").
+    //
+    // Fix : on connaît le ratio réel bien avant le chargement de l'image,
+    // dès le parsing API 7TV (emote.width/height → SevenTVManager.emoteRatios,
+    // voir injectSevenTVEmotesIntoIRCMessage:). On tague donc directement le
+    // NSTextAttachment avec ce ratio ICI, à l'insertion — synchrone, aucune
+    // dépendance au chargement de l'image. BOUNDS/ATTSIZE n'ont plus qu'à
+    // lire ce tag en priorité.
+    //
+    // Appariement : emotePositions[@(range.location)] → emoteID. range.location
+    // correspond à l'offset du caractère de remplacement dans le texte du
+    // message (même espace de coordonnées que le tag "emotes=ID:start-end"
+    // qu'on injecte nous-mêmes et que Twitch parse pour placer l'attachment).
+    // Consommé (removeObjectForKey:) immédiatement après lecture pour éviter
+    // toute contamination si un message ultérieur réutilise la même position.
+    void (^tagAttachmentWithRatio)(id, NSRange) = ^(id attachment, NSRange range) {
+        if (![attachment isKindOfClass:[NSTextAttachment class]]) return;
+        if (objc_getAssociatedObject(attachment, &kS7TVEmoteRatioKey)) return; // déjà tagué
+
+        SevenTVManager *mgr = [SevenTVManager sharedManager];
+        NSString *emoteID = nil;
+        @synchronized (mgr.emotePositions) {
+            emoteID = mgr.emotePositions[@(range.location)];
+            if (emoteID) [mgr.emotePositions removeObjectForKey:@(range.location)];
+        }
+        if (!emoteID) return;
+
+        NSNumber *ratioNum = mgr.emoteRatios[emoteID];
+        if (!ratioNum) return; // pas de donnée fiable → on laisse BOUNDS/ATTSIZE faire leur fallback habituel
+
+        objc_setAssociatedObject(attachment, &kS7TVEmoteRatioKey, ratioNum, OBJC_ASSOCIATION_RETAIN);
+
+        static NSUInteger s_tagCount = 0;
+        s_tagCount++;
+        if (s_tagCount <= 40) {
+            [mgr log:@"🐛 [TAG-EARLY] ✅ #%lu emoteID=%@ ratio=%.3f pos=%lu (avant chargement image)",
+                (unsigned long)s_tagCount, emoteID, ratioNum.floatValue, (unsigned long)range.location];
+        }
+    };
+
     SEL sel1 = @selector(addAttribute:value:range:);
     Method m1 = class_getInstanceMethod(cls, sel1);
     if (m1) {
@@ -2040,6 +2105,7 @@ static void s7tv_dbg_hookAddAttribute(void) {
         static NSUInteger s_count1 = 0;
         method_setImplementation(m1, imp_implementationWithBlock(^void(id self_, NSString *attrName, id value, NSRange range) {
             if ([attrName isEqualToString:NSAttachmentAttributeName] || [value isKindOfClass:[NSTextAttachment class]]) {
+                tagAttachmentWithRatio(value, range);
                 s_count1++;
                 if (s_count1 <= 40) {
                     [[SevenTVManager sharedManager] log:@"🐛 [DBG] addAttribute: NSTextAttachment #%lu class=%@ range={%lu,%lu} attrName=%@",
@@ -2059,6 +2125,7 @@ static void s7tv_dbg_hookAddAttribute(void) {
         method_setImplementation(m2, imp_implementationWithBlock(^void(id self_, NSDictionary *attrs, NSRange range) {
             id att = attrs[NSAttachmentAttributeName];
             if (att) {
+                tagAttachmentWithRatio(att, range);
                 s_count2++;
                 if (s_count2 <= 40) {
                     [[SevenTVManager sharedManager] log:@"🐛 [DBG] setAttributes: NSTextAttachment #%lu class=%@ range={%lu,%lu}",
@@ -2069,7 +2136,7 @@ static void s7tv_dbg_hookAddAttribute(void) {
             ((void(*)(id,SEL,NSDictionary*,NSRange))orig2)(self_, sel2, attrs, range);
         }));
     }
-    [[SevenTVManager sharedManager] log:@"✅ [DBG] addAttribute:/setAttributes: hookés sur NSMutableAttributedString"];
+    [[SevenTVManager sharedManager] log:@"✅ [DBG] addAttribute:/setAttributes: hookés sur NSMutableAttributedString (+ tag ratio précoce)"];
 }
 
 static void s7tv_hook_uiimage_decode_tagging(void) {
