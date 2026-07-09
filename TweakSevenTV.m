@@ -2477,37 +2477,67 @@ static void TwitchSevenTVInit(void) {
 
                     // ─────────────────────────────────────────────────────────────
 
-                    [CATransaction begin];
-                    [CATransaction setDisableActions:YES];
+                    // ── Fix ratio : une seule source de vérité ─────────────────────
+                    // AVANT : le ratio était recalculé depuis f.size.width/f.size.height,
+                    // c'est-à-dire depuis le frame ACTUEL du CALayer — qui est toujours
+                    // carré à ce stade (Twitch/BOUNDS retourne ratio=1.0), d'où le bug
+                    // d'emotes carrées : on lisait une taille déjà fausse pour "corriger"
+                    // la taille.
+                    // APRÈS : on réutilise orderedRatios, la même donnée déjà correcte
+                    // (dérivée de em.width/em.height) qui sert aussi à Piste 3 pour les
+                    // NSTextAttachment.bounds. Les deux resize partagent maintenant la
+                    // même source → plus de désync possible.
+                    //
+                    // Appariement : emoteLayers est trié par position de lecture
+                    // (haut→bas, gauche→droite) pour correspondre à l'ordre des mots
+                    // dans orderedRatios. Si les comptes ne correspondent pas (emote pas
+                    // encore chargée, timing), on ne traite que le nombre commun — jamais
+                    // de ratio inventé/fallback pour les autres.
+                    NSMutableArray<CALayer *> *sortedEmoteLayers = [NSMutableArray array];
                     for (CALayer *caLayer in emoteLayers) {
                         CGRect f = caLayer.frame;
                         if (f.size.width <= 0 || f.size.height <= 0) { continue; }
-
                         // Badges Twitch : toujours à gauche de la ligne (x < 60pt),
                         // avant le username. Les emotes sont après le username (x > 100pt).
                         if (f.origin.x < 60.0) { continue; }
+                        [sortedEmoteLayers addObject:caLayer];
+                    }
+                    [sortedEmoteLayers sortUsingComparator:^NSComparisonResult(CALayer *a, CALayer *b) {
+                        CGRect fa = a.frame, fb = b.frame;
+                        if (fabs(fa.origin.y - fb.origin.y) > 4.0) {
+                            return fa.origin.y < fb.origin.y ? NSOrderedAscending : NSOrderedDescending;
+                        }
+                        if (fa.origin.x < fb.origin.x) return NSOrderedAscending;
+                        if (fa.origin.x > fb.origin.x) return NSOrderedDescending;
+                        return NSOrderedSame;
+                    }];
 
-                        // LOG DIAGNOSTIC : frame AVANT resize
-                        // → si f.size = 30x30, BOUNDS hook est respecté par Twitch (bon)
-                        // → si f.size = 18x18, Twitch ignore BOUNDS hook (problème)
+                    NSInteger pairCount = MIN(sortedEmoteLayers.count, orderedRatios.count);
+                    if (sortedEmoteLayers.count != orderedRatios.count) {
+                        [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
+                            @"⚠️ [RESIZE] mismatch layers=%ld ratios=%ld → %ld appariés, reste inchangé",
+                            (long)sortedEmoteLayers.count, (long)orderedRatios.count, (long)pairCount]];
+                    }
+
+                    [CATransaction begin];
+                    [CATransaction setDisableActions:YES];
+                    for (NSInteger i = 0; i < pairCount; i++) {
+                        CALayer *caLayer = sortedEmoteLayers[i];
+                        CGRect f = caLayer.frame;
+
+                        CGFloat ratio = orderedRatios[i].floatValue;
+                        if (ratio <= 0) { continue; } // pas de donnée fiable → on ne touche pas
+
+                        // LOG DIAGNOSTIC : frame AVANT resize + ratio réel utilisé
                         static NSInteger s_preLog = 0;
                         if (s_preLog < 20) {
                             s_preLog++;
                             [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
-                                @"[RESIZE] pre #%ld frame AVANT={%.0f,%.0f} pos={%.0f,%.0f}",
+                                @"[RESIZE] pre #%ld frame AVANT={%.0f,%.0f} pos={%.0f,%.0f} ratio réel=%.3f",
                                 (long)s_preLog, f.size.width, f.size.height,
-                                f.origin.x, f.origin.y]];
+                                f.origin.x, f.origin.y, ratio]];
                         }
 
-                        // Ratio depuis le frame ACTUEL du layer (= taille naturelle Twitch)
-                        // Même source que BOUNDS (r.size.width/r.size.height) → sync parfait.
-                        CGFloat ratio = (f.size.height > 0) ? f.size.width / f.size.height : 1.0;
-
-                        // Largeur cible = min(targetSize * ratio, targetSize * boundsRatio)
-                        // On clamp à la largeur que CoreText a réservée (= ce que BOUNDS a retourné)
-                        // pour éviter tout overflow → chevauchement.
-                        // BOUNDS retourne toujours ratio=1.0 (30x30) donc la largeur max réservée
-                        // est targetSize. On utilise la même valeur pour garantir la cohérence.
                         CGFloat newWidth = targetSize * ratio;
 
                         caLayer.bounds = CGRectMake(0, 0, newWidth, targetSize);
