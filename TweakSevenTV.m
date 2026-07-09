@@ -1763,7 +1763,7 @@ static void s7tv_dbg_dumpMethodsForClass(Class cls, NSString *label) {
 static CGFloat s7tv_ratioFromLayerContents(CALayer *layer) {
     if (!layer) return 0;
 
-    CGImageRef img = (CGImageRef)layer.contents;
+    CGImageRef img = (__bridge CGImageRef)layer.contents;
     if (img && CFGetTypeID(img) == CGImageGetTypeID()) {
         size_t w = CGImageGetWidth(img);
         size_t h = CGImageGetHeight(img);
@@ -1771,7 +1771,7 @@ static CGFloat s7tv_ratioFromLayerContents(CALayer *layer) {
     }
 
     for (CALayer *sub in layer.sublayers) {
-        CGImageRef subImg = (CGImageRef)sub.contents;
+        CGImageRef subImg = (__bridge CGImageRef)sub.contents;
         if (subImg && CFGetTypeID(subImg) == CGImageGetTypeID()) {
             size_t w = CGImageGetWidth(subImg);
             size_t h = CGImageGetHeight(subImg);
