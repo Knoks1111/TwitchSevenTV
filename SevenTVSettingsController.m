@@ -1,0 +1,1467 @@
+/*
+ * SevenTVSettingsController.m
+ *
+ * Style : copie pixel-perfect du style Twitch natif (InsetGrouped).
+ *   - Fond          : #0E0E10  (noir profond, identique à l'app Twitch)
+ *   - Cellules      : #1F1F23  (gris foncé)
+ *   - Angles        : UITableViewStyleInsetGrouped (natif iOS)
+ *   - Header 7TV    : logo + "7TV SETTINGS" gris clair (comme les autres sections Twitch)
+ *   - Séparateurs   : couleur Twitch #2A2A2E
+ *   - Texte         : blanc / gris secondaire
+ *   - Accent        : violet 7TV rgb(142, 69, 224)
+ */
+
+#import "SevenTVSettingsController.h"
+#import "SevenTVManager.h"
+#import "SevenTVLogsController.h"
+#import "SevenTVURLProtocol.h"
+#import "SevenTVLogo.h"
+#define kTCLiveAutoCollectChannelPoints @"TCDBGLiveAutoCollectChannelPoints"
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MARK: - Palette couleurs
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Fond général de la tableView (noir profond Twitch)
+static UIColor *S7TVBg(void) {
+    return [UIColor colorWithRed:0.055 green:0.055 blue:0.063 alpha:1.0]; // #0E0E10
+}
+
+// Fond des cellules (gris foncé Twitch)
+static UIColor *S7TVCellBg(void) {
+    return [UIColor colorWithRed:0.122 green:0.122 blue:0.137 alpha:1.0]; // #1F1F23
+}
+
+// Violet 7TV / Twitch
+static UIColor *S7TVAccent(void) {
+    return [UIColor colorWithRed:0.557 green:0.271 blue:0.878 alpha:1.0]; // #8E45E0
+}
+
+// Gris secondaire (sous-titres, icônes)
+static UIColor *S7TVGray(void) {
+    return [UIColor colorWithWhite:0.55 alpha:1.0];
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MARK: - Helpers UI
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Icône SF Symbol 22×22 pts
+static UIImageView *S7TVIcon(NSString *sfName, UIColor *tint) {
+    UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration
+        configurationWithPointSize:16 weight:UIImageSymbolWeightMedium];
+    UIImage *img = [UIImage systemImageNamed:sfName withConfiguration:cfg];
+    UIImageView *iv = [[UIImageView alloc] initWithImage:img];
+    iv.tintColor = tint;
+    iv.contentMode = UIViewContentModeScaleAspectFit;
+    iv.translatesAutoresizingMaskIntoConstraints = NO;
+    [NSLayoutConstraint activateConstraints:@[
+        [iv.widthAnchor  constraintEqualToConstant:22],
+        [iv.heightAnchor constraintEqualToConstant:22],
+    ]];
+    return iv;
+}
+
+// Cellule standard avec icône + titre + (optionnel) sous-titre + chevron
+// Style taille police identique Twitch natif : titre 17pt Regular, sous-titre 12pt Regular gris
+static UITableViewCell *S7TVNavCell(NSString *title,
+                                     NSString *subtitle,
+                                     NSString *sfName,
+                                     UIColor  *iconTint) {
+    UITableViewCell *cell = [[UITableViewCell alloc]
+        initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
+    cell.accessoryType   = UITableViewCellAccessoryDisclosureIndicator;
+    cell.backgroundColor = S7TVCellBg();
+    cell.selectedBackgroundView = [[UIView alloc] init];
+    cell.selectedBackgroundView.backgroundColor =
+        [UIColor colorWithWhite:1.0 alpha:0.06];
+
+    UIImageView *icon = S7TVIcon(sfName, iconTint);
+    [cell.contentView addSubview:icon];
+
+    UILabel *titleLbl = [[UILabel alloc] init];
+    titleLbl.text = title;
+    // Twitch natif : 17pt Regular (même poids que les cellules Settings iOS)
+    titleLbl.font = [UIFont systemFontOfSize:17 weight:UIFontWeightRegular];
+    titleLbl.textColor = [UIColor whiteColor];
+    titleLbl.numberOfLines = 1;
+    titleLbl.translatesAutoresizingMaskIntoConstraints = NO;
+
+    if (subtitle.length > 0) {
+        UILabel *subLbl = [[UILabel alloc] init];
+        subLbl.text = subtitle;
+        // Sous-titre : 12pt Regular gris (identique Twitch)
+        subLbl.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
+        subLbl.textColor = S7TVGray();
+        subLbl.numberOfLines = 1;
+        subLbl.translatesAutoresizingMaskIntoConstraints = NO;
+
+        // Stack vertical centré dans la cellule
+        UIStackView *stack = [[UIStackView alloc]
+            initWithArrangedSubviews:@[titleLbl, subLbl]];
+        stack.axis      = UILayoutConstraintAxisVertical;
+        stack.spacing   = 2;
+        stack.alignment = UIStackViewAlignmentLeading;
+        stack.translatesAutoresizingMaskIntoConstraints = NO;
+        [cell.contentView addSubview:stack];
+
+        [NSLayoutConstraint activateConstraints:@[
+            [icon.leadingAnchor   constraintEqualToAnchor:cell.contentView.leadingAnchor constant:16],
+            [icon.centerYAnchor   constraintEqualToAnchor:cell.contentView.centerYAnchor],
+            [stack.leadingAnchor  constraintEqualToAnchor:icon.trailingAnchor constant:14],
+            [stack.centerYAnchor  constraintEqualToAnchor:cell.contentView.centerYAnchor],
+            [stack.trailingAnchor constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-8],
+            // Assure que le stack ne déborde pas verticalement
+            [stack.topAnchor      constraintGreaterThanOrEqualToAnchor:cell.contentView.topAnchor constant:8],
+            [stack.bottomAnchor   constraintLessThanOrEqualToAnchor:cell.contentView.bottomAnchor constant:-8],
+        ]];
+    } else {
+        [cell.contentView addSubview:titleLbl];
+        [NSLayoutConstraint activateConstraints:@[
+            [icon.leadingAnchor     constraintEqualToAnchor:cell.contentView.leadingAnchor constant:16],
+            [icon.centerYAnchor     constraintEqualToAnchor:cell.contentView.centerYAnchor],
+            [titleLbl.leadingAnchor  constraintEqualToAnchor:icon.trailingAnchor constant:14],
+            [titleLbl.trailingAnchor constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-8],
+            // CRITIQUE : top+bottom pour que le label ait une hauteur résolue
+            [titleLbl.topAnchor      constraintEqualToAnchor:cell.contentView.topAnchor constant:10],
+            [titleLbl.bottomAnchor   constraintEqualToAnchor:cell.contentView.bottomAnchor constant:-10],
+        ]];
+    }
+    return cell;
+}
+
+// Cellule avec UISwitch
+// Titre 17pt Regular (identique Twitch natif), switch violet 7TV
+static UITableViewCell *S7TVSwitchCell(NSString *title,
+                                        NSString *sfName,
+                                        UIColor  *iconTint,
+                                        BOOL      isOn,
+                                        id        target,
+                                        SEL       action) {
+    UITableViewCell *cell = [[UITableViewCell alloc]
+        initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
+    cell.selectionStyle  = UITableViewCellSelectionStyleNone;
+    cell.backgroundColor = S7TVCellBg();
+
+    UIImageView *icon = S7TVIcon(sfName, iconTint);
+    [cell.contentView addSubview:icon];
+
+    UILabel *lbl = [[UILabel alloc] init];
+    lbl.text = title;
+    // 17pt Regular = taille standard iOS Settings / Twitch natif
+    lbl.font = [UIFont systemFontOfSize:17 weight:UIFontWeightRegular];
+    lbl.textColor = [UIColor whiteColor];
+    lbl.numberOfLines = 1;
+    lbl.translatesAutoresizingMaskIntoConstraints = NO;
+    [cell.contentView addSubview:lbl];
+
+    UISwitch *sw = [[UISwitch alloc] init];
+    sw.on          = isOn;
+    sw.onTintColor = S7TVAccent();
+    [sw addTarget:target action:action forControlEvents:UIControlEventValueChanged];
+    sw.translatesAutoresizingMaskIntoConstraints = NO;
+    [cell.contentView addSubview:sw];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [icon.leadingAnchor  constraintEqualToAnchor:cell.contentView.leadingAnchor constant:16],
+        [icon.centerYAnchor  constraintEqualToAnchor:cell.contentView.centerYAnchor],
+
+        // CRITIQUE top+bottom : résout la hauteur du label et centre verticalement
+        [lbl.leadingAnchor   constraintEqualToAnchor:icon.trailingAnchor constant:14],
+        [lbl.topAnchor       constraintEqualToAnchor:cell.contentView.topAnchor constant:13],
+        [lbl.bottomAnchor    constraintEqualToAnchor:cell.contentView.bottomAnchor constant:-13],
+
+        [sw.leadingAnchor    constraintGreaterThanOrEqualToAnchor:lbl.trailingAnchor constant:12],
+        [sw.trailingAnchor   constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-16],
+        [sw.centerYAnchor    constraintEqualToAnchor:cell.contentView.centerYAnchor],
+    ]];
+    return cell;
+}
+
+// Header de section style Twitch : logo (optionnel) + texte gris uppercase
+// Identique visuellement au header "7TV SETTINGS" de la capture
+static UIView *S7TVSectionHeader(NSString *title, BOOL withLogo) {
+    UIView *container = [[UIView alloc] init];
+    container.backgroundColor = [UIColor clearColor];
+
+    UILabel *lbl = [[UILabel alloc] init];
+    lbl.text = title.uppercaseString;
+    lbl.font = [UIFont systemFontOfSize:13 weight:UIFontWeightRegular];
+    lbl.textColor = [UIColor colorWithWhite:0.60 alpha:1.0];
+    lbl.translatesAutoresizingMaskIntoConstraints = NO;
+    [container addSubview:lbl];
+
+    if (withLogo) {
+        // Petit logo 7TV à gauche du texte, comme sur la capture
+        NSData *d = [[NSData alloc]
+            initWithBase64EncodedString:kS7TVLogoBase64
+                                options:NSDataBase64DecodingIgnoreUnknownCharacters];
+        UIImage *logoImg = d ? [UIImage imageWithData:d scale:2.0] : nil;
+
+        if (logoImg) {
+            UIImageView *iv = [[UIImageView alloc] initWithImage:logoImg];
+            iv.contentMode = UIViewContentModeScaleAspectFit;
+            iv.translatesAutoresizingMaskIntoConstraints = NO;
+            [container addSubview:iv];
+
+            [NSLayoutConstraint activateConstraints:@[
+                [iv.leadingAnchor  constraintEqualToAnchor:container.leadingAnchor constant:16],
+                [iv.bottomAnchor   constraintEqualToAnchor:container.bottomAnchor constant:-8],
+                [iv.widthAnchor    constraintEqualToConstant:22],
+                [iv.heightAnchor   constraintEqualToConstant:16],
+
+                [lbl.leadingAnchor constraintEqualToAnchor:iv.trailingAnchor constant:6],
+                [lbl.bottomAnchor  constraintEqualToAnchor:container.bottomAnchor constant:-8],
+                [lbl.trailingAnchor constraintEqualToAnchor:container.trailingAnchor constant:-16],
+            ]];
+            return container;
+        }
+    }
+
+    // Header texte seul (sans logo)
+    [NSLayoutConstraint activateConstraints:@[
+        [lbl.leadingAnchor  constraintEqualToAnchor:container.leadingAnchor constant:16],
+        [lbl.bottomAnchor   constraintEqualToAnchor:container.bottomAnchor constant:-8],
+        [lbl.trailingAnchor constraintEqualToAnchor:container.trailingAnchor constant:-16],
+    ]];
+    return container;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MARK: - Méthode utilitaire commune pour styleTableView
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void S7TVStyleTableView(UITableView *tv) {
+    tv.backgroundColor   = S7TVBg();
+    tv.separatorColor    = [UIColor colorWithRed:0.165 green:0.165 blue:0.180 alpha:1.0];
+    tv.separatorInset    = UIEdgeInsetsMake(0, 52, 0, 0);
+}
+
+static UIColor *S7TVGreen(void)  { return [UIColor colorWithRed:0.20 green:0.78 blue:0.35 alpha:1.0]; }
+static UIColor *S7TVOrange(void) { return [UIColor colorWithRed:1.00 green:0.58 blue:0.00 alpha:1.0]; }
+static UIColor *S7TVRed(void)    { return [UIColor systemRedColor]; }
+
+// Helper NSUserDefaults
+static BOOL S7TVBool(NSString *key) {
+    return [[NSUserDefaults standardUserDefaults] boolForKey:key];
+}
+static void S7TVSetBool(NSString *key, BOOL val) {
+    [[NSUserDefaults standardUserDefaults] setBool:val forKey:key];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MARK: - SevenTVSettingsController  (Hub principal)
+// ─────────────────────────────────────────────────────────────────────────────
+
+typedef NS_ENUM(NSInteger, S7TVHomeSection) {
+    S7TVHomeSectionMain   = 0,
+    S7TVHomeSectionLive   = 1,
+    S7TVHomeSectionReload = 2,
+};
+
+@implementation SevenTVSettingsController
+
+- (instancetype)init {
+    // InsetGrouped = angles arrondis natifs iOS, identique aux paramètres Twitch
+    self = [super initWithStyle:UITableViewStyleInsetGrouped];
+    return self;
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    S7TVStyleTableView(self.tableView);
+    [self buildNavBar];
+}
+
+- (void)buildNavBar {
+    // Titre nav bar : logo 7TV + "7TV"
+    NSData *d = [[NSData alloc]
+        initWithBase64EncodedString:kS7TVLogoBase64
+                            options:NSDataBase64DecodingIgnoreUnknownCharacters];
+    UIImage *logo = d ? [UIImage imageWithData:d scale:2.0] : nil;
+
+    if (logo) {
+        UIView *tv = [[UIView alloc] init];
+        UIImageView *iv = [[UIImageView alloc] initWithImage:logo];
+        iv.contentMode = UIViewContentModeScaleAspectFit;
+        iv.translatesAutoresizingMaskIntoConstraints = NO;
+
+        UILabel *lbl = [[UILabel alloc] init];
+        lbl.text = @"7TV";
+        lbl.font = [UIFont systemFontOfSize:17 weight:UIFontWeightBold];
+        lbl.textColor = S7TVAccent();
+        lbl.translatesAutoresizingMaskIntoConstraints = NO;
+
+        [tv addSubview:iv]; [tv addSubview:lbl];
+        [NSLayoutConstraint activateConstraints:@[
+            [iv.leadingAnchor  constraintEqualToAnchor:tv.leadingAnchor],
+            [iv.centerYAnchor  constraintEqualToAnchor:tv.centerYAnchor],
+            [iv.widthAnchor    constraintEqualToConstant:28],
+            [iv.heightAnchor   constraintEqualToConstant:20],
+            [lbl.leadingAnchor constraintEqualToAnchor:iv.trailingAnchor constant:6],
+            [lbl.centerYAnchor constraintEqualToAnchor:tv.centerYAnchor],
+            [lbl.trailingAnchor constraintEqualToAnchor:tv.trailingAnchor],
+        ]];
+        CGFloat w = 28 + 6 + [@"7TV" sizeWithAttributes:@{
+            NSFontAttributeName: [UIFont systemFontOfSize:17 weight:UIFontWeightBold]
+        }].width;
+        tv.frame = CGRectMake(0, 0, w, 20);
+        self.navigationItem.titleView = tv;
+    } else {
+        self.title = @"7TV Settings";
+    }
+
+    if (self.openedAsModal) {
+        UIBarButtonItem *close = [[UIBarButtonItem alloc]
+            initWithBarButtonSystemItem:UIBarButtonSystemItemClose
+                                 target:self action:@selector(closeTapped)];
+        self.navigationItem.rightBarButtonItem = close;
+    }
+}
+
+- (void)closeTapped {
+    [self dismissViewControllerAnimated:YES completion:^{
+        [[NSNotificationCenter defaultCenter]
+            postNotificationName:@"S7TVMenuDidDismiss" object:nil];
+    }];
+}
+
+// ── TableView ──
+
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tv { return 3; }
+
+- (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s {
+    switch (s) {
+        case S7TVHomeSectionMain:   return 3;
+        case S7TVHomeSectionLive:   return 1;
+        case S7TVHomeSectionReload: return 1;
+        default: return 0;
+    }
+}
+
+- (CGFloat)tableView:(UITableView *)tv heightForRowAtIndexPath:(NSIndexPath *)ip {
+    return 60;
+}
+
+- (CGFloat)tableView:(UITableView *)tv heightForHeaderInSection:(NSInteger)s {
+    return s == S7TVHomeSectionMain ? 44 : 36;
+}
+
+- (UIView *)tableView:(UITableView *)tv viewForHeaderInSection:(NSInteger)s {
+    switch (s) {
+        case S7TVHomeSectionMain:   return S7TVSectionHeader(@"7TV Settings", YES);
+        case S7TVHomeSectionLive:   return S7TVSectionHeader(@"Live Stream Control", NO);
+        case S7TVHomeSectionReload: return [[UIView alloc] init];
+        default: return [[UIView alloc] init];
+    }
+}
+
+- (CGFloat)tableView:(UITableView *)tv heightForFooterInSection:(NSInteger)s {
+    return 8;
+}
+
+- (UIView *)tableView:(UITableView *)tv viewForFooterInSection:(NSInteger)s {
+    UIView *v = [[UIView alloc] init];
+    v.backgroundColor = [UIColor clearColor];
+    return v;
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
+
+    // Section Reload
+    if (ip.section == S7TVHomeSectionReload) {
+        UITableViewCell *cell = [[UITableViewCell alloc]
+            initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
+        cell.accessoryType   = UITableViewCellAccessoryDisclosureIndicator;
+        cell.backgroundColor = S7TVCellBg();
+        cell.selectedBackgroundView = [[UIView alloc] init];
+        cell.selectedBackgroundView.backgroundColor =
+            [UIColor colorWithWhite:1.0 alpha:0.06];
+        UIImageView *icon = S7TVIcon(@"arrow.clockwise",
+                                      [UIColor colorWithWhite:0.75 alpha:1.0]);
+        [cell.contentView addSubview:icon];
+        UILabel *lbl = [[UILabel alloc] init];
+        lbl.text = @"Recharger les emotes";
+        lbl.font = [UIFont systemFontOfSize:17 weight:UIFontWeightRegular];
+        lbl.textColor = [UIColor whiteColor];
+        lbl.numberOfLines = 1;
+        lbl.translatesAutoresizingMaskIntoConstraints = NO;
+        [cell.contentView addSubview:lbl];
+        [NSLayoutConstraint activateConstraints:@[
+            [icon.leadingAnchor  constraintEqualToAnchor:cell.contentView.leadingAnchor constant:16],
+            [icon.centerYAnchor  constraintEqualToAnchor:cell.contentView.centerYAnchor],
+            [lbl.leadingAnchor   constraintEqualToAnchor:icon.trailingAnchor constant:14],
+            [lbl.trailingAnchor  constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-8],
+            [lbl.topAnchor       constraintEqualToAnchor:cell.contentView.topAnchor constant:10],
+            [lbl.bottomAnchor    constraintEqualToAnchor:cell.contentView.bottomAnchor constant:-10],
+        ]];
+        return cell;
+    }
+
+    // Section Main : Emotes / Stats / Debug
+    if (ip.section == S7TVHomeSectionMain) {
+        NSString *sfName, *title, *subtitle;
+        UIColor *iconTint = [UIColor colorWithWhite:0.75 alpha:1.0];
+        switch (ip.row) {
+            case 0: sfName=@"face.smiling";   title=@"Emotes 7TV";   subtitle=@"Animées, picker"; iconTint=S7TVAccent(); break;
+            case 1: sfName=@"chart.bar.fill"; title=@"Statistiques"; subtitle=@"Emotes chargées, channel actif"; break;
+            case 2: sfName=@"ant.fill";       title=@"Débogage";     subtitle=@"Logs, tap logger, bouton flottant"; break;
+            default: return [[UITableViewCell alloc] init];
+        }
+        return S7TVNavCell(title, subtitle, sfName, iconTint);
+    }
+
+    // Section Live Stream Control
+    if (ip.section == S7TVHomeSectionLive) {
+        return S7TVNavCell(@"Live Stream Control", @"Auto collect channel points",
+                           @"play.tv.fill", [UIColor colorWithWhite:0.75 alpha:1.0]);
+    }
+
+    return [[UITableViewCell alloc] init];
+}
+
+- (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
+    [tv deselectRowAtIndexPath:ip animated:YES];
+
+    if (ip.section == S7TVHomeSectionReload) { [self reloadEmotes]; return; }
+
+    UIViewController *dest = nil;
+    if (ip.section == S7TVHomeSectionMain) {
+        switch (ip.row) {
+            case 0: dest = [[SevenTVEmotesPageController alloc] init]; break;
+            case 1: dest = [[SevenTVStatsPageController  alloc] init]; break;
+            case 2: dest = [[SevenTVDebugPageController  alloc] init]; break;
+        }
+    } else if (ip.section == S7TVHomeSectionLive) {
+        dest = [[S7TVLiveStreamController alloc] init];
+    }
+    if (dest) [self.navigationController pushViewController:dest animated:YES];
+}
+
+- (void)reloadEmotes {
+    SevenTVManager *mgr = [SevenTVManager sharedManager];
+    [mgr loadGlobalEmotes];
+    if (mgr.currentChannelTwitchID)
+        [mgr loadEmotesForChannelTwitchID:mgr.currentChannelTwitchID];
+
+    UIAlertController *alert = [UIAlertController
+        alertControllerWithTitle:@"Rechargement lancé"
+                         message:@"Les emotes seront disponibles dans quelques secondes."
+                  preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK"
+        style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+@end
+
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MARK: - S7TVLiveStreamController
+// ─────────────────────────────────────────────────────────────────────────────
+
+@implementation S7TVLiveStreamController
+
+- (instancetype)init { self = [super initWithStyle:UITableViewStyleInsetGrouped]; return self; }
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"Live Stream Control";
+    S7TVStyleTableView(self.tableView);
+}
+
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tv { return 1; }
+- (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s { return 1; }
+- (CGFloat)tableView:(UITableView *)tv heightForHeaderInSection:(NSInteger)s { return 44; }
+- (UIView *)tableView:(UITableView *)tv viewForHeaderInSection:(NSInteger)s { return S7TVSectionHeader(@"Live Stream Control", NO); }
+- (CGFloat)tableView:(UITableView *)tv heightForFooterInSection:(NSInteger)s { return UITableViewAutomaticDimension; }
+
+- (UIView *)tableView:(UITableView *)tv viewForFooterInSection:(NSInteger)s {
+    UIView *container = [[UIView alloc] init];
+    UILabel *lbl = [[UILabel alloc] init];
+    lbl.text = @"Automatically claims the live channel-points chest when it appears in chat.";
+    lbl.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
+    lbl.textColor = S7TVGray();
+    lbl.numberOfLines = 0;
+    lbl.translatesAutoresizingMaskIntoConstraints = NO;
+    [container addSubview:lbl];
+    [NSLayoutConstraint activateConstraints:@[
+        [lbl.leadingAnchor  constraintEqualToAnchor:container.leadingAnchor constant:16],
+        [lbl.trailingAnchor constraintEqualToAnchor:container.trailingAnchor constant:-16],
+        [lbl.topAnchor      constraintEqualToAnchor:container.topAnchor constant:6],
+        [lbl.bottomAnchor   constraintEqualToAnchor:container.bottomAnchor constant:-6],
+    ]];
+    return container;
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
+    return S7TVSwitchCell(@"Auto Collect Channel Points",
+                @"giftcard.fill", [UIColor colorWithRed:1.0 green:0.8 blue:0.0 alpha:1.0],
+                S7TVBool(kTCLiveAutoCollectChannelPoints), self, @selector(toggleAutoCollect:));
+}
+
+- (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip { [tv deselectRowAtIndexPath:ip animated:YES]; }
+- (void)toggleAutoCollect:(UISwitch *)sw { S7TVSetBool(kTCLiveAutoCollectChannelPoints, sw.isOn); }
+
+@end
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MARK: - SevenTVEmotesPageController
+// ─────────────────────────────────────────────────────────────────────────────
+
+@implementation SevenTVEmotesPageController
+
+- (instancetype)init {
+    self = [super initWithStyle:UITableViewStyleInsetGrouped];
+    return self;
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"Emotes 7TV";
+    S7TVStyleTableView(self.tableView);
+}
+
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tv { return 2; }
+
+- (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s {
+    return s == 0 ? 1 : 2; // section 1 : animées + picker (favoris déplacés vers Statistiques)
+}
+
+- (CGFloat)tableView:(UITableView *)tv heightForHeaderInSection:(NSInteger)s {
+    return 44;
+}
+
+- (UIView *)tableView:(UITableView *)tv viewForHeaderInSection:(NSInteger)s {
+    return S7TVSectionHeader(s == 0 ? @"Général" : @"Affichage", NO);
+}
+
+- (CGFloat)tableView:(UITableView *)tv heightForFooterInSection:(NSInteger)s {
+    return 8;
+}
+
+- (UIView *)tableView:(UITableView *)tv viewForFooterInSection:(NSInteger)s {
+    UIView *v = [[UIView alloc] init];
+    v.backgroundColor = [UIColor clearColor];
+    return v;
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
+    SevenTVManager *mgr = [SevenTVManager sharedManager];
+    if (ip.section == 0) {
+        return S7TVSwitchCell(@"Activer les emotes 7TV",
+                              @"checkmark.seal.fill",
+                              S7TVAccent(),
+                              mgr.isEnabled,
+                              self, @selector(toggleEnabled:));
+    }
+    switch (ip.row) {
+        case 0: return S7TVSwitchCell(@"Emotes animées dans le chat",
+                    @"wand.and.stars",
+                    [UIColor colorWithWhite:0.75 alpha:1.0],
+                    mgr.showAnimated,
+                    self, @selector(toggleAnimated:));
+        case 1: return S7TVSwitchCell(@"Animations dans le picker",
+                    @"photo.stack",
+                    [UIColor colorWithWhite:0.75 alpha:1.0],
+                    mgr.showPickerAnimations,
+                    self, @selector(togglePickerAnimations:));
+        default: return [[UITableViewCell alloc] init];
+    }
+}
+
+- (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
+    [tv deselectRowAtIndexPath:ip animated:YES];
+}
+
+- (void)toggleEnabled:(UISwitch *)sw          { [SevenTVManager sharedManager].isEnabled           = sw.isOn; }
+- (void)toggleAnimated:(UISwitch *)sw         { [SevenTVManager sharedManager].showAnimated         = sw.isOn; }
+- (void)togglePickerAnimations:(UISwitch *)sw { [SevenTVManager sharedManager].showPickerAnimations = sw.isOn; }
+
+@end
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MARK: - SevenTVStatsPageController
+// ─────────────────────────────────────────────────────────────────────────────
+
+@interface SevenTVStatsPageController () <UIDocumentPickerDelegate>
+@property (nonatomic, strong) NSTimer *refreshTimer;
+@end
+
+@implementation SevenTVStatsPageController
+
+- (instancetype)init {
+    self = [super initWithStyle:UITableViewStyleInsetGrouped];
+    return self;
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"Statistiques";
+    S7TVStyleTableView(self.tableView);
+}
+
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    self.refreshTimer = [NSTimer scheduledTimerWithTimeInterval:2.0
+        target:self selector:@selector(refresh) userInfo:nil repeats:YES];
+}
+
+- (void)viewWillDisappear:(BOOL)animated {
+    [super viewWillDisappear:animated];
+    [self.refreshTimer invalidate];
+    self.refreshTimer = nil;
+}
+
+- (void)refresh { [self.tableView reloadData]; }
+
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tv { return 3; }
+
+- (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s {
+    switch (s) {
+        case 0: return 1;  // Channel actif
+        case 1: return 3;  // Emotes chargées
+        case 2: return 2;  // Favoris (count + import)
+        default: return 0;
+    }
+}
+
+- (CGFloat)tableView:(UITableView *)tv heightForRowAtIndexPath:(NSIndexPath *)ip {
+    return ip.section == 0 ? 64 : 52;
+}
+
+- (CGFloat)tableView:(UITableView *)tv heightForHeaderInSection:(NSInteger)s {
+    return 44;
+}
+
+- (UIView *)tableView:(UITableView *)tv viewForHeaderInSection:(NSInteger)s {
+    switch (s) {
+        case 0: return S7TVSectionHeader(@"Channel actif",    NO);
+        case 1: return S7TVSectionHeader(@"Emotes chargées",  NO);
+        case 2: return S7TVSectionHeader(@"Favoris",          NO);
+        default: return [[UIView alloc] init];
+    }
+}
+
+- (CGFloat)tableView:(UITableView *)tv heightForFooterInSection:(NSInteger)s {
+    return 8;
+}
+
+- (UIView *)tableView:(UITableView *)tv viewForFooterInSection:(NSInteger)s {
+    UIView *v = [[UIView alloc] init];
+    v.backgroundColor = [UIColor clearColor];
+    return v;
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
+    SevenTVManager *mgr = [SevenTVManager sharedManager];
+    NSUInteger g = mgr.globalEmotes.count;
+    NSUInteger c = mgr.channelEmotes.count;
+
+    UITableViewCell *cell = [[UITableViewCell alloc]
+        initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
+    cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    cell.backgroundColor = S7TVCellBg();
+    cell.textLabel.textColor = [UIColor whiteColor];
+    cell.textLabel.numberOfLines = 0;
+    cell.detailTextLabel.textColor = S7TVGray();
+    cell.detailTextLabel.numberOfLines = 0;
+
+    if (ip.section == 0) {
+        UIImageView *icon = S7TVIcon(@"tv.fill", [UIColor colorWithWhite:0.65 alpha:1.0]);
+        [cell.contentView addSubview:icon];
+
+        UILabel *titleLbl = [[UILabel alloc] init];
+        titleLbl.text = mgr.currentChannelName ?: @"Aucun channel";
+        titleLbl.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+        titleLbl.textColor = [UIColor whiteColor];
+        titleLbl.numberOfLines = 1;
+        titleLbl.translatesAutoresizingMaskIntoConstraints = NO;
+
+        UILabel *subLbl = [[UILabel alloc] init];
+        subLbl.text = mgr.currentChannelTwitchID
+            ? [NSString stringWithFormat:@"ID : %@", mgr.currentChannelTwitchID]
+            : @"Rejoins un stream pour charger les emotes";
+        subLbl.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
+        subLbl.textColor = S7TVGray();
+        subLbl.numberOfLines = 1;
+        subLbl.translatesAutoresizingMaskIntoConstraints = NO;
+
+        UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[titleLbl, subLbl]];
+        stack.axis = UILayoutConstraintAxisVertical;
+        stack.spacing = 3;
+        stack.translatesAutoresizingMaskIntoConstraints = NO;
+        [cell.contentView addSubview:stack];
+
+        [NSLayoutConstraint activateConstraints:@[
+            [icon.leadingAnchor  constraintEqualToAnchor:cell.contentView.leadingAnchor constant:16],
+            [icon.centerYAnchor  constraintEqualToAnchor:cell.contentView.centerYAnchor],
+            [stack.leadingAnchor constraintEqualToAnchor:icon.trailingAnchor constant:14],
+            [stack.centerYAnchor constraintEqualToAnchor:cell.contentView.centerYAnchor],
+            [stack.trailingAnchor constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-16],
+        ]];
+        return cell;
+    }
+
+    // ── Section 2 : Favoris ─────────────────────────────────────────────────
+    if (ip.section == 2) {
+        NSUserDefaults *prefs = [NSUserDefaults standardUserDefaults];
+        NSArray *favs = [prefs arrayForKey:@"s7tv_favorites"] ?: @[];
+
+        if (ip.row == 0) {
+            // Cellule tappable : ouvre la liste des favoris
+            cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+            cell.accessoryType  = UITableViewCellAccessoryDisclosureIndicator;
+            cell.selectedBackgroundView = [[UIView alloc] init];
+            cell.selectedBackgroundView.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.06];
+
+            UIImageView *icon = S7TVIcon(@"star.fill",
+                [UIColor colorWithRed:0.60 green:0.35 blue:1.0 alpha:1.0]);
+            [cell.contentView addSubview:icon];
+
+            UILabel *lbl = [[UILabel alloc] init];
+            lbl.text = @"Emotes en favoris";
+            lbl.font = [UIFont systemFontOfSize:15 weight:UIFontWeightRegular];
+            lbl.textColor = [UIColor whiteColor];
+            lbl.numberOfLines = 1;
+            lbl.translatesAutoresizingMaskIntoConstraints = NO;
+            [cell.contentView addSubview:lbl];
+
+            UILabel *countLbl = [[UILabel alloc] init];
+            countLbl.text = [NSString stringWithFormat:@"%lu", (unsigned long)favs.count];
+            countLbl.font = [UIFont monospacedDigitSystemFontOfSize:15 weight:UIFontWeightRegular];
+            countLbl.textColor = [UIColor colorWithRed:0.60 green:0.35 blue:1.0 alpha:1.0];
+            countLbl.translatesAutoresizingMaskIntoConstraints = NO;
+            [cell.contentView addSubview:countLbl];
+
+            [NSLayoutConstraint activateConstraints:@[
+                [icon.leadingAnchor     constraintEqualToAnchor:cell.contentView.leadingAnchor constant:16],
+                [icon.centerYAnchor     constraintEqualToAnchor:cell.contentView.centerYAnchor],
+                [lbl.leadingAnchor      constraintEqualToAnchor:icon.trailingAnchor constant:14],
+                [lbl.topAnchor          constraintEqualToAnchor:cell.contentView.topAnchor constant:10],
+                [lbl.bottomAnchor       constraintEqualToAnchor:cell.contentView.bottomAnchor constant:-10],
+                [countLbl.trailingAnchor constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-8],
+                [countLbl.centerYAnchor  constraintEqualToAnchor:cell.contentView.centerYAnchor],
+            ]];
+            return cell;
+        }
+
+        // Row 1 : Importer depuis fichier PC
+        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        cell.selectedBackgroundView = [[UIView alloc] init];
+        cell.selectedBackgroundView.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.06];
+
+        UIImageView *importIcon = S7TVIcon(@"square.and.arrow.down",
+            [UIColor colorWithRed:0.60 green:0.35 blue:1.0 alpha:1.0]);
+        [cell.contentView addSubview:importIcon];
+
+        UILabel *importLbl = [[UILabel alloc] init];
+        importLbl.text = @"Importer depuis PC";
+        importLbl.font = [UIFont systemFontOfSize:15 weight:UIFontWeightRegular];
+        importLbl.textColor = [UIColor whiteColor];
+        importLbl.translatesAutoresizingMaskIntoConstraints = NO;
+
+        UILabel *importSub = [[UILabel alloc] init];
+        importSub.text = @"Export JSON 7TV (Settings → … → Export)";
+        importSub.font = [UIFont systemFontOfSize:11 weight:UIFontWeightRegular];
+        importSub.textColor = S7TVGray();
+        importSub.translatesAutoresizingMaskIntoConstraints = NO;
+
+        UIStackView *importStack = [[UIStackView alloc]
+            initWithArrangedSubviews:@[importLbl, importSub]];
+        importStack.axis      = UILayoutConstraintAxisVertical;
+        importStack.spacing   = 2;
+        importStack.alignment = UIStackViewAlignmentLeading;
+        importStack.translatesAutoresizingMaskIntoConstraints = NO;
+        [cell.contentView addSubview:importStack];
+
+        [NSLayoutConstraint activateConstraints:@[
+            [importIcon.leadingAnchor   constraintEqualToAnchor:cell.contentView.leadingAnchor constant:16],
+            [importIcon.centerYAnchor   constraintEqualToAnchor:cell.contentView.centerYAnchor],
+            [importStack.leadingAnchor  constraintEqualToAnchor:importIcon.trailingAnchor constant:14],
+            [importStack.centerYAnchor  constraintEqualToAnchor:cell.contentView.centerYAnchor],
+            [importStack.trailingAnchor constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-8],
+            [importStack.topAnchor      constraintGreaterThanOrEqualToAnchor:cell.contentView.topAnchor constant:8],
+            [importStack.bottomAnchor   constraintLessThanOrEqualToAnchor:cell.contentView.bottomAnchor constant:-8],
+        ]];
+        return cell;
+    }
+
+    // ── Section 1 : Emotes chargées ─────────────────────────────────────────
+    NSString *sfName, *label;
+    NSUInteger count = 0;
+    UIColor *valColor = [UIColor whiteColor];
+
+    switch (ip.row) {
+        case 0: sfName = @"globe";         label = @"Emotes globales";   count = g; break;
+        case 1: sfName = @"person.2.fill"; label = @"Emotes du channel"; count = c; valColor = S7TVAccent(); break;
+        case 2: sfName = @"sum";           label = @"Total";              count = g + c; break;
+        default: return cell;
+    }
+
+    UIImageView *icon = S7TVIcon(sfName, [UIColor colorWithWhite:0.65 alpha:1.0]);
+    [cell.contentView addSubview:icon];
+
+    UILabel *nameLbl = [[UILabel alloc] init];
+    nameLbl.text = label;
+    nameLbl.font = ip.row == 2
+        ? [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold]
+        : [UIFont systemFontOfSize:15 weight:UIFontWeightRegular];
+    nameLbl.textColor = [UIColor whiteColor];
+    nameLbl.numberOfLines = 1;
+    nameLbl.translatesAutoresizingMaskIntoConstraints = NO;
+    [cell.contentView addSubview:nameLbl];
+
+    UILabel *valLbl = [[UILabel alloc] init];
+    valLbl.text = [NSString stringWithFormat:@"%lu", (unsigned long)count];
+    valLbl.font = [UIFont monospacedDigitSystemFontOfSize:15 weight:
+        ip.row == 2 ? UIFontWeightBold : UIFontWeightRegular];
+    valLbl.textColor = valColor;
+    valLbl.translatesAutoresizingMaskIntoConstraints = NO;
+    [cell.contentView addSubview:valLbl];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [icon.leadingAnchor    constraintEqualToAnchor:cell.contentView.leadingAnchor constant:16],
+        [icon.centerYAnchor    constraintEqualToAnchor:cell.contentView.centerYAnchor],
+        // CRITIQUE : top+bottom pour résoudre la hauteur du label
+        [nameLbl.leadingAnchor  constraintEqualToAnchor:icon.trailingAnchor constant:14],
+        [nameLbl.topAnchor      constraintEqualToAnchor:cell.contentView.topAnchor constant:10],
+        [nameLbl.bottomAnchor   constraintEqualToAnchor:cell.contentView.bottomAnchor constant:-10],
+        [valLbl.trailingAnchor  constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-16],
+        [valLbl.centerYAnchor   constraintEqualToAnchor:cell.contentView.centerYAnchor],
+    ]];
+    return cell;
+}
+
+- (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
+    [tv deselectRowAtIndexPath:ip animated:YES];
+    if (ip.section == 2 && ip.row == 0) {
+        // Ouvre la liste des favoris
+        SevenTVFavoritesListController *favsVC = [[SevenTVFavoritesListController alloc] init];
+        [self.navigationController pushViewController:favsVC animated:YES];
+        return;
+    }
+    if (ip.section == 2 && ip.row == 1) {
+        [self importFavoritesFromFile];
+    }
+}
+
+// ── Import favoris depuis fichier JSON 7TV PC ────────────────────────────────
+
+- (void)importFavoritesFromFile {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc]
+        initWithDocumentTypes:@[@"public.json", @"public.text", @"public.data"]
+                       inMode:UIDocumentPickerModeImport];
+#pragma clang diagnostic pop
+    picker.delegate = self;
+    picker.allowsMultipleSelection = NO;
+    picker.modalPresentationStyle  = UIModalPresentationFormSheet;
+    [self presentViewController:picker animated:YES completion:nil];
+}
+
+- (void)documentPicker:(UIDocumentPickerViewController *)controller
+didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
+    NSURL *url = urls.firstObject;
+    if (!url) return;
+
+    NSError *err = nil;
+    NSData *data = [NSData dataWithContentsOfURL:url options:0 error:&err];
+    if (!data) {
+        [self s7tv_showAlert:@"Erreur"
+                     message:@"Impossible de lire le fichier."];
+        return;
+    }
+
+    id json = [NSJSONSerialization JSONObjectWithData:data options:0 error:&err];
+    if (!json) {
+        [self s7tv_showAlert:@"Format invalide"
+                     message:@"Le fichier n'est pas un JSON valide."];
+        return;
+    }
+
+    // L'export 7TV PC peut avoir deux structures :
+    //   - Tableau directement : [ "7TV:xxx", ... ]
+    //   - Dict racine avec "ui.emote_menu.favorites" (format v0 hypothétique)
+    //   - Dict racine avec "settings" → "ui.emote_menu.favorites" (format réel v1)
+    NSArray *rawFavs = nil;
+    if ([json isKindOfClass:[NSArray class]]) {
+        rawFavs = (NSArray *)json;
+    } else if ([json isKindOfClass:[NSDictionary class]]) {
+        NSDictionary *dict = (NSDictionary *)json;
+        // Format réel : { "settings": { "ui.emote_menu.favorites": [...] } }
+        NSDictionary *settings = dict[@"settings"];
+        if ([settings isKindOfClass:[NSDictionary class]]) {
+            rawFavs = settings[@"ui.emote_menu.favorites"];
+        }
+        // Fallback : clé à la racine (format alternatif)
+        if (!rawFavs) {
+            rawFavs = dict[@"ui.emote_menu.favorites"];
+        }
+    }
+
+    if (!rawFavs) {
+        [self s7tv_showAlert:@"Format inconnu"
+                     message:@"Clé « ui.emote_menu.favorites » introuvable.\nVérifie que c'est bien un export 7TV PC."];
+        return;
+    }
+
+    // Filtrer les entrées "7TV:<id>" — ignorer "PLATFORM:..."
+    NSMutableArray<NSString *> *newIDs = [NSMutableArray array];
+    for (id entry in rawFavs) {
+        if (![entry isKindOfClass:[NSString class]]) continue;
+        NSString *s = (NSString *)entry;
+        if ([s hasPrefix:@"7TV:"]) {
+            [newIDs addObject:[s substringFromIndex:4]];
+        }
+    }
+
+    if (newIDs.count == 0) {
+        [self s7tv_showAlert:@"Aucun favori 7TV"
+                     message:@"Ce fichier ne contient pas d'emotes 7TV en favoris."];
+        return;
+    }
+
+    NSUserDefaults *prefs = [NSUserDefaults standardUserDefaults];
+    NSArray<NSString *> *existing = [prefs arrayForKey:@"s7tv_favorites"] ?: @[];
+    NSMutableOrderedSet<NSString *> *merged =
+        [NSMutableOrderedSet orderedSetWithArray:existing];
+    NSUInteger beforeCount = merged.count;
+    [merged addObjectsFromArray:newIDs];
+    [prefs setObject:merged.array forKey:@"s7tv_favorites"];
+    [prefs synchronize];
+
+    NSUInteger added = merged.count - beforeCount;
+    NSUInteger skipped = newIDs.count - added;
+    [self.tableView reloadData];
+    [self s7tv_showAlert:[NSString stringWithFormat:@"%lu emote(s) ajoutée(s)", (unsigned long)added]
+                 message:[NSString stringWithFormat:
+                          @"%lu nouvelle(s) importée(s), %lu déjà en favoris.",
+                          (unsigned long)added,
+                          (unsigned long)skipped]];
+    [[SevenTVManager sharedManager] log:@"📥 Import favoris 7TV : %lu total, %lu ajoutés",
+     (unsigned long)merged.count, (unsigned long)added];
+}
+
+- (void)documentPickerWasCancelled:(UIDocumentPickerViewController *)controller { }
+
+- (void)s7tv_showAlert:(NSString *)title message:(NSString *)msg {
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:title
+                                                               message:msg
+                                                        preferredStyle:UIAlertControllerStyleAlert];
+    [a addAction:[UIAlertAction actionWithTitle:@"OK"
+                                          style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:a animated:YES completion:nil];
+}
+
+@end
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MARK: - SevenTVFavoritesListController
+// Liste de toutes les emotes en favoris (IDs 7TV + noms résolus).
+// ─────────────────────────────────────────────────────────────────────────────
+
+@implementation SevenTVFavoritesListController {
+    NSArray<NSString *> *_favIDs;      // IDs purs (sans préfixe)
+    NSDictionary<NSString *, NSString *> *_idToName; // emoteID → emoteName
+}
+
+- (instancetype)init {
+    self = [super initWithStyle:UITableViewStyleInsetGrouped];
+    return self;
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"Mes favoris";
+    S7TVStyleTableView(self.tableView);
+    [self reloadFavs];
+
+    // Bouton Vider
+    UIBarButtonItem *clear = [[UIBarButtonItem alloc]
+        initWithTitle:@"Vider"
+                style:UIBarButtonItemStylePlain
+               target:self
+               action:@selector(clearAllFavs)];
+    clear.tintColor = [UIColor systemRedColor];
+    self.navigationItem.rightBarButtonItem = clear;
+}
+
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    [self reloadFavs];
+}
+
+- (void)reloadFavs {
+    NSUserDefaults *prefs = [NSUserDefaults standardUserDefaults];
+    _favIDs = [[prefs arrayForKey:@"s7tv_favorites"] ?: @[] copy];
+
+    // Construire le dictionnaire id → nom à partir des emotes chargées
+    SevenTVManager *mgr = [SevenTVManager sharedManager];
+    NSMutableDictionary *map = [NSMutableDictionary dictionary];
+    void (^scan)(NSDictionary<NSString *, SevenTVEmote *> *) = ^(NSDictionary *dict) {
+        [dict enumerateKeysAndObjectsUsingBlock:^(NSString *name, SevenTVEmote *emote, BOOL *stop) {
+            if (emote.emoteID) map[emote.emoteID] = name;
+        }];
+    };
+    dispatch_sync(mgr.emoteQueue, ^{
+        scan(mgr.globalEmotes ?: @{});
+        scan(mgr.channelEmotes ?: @{});
+    });
+    _idToName = [map copy];
+
+    [self.tableView reloadData];
+}
+
+// ── TableView ──
+
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tv { return 1; }
+
+- (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s {
+    return _favIDs.count == 0 ? 1 : (NSInteger)_favIDs.count;
+}
+
+- (CGFloat)tableView:(UITableView *)tv heightForHeaderInSection:(NSInteger)s {
+    return 44;
+}
+
+- (UIView *)tableView:(UITableView *)tv viewForHeaderInSection:(NSInteger)s {
+    NSString *title = _favIDs.count > 0
+        ? [NSString stringWithFormat:@"%lu emote(s) en favoris", (unsigned long)_favIDs.count]
+        : @"Favoris";
+    return S7TVSectionHeader(title, NO);
+}
+
+- (CGFloat)tableView:(UITableView *)tv heightForRowAtIndexPath:(NSIndexPath *)ip {
+    return 52;
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
+
+    // Cas liste vide
+    if (_favIDs.count == 0) {
+        UITableViewCell *cell = [[UITableViewCell alloc]
+            initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
+        cell.selectionStyle  = UITableViewCellSelectionStyleNone;
+        cell.backgroundColor = S7TVCellBg();
+        cell.textLabel.text  = @"Aucun favori pour l'instant.";
+        cell.textLabel.textColor = S7TVGray();
+        cell.textLabel.textAlignment = NSTextAlignmentCenter;
+        cell.textLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightRegular];
+        return cell;
+    }
+
+    NSString *emoteID = _favIDs[ip.row];
+    NSString *name    = _idToName[emoteID];   // nil si emote pas chargée
+
+    UITableViewCell *cell = [[UITableViewCell alloc]
+        initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
+    cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+    cell.backgroundColor = S7TVCellBg();
+    cell.selectedBackgroundView = [[UIView alloc] init];
+    cell.selectedBackgroundView.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.06];
+
+    // Image emote (chargée via URLCache si dispo)
+    UIImageView *thumb = [[UIImageView alloc] init];
+    thumb.contentMode = UIViewContentModeScaleAspectFit;
+    thumb.translatesAutoresizingMaskIntoConstraints = NO;
+    thumb.clipsToBounds = YES;
+    [cell.contentView addSubview:thumb];
+
+    // Essayer de trouver l'image en cache
+    NSString *urlStr = [NSString stringWithFormat:@"https://cdn.7tv.app/emote/%@/1x.webp", emoteID];
+    NSURL *cdnURL = [NSURL URLWithString:urlStr];
+    NSURLRequest *req = [NSURLRequest requestWithURL:cdnURL];
+    NSCachedURLResponse *cached = [[SevenTVURLProtocol sharedEmoteCache] cachedResponseForRequest:req];
+    if (cached) {
+        UIImage *img = [UIImage imageWithData:cached.data];
+        thumb.image = img;
+    } else {
+        // Placeholder étoile violette
+        UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration
+            configurationWithPointSize:16 weight:UIImageSymbolWeightRegular];
+        thumb.image = [UIImage systemImageNamed:@"star.fill" withConfiguration:cfg];
+        thumb.tintColor = [UIColor colorWithRed:0.60 green:0.35 blue:1.0 alpha:1.0];
+
+        // Télécharge en arrière-plan et met à jour si la cellule est encore visible
+        NSIndexPath *indexPath = ip;
+        [SevenTVURLProtocol prefetchEmoteID:emoteID completion:^{
+            dispatch_async(dispatch_get_main_queue(), ^{
+                UITableViewCell *visible = [tv cellForRowAtIndexPath:indexPath];
+                if (!visible) return;
+                UIImageView *iv = (UIImageView *)[visible.contentView viewWithTag:7700];
+                NSCachedURLResponse *r = [[SevenTVURLProtocol sharedEmoteCache]
+                    cachedResponseForRequest:req];
+                if (r) iv.image = [UIImage imageWithData:r.data];
+            });
+        }];
+    }
+    thumb.tag = 7700;
+
+    // Labels
+    UILabel *nameLbl = [[UILabel alloc] init];
+    nameLbl.text = name ?: @"(emote non chargée)";
+    nameLbl.font = [UIFont systemFontOfSize:15 weight:
+        name ? UIFontWeightRegular : UIFontWeightLight];
+    nameLbl.textColor = name ? [UIColor whiteColor] : S7TVGray();
+    nameLbl.numberOfLines = 1;
+    nameLbl.translatesAutoresizingMaskIntoConstraints = NO;
+    [cell.contentView addSubview:nameLbl];
+
+    UILabel *idLbl = [[UILabel alloc] init];
+    // Tronquer l'ID pour ne pas déborder
+    NSString *shortID = emoteID.length > 14
+        ? [NSString stringWithFormat:@"%@…", [emoteID substringToIndex:14]]
+        : emoteID;
+    idLbl.text = shortID;
+    idLbl.font = [UIFont monospacedSystemFontOfSize:10 weight:UIFontWeightRegular];
+    idLbl.textColor = S7TVGray();
+    idLbl.translatesAutoresizingMaskIntoConstraints = NO;
+    [cell.contentView addSubview:idLbl];
+
+    UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[nameLbl, idLbl]];
+    stack.axis      = UILayoutConstraintAxisVertical;
+    stack.spacing   = 2;
+    stack.alignment = UIStackViewAlignmentLeading;
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    [cell.contentView addSubview:stack];
+
+    // Bouton supprimer (swipe to delete géré via editingStyle, mais on ajoute aussi un bouton trash)
+    [NSLayoutConstraint activateConstraints:@[
+        [thumb.leadingAnchor  constraintEqualToAnchor:cell.contentView.leadingAnchor constant:16],
+        [thumb.centerYAnchor  constraintEqualToAnchor:cell.contentView.centerYAnchor],
+        [thumb.widthAnchor    constraintEqualToConstant:32],
+        [thumb.heightAnchor   constraintEqualToConstant:32],
+        [stack.leadingAnchor  constraintEqualToAnchor:thumb.trailingAnchor constant:14],
+        [stack.centerYAnchor  constraintEqualToAnchor:cell.contentView.centerYAnchor],
+        [stack.trailingAnchor constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-16],
+        [stack.topAnchor      constraintGreaterThanOrEqualToAnchor:cell.contentView.topAnchor constant:8],
+        [stack.bottomAnchor   constraintLessThanOrEqualToAnchor:cell.contentView.bottomAnchor constant:-8],
+    ]];
+
+    return cell;
+}
+
+// Swipe-to-delete
+- (BOOL)tableView:(UITableView *)tv canEditRowAtIndexPath:(NSIndexPath *)ip {
+    return _favIDs.count > 0;
+}
+
+- (UITableViewCellEditingStyle)tableView:(UITableView *)tv
+           editingStyleForRowAtIndexPath:(NSIndexPath *)ip {
+    return _favIDs.count > 0 ? UITableViewCellEditingStyleDelete : UITableViewCellEditingStyleNone;
+}
+
+- (void)tableView:(UITableView *)tv
+commitEditingStyle:(UITableViewCellEditingStyle)es
+forRowAtIndexPath:(NSIndexPath *)ip {
+    if (es != UITableViewCellEditingStyleDelete) return;
+    NSString *removedID = _favIDs[ip.row];
+    NSUserDefaults *prefs = [NSUserDefaults standardUserDefaults];
+    NSMutableArray *cur = [([prefs arrayForKey:@"s7tv_favorites"] ?: @[]) mutableCopy];
+    [cur removeObject:removedID];
+    [prefs setObject:cur forKey:@"s7tv_favorites"];
+    [prefs synchronize];
+    [self reloadFavs];
+}
+
+- (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
+    [tv deselectRowAtIndexPath:ip animated:YES];
+}
+
+// Bouton Vider
+- (void)clearAllFavs {
+    if (_favIDs.count == 0) return;
+    UIAlertController *alert = [UIAlertController
+        alertControllerWithTitle:@"Vider les favoris"
+                         message:@"Supprimer les %lu emotes en favoris ?"
+        preferredStyle:UIAlertControllerStyleActionSheet];
+    alert.message = [NSString stringWithFormat:@"Supprimer les %lu emotes en favoris ?",
+                     (unsigned long)_favIDs.count];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Vider"
+        style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
+            NSUserDefaults *prefs = [NSUserDefaults standardUserDefaults];
+            [prefs removeObjectForKey:@"s7tv_favorites"];
+            [prefs synchronize];
+            [self reloadFavs];
+        }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Annuler"
+        style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+@end
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MARK: - SevenTVDebugPageController
+// ─────────────────────────────────────────────────────────────────────────────
+
+@implementation SevenTVDebugPageController
+
+- (instancetype)init {
+    self = [super initWithStyle:UITableViewStyleInsetGrouped];
+    return self;
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"Débogage";
+    S7TVStyleTableView(self.tableView);
+}
+
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tv { return 3; }
+
+// Section 0 = Options (bouton flottant)
+// Section 1 = Logs (activer logs, voir les logs, logs console, puis 14 catégories)
+// Section 2 = Danger (effacer les logs)
+#define S7TV_LOGS_ROW_ENABLE      0
+#define S7TV_LOGS_ROW_VIEW        1
+#define S7TV_LOGS_ROW_CONSOLE     2
+#define S7TV_LOGS_ROW_FIRST_CAT   3
+#define S7TV_LOGS_CAT_COUNT       14
+#define S7TV_LOGS_ROW_COUNT       (S7TV_LOGS_ROW_FIRST_CAT + S7TV_LOGS_CAT_COUNT)
+
+- (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s {
+    switch (s) { case 0: return 1; case 1: return S7TV_LOGS_ROW_COUNT; case 2: return 1; default: return 0; }
+}
+
+- (CGFloat)tableView:(UITableView *)tv heightForHeaderInSection:(NSInteger)s {
+    return 44;
+}
+
+- (UIView *)tableView:(UITableView *)tv viewForHeaderInSection:(NSInteger)s {
+    switch (s) {
+        case 0: return S7TVSectionHeader(@"Options", NO);
+        case 1: return S7TVSectionHeader(@"Logs",    NO);
+        case 2: return S7TVSectionHeader(@"Danger",  NO);
+        default: return [[UIView alloc] init];
+    }
+}
+
+- (CGFloat)tableView:(UITableView *)tv heightForFooterInSection:(NSInteger)s {
+    return 8;
+}
+
+- (UIView *)tableView:(UITableView *)tv viewForFooterInSection:(NSInteger)s {
+    UIView *v = [[UIView alloc] init];
+    v.backgroundColor = [UIColor clearColor];
+    return v;
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
+    SevenTVManager *mgr = [SevenTVManager sharedManager];
+
+    if (ip.section == 0) {
+        // Section Options : uniquement le bouton flottant
+        return S7TVSwitchCell(@"Bouton flottant 7TV",
+                    @"circle.grid.2x1.fill",
+                    [UIColor colorWithWhite:0.75 alpha:1.0],
+                    mgr.showFloatingButton,
+                    self, @selector(toggleFloatingButton:));
+    }
+
+    if (ip.section == 1) {
+        NSInteger row = ip.row;
+
+        // --- Activer les logs (interrupteur global) ---
+        if (row == S7TV_LOGS_ROW_ENABLE) {
+            return S7TVSwitchCell(@"Activer les logs",
+                        @"bolt.fill",
+                        [UIColor colorWithWhite:0.75 alpha:1.0],
+                        mgr.logsEnabled,
+                        self, @selector(toggleLogsEnabled:));
+        }
+
+        // --- Voir les logs (toujours accessible, même si logsEnabled == NO) ---
+        if (row == S7TV_LOGS_ROW_VIEW) {
+            UITableViewCell *cell = [[UITableViewCell alloc]
+                initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
+            cell.accessoryType   = UITableViewCellAccessoryDisclosureIndicator;
+            cell.backgroundColor = S7TVCellBg();
+            cell.selectedBackgroundView = [[UIView alloc] init];
+            cell.selectedBackgroundView.backgroundColor =
+                [UIColor colorWithWhite:1.0 alpha:0.06];
+
+            UIImageView *icon = S7TVIcon(@"doc.text.magnifyingglass",
+                                          [UIColor colorWithWhite:0.75 alpha:1.0]);
+            [cell.contentView addSubview:icon];
+
+            UILabel *nameLbl = [[UILabel alloc] init];
+            nameLbl.text = @"Voir les logs";
+            nameLbl.font = [UIFont systemFontOfSize:17 weight:UIFontWeightRegular];
+            nameLbl.textColor = [UIColor whiteColor];
+            nameLbl.numberOfLines = 1;
+            nameLbl.translatesAutoresizingMaskIntoConstraints = NO;
+            [cell.contentView addSubview:nameLbl];
+
+            NSUInteger n = [mgr allLogs].count;
+            UILabel *badge = [[UILabel alloc] init];
+            badge.text = [NSString stringWithFormat:@"%lu", (unsigned long)n];
+            badge.font = [UIFont monospacedDigitSystemFontOfSize:13 weight:UIFontWeightRegular];
+            badge.textColor = S7TVGray();
+            badge.translatesAutoresizingMaskIntoConstraints = NO;
+            [cell.contentView addSubview:badge];
+
+            [NSLayoutConstraint activateConstraints:@[
+                [icon.leadingAnchor    constraintEqualToAnchor:cell.contentView.leadingAnchor constant:16],
+                [icon.centerYAnchor    constraintEqualToAnchor:cell.contentView.centerYAnchor],
+                [nameLbl.leadingAnchor  constraintEqualToAnchor:icon.trailingAnchor constant:14],
+                [nameLbl.topAnchor      constraintEqualToAnchor:cell.contentView.topAnchor constant:10],
+                [nameLbl.bottomAnchor   constraintEqualToAnchor:cell.contentView.bottomAnchor constant:-10],
+                [nameLbl.trailingAnchor constraintLessThanOrEqualToAnchor:badge.leadingAnchor constant:-8],
+                [badge.trailingAnchor   constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-8],
+                [badge.centerYAnchor    constraintEqualToAnchor:cell.contentView.centerYAnchor],
+            ]];
+            return cell;
+        }
+
+        // --- Logs console (Console.app) — grisé si logsEnabled == NO ---
+        if (row == S7TV_LOGS_ROW_CONSOLE) {
+            UITableViewCell *cell = S7TVSwitchCell(@"Logs console (Console.app)",
+                        @"terminal.fill",
+                        [UIColor colorWithWhite:0.75 alpha:1.0],
+                        mgr.debugLogging,
+                        self, @selector(toggleDebug:));
+            [self s7tv_applyEnabledState:cell];
+            return cell;
+        }
+
+        // --- Catégories de logs ---
+        NSInteger catIdx = row - S7TV_LOGS_ROW_FIRST_CAT;
+        NSArray<NSString *> *titles = @[
+            @"Erreurs / Avertissements", @"Tap Logger", @"Swizzle / Boot",
+            @"Cache / Réseau", @"Prefetch", @"API Emotes", @"IRC / Channel",
+            @"IRC Injection", @"UI / Picker", @"Favoris", @"Resize / CoreText",
+            @"Orientation Lock", @"Conversion Image", @"Dump",
+        ];
+        NSArray<NSString *> *icons = @[
+            @"exclamationmark.triangle.fill", @"hand.tap.fill", @"bolt.horizontal.circle.fill",
+            @"network", @"arrow.down.circle.fill", @"globe", @"antenna.radiowaves.left.and.right",
+            @"syringe.fill", @"paintbrush.fill", @"star.fill", @"arrow.up.left.and.arrow.down.right",
+            @"lock.rotation", @"photo.fill", @"trash.fill",
+        ];
+        NSArray<NSNumber *> *values = @[
+            @(mgr.logErrors), @(mgr.logTap), @(mgr.logSwizzle), @(mgr.logCache),
+            @(mgr.logPrefetch), @(mgr.logAPI), @(mgr.logIRCChannel), @(mgr.logIRCInjection),
+            @(mgr.logUIPicker), @(mgr.logFavorites), @(mgr.logResize), @(mgr.logOrientation),
+            @(mgr.logImageConversion), @(mgr.logDump),
+        ];
+        NSArray *selectors = @[
+            @"toggleLogErrors:", @"toggleLogTap:", @"toggleLogSwizzle:", @"toggleLogCache:",
+            @"toggleLogPrefetch:", @"toggleLogAPI:", @"toggleLogIRCChannel:", @"toggleLogIRCInjection:",
+            @"toggleLogUIPicker:", @"toggleLogFavorites:", @"toggleLogResize:", @"toggleLogOrientation:",
+            @"toggleLogImageConversion:", @"toggleLogDump:",
+        ];
+
+        UITableViewCell *cell = S7TVSwitchCell(titles[catIdx],
+                    icons[catIdx],
+                    [UIColor colorWithWhite:0.75 alpha:1.0],
+                    values[catIdx].boolValue,
+                    self, NSSelectorFromString(selectors[catIdx]));
+        [self s7tv_applyEnabledState:cell];
+        return cell;
+    }
+
+    // Section 2 : Effacer les logs
+    UITableViewCell *cell = [[UITableViewCell alloc]
+        initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
+    cell.backgroundColor = S7TVCellBg();
+    cell.selectedBackgroundView = [[UIView alloc] init];
+    cell.selectedBackgroundView.backgroundColor =
+        [UIColor colorWithWhite:1.0 alpha:0.06];
+
+    UIImageView *icon = S7TVIcon(@"trash.fill", [UIColor systemRedColor]);
+    [cell.contentView addSubview:icon];
+
+    UILabel *lbl = [[UILabel alloc] init];
+    lbl.text = @"Effacer tous les logs";
+    lbl.font = [UIFont systemFontOfSize:17 weight:UIFontWeightRegular];
+    lbl.textColor = [UIColor systemRedColor];
+    lbl.numberOfLines = 1;
+    lbl.translatesAutoresizingMaskIntoConstraints = NO;
+    [cell.contentView addSubview:lbl];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [icon.leadingAnchor  constraintEqualToAnchor:cell.contentView.leadingAnchor constant:16],
+        [icon.centerYAnchor  constraintEqualToAnchor:cell.contentView.centerYAnchor],
+        [lbl.leadingAnchor   constraintEqualToAnchor:icon.trailingAnchor constant:14],
+        [lbl.trailingAnchor  constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-16],
+        [lbl.topAnchor       constraintEqualToAnchor:cell.contentView.topAnchor constant:10],
+        [lbl.bottomAnchor    constraintEqualToAnchor:cell.contentView.bottomAnchor constant:-10],
+    ]];
+    return cell;
+}
+
+- (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
+    [tv deselectRowAtIndexPath:ip animated:YES];
+
+    if (ip.section == 1 && ip.row == S7TV_LOGS_ROW_VIEW) {
+        [self.navigationController
+            pushViewController:[[SevenTVLogsController alloc] init] animated:YES];
+        return;
+    }
+
+    if (ip.section == 2 && ip.row == 0) {
+        UIAlertController *alert = [UIAlertController
+            alertControllerWithTitle:@"Effacer les logs"
+                             message:@"Cette action est irréversible."
+                      preferredStyle:UIAlertControllerStyleActionSheet];
+        [alert addAction:[UIAlertAction actionWithTitle:@"Effacer"
+            style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
+                [[SevenTVManager sharedManager] clearLogs];
+                [tv reloadData];
+            }]];
+        [alert addAction:[UIAlertAction actionWithTitle:@"Annuler"
+            style:UIAlertActionStyleCancel handler:nil]];
+        [self presentViewController:alert animated:YES completion:nil];
+    }
+}
+
+// Grise visuellement une cellule de catégorie/console quand logsEnabled == NO,
+// sans jamais modifier la valeur stockée dans NSUserDefaults.
+- (void)s7tv_applyEnabledState:(UITableViewCell *)cell {
+    BOOL enabled = [SevenTVManager sharedManager].logsEnabled;
+    cell.userInteractionEnabled = enabled;
+    cell.contentView.alpha = enabled ? 1.0 : 0.4;
+    for (UIView *v in cell.contentView.subviews) {
+        if ([v isKindOfClass:[UISwitch class]]) {
+            ((UISwitch *)v).enabled = enabled;
+            break;
+        }
+    }
+}
+
+- (void)toggleLogsEnabled:(UISwitch *)sw {
+    [SevenTVManager sharedManager].logsEnabled = sw.isOn;
+    // Reload pour griser/dégriser les autres lignes de la section Logs
+    [self.tableView reloadSections:[NSIndexSet indexSetWithIndex:1]
+                   withRowAnimation:UITableViewRowAnimationNone];
+}
+- (void)toggleDebug:(UISwitch *)sw                  { [SevenTVManager sharedManager].debugLogging        = sw.isOn; }
+- (void)toggleFloatingButton:(UISwitch *)sw         { [SevenTVManager sharedManager].showFloatingButton  = sw.isOn; }
+
+- (void)toggleLogErrors:(UISwitch *)sw           { [SevenTVManager sharedManager].logErrors           = sw.isOn; }
+- (void)toggleLogTap:(UISwitch *)sw              { [SevenTVManager sharedManager].logTap              = sw.isOn; }
+- (void)toggleLogSwizzle:(UISwitch *)sw          { [SevenTVManager sharedManager].logSwizzle          = sw.isOn; }
+- (void)toggleLogCache:(UISwitch *)sw            { [SevenTVManager sharedManager].logCache            = sw.isOn; }
+- (void)toggleLogPrefetch:(UISwitch *)sw         { [SevenTVManager sharedManager].logPrefetch         = sw.isOn; }
+- (void)toggleLogAPI:(UISwitch *)sw              { [SevenTVManager sharedManager].logAPI              = sw.isOn; }
+- (void)toggleLogIRCChannel:(UISwitch *)sw       { [SevenTVManager sharedManager].logIRCChannel       = sw.isOn; }
+- (void)toggleLogIRCInjection:(UISwitch *)sw     { [SevenTVManager sharedManager].logIRCInjection     = sw.isOn; }
+- (void)toggleLogUIPicker:(UISwitch *)sw         { [SevenTVManager sharedManager].logUIPicker         = sw.isOn; }
+- (void)toggleLogFavorites:(UISwitch *)sw        { [SevenTVManager sharedManager].logFavorites        = sw.isOn; }
+- (void)toggleLogResize:(UISwitch *)sw           { [SevenTVManager sharedManager].logResize           = sw.isOn; }
+- (void)toggleLogOrientation:(UISwitch *)sw      { [SevenTVManager sharedManager].logOrientation      = sw.isOn; }
+- (void)toggleLogImageConversion:(UISwitch *)sw  { [SevenTVManager sharedManager].logImageConversion  = sw.isOn; }
+- (void)toggleLogDump:(UISwitch *)sw             { [SevenTVManager sharedManager].logDump             = sw.isOn; }
+
+@end
