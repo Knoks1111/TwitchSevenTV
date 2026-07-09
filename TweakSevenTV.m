@@ -2108,6 +2108,84 @@ static void s7tv_dbg_hookLayoutManagerAttachmentSize(void) {
     [[SevenTVManager sharedManager] log:@"[DBG] setAttachmentSize:forGlyphRange: hooke sur NSLayoutManager (v3 image.size)"];
 }
 
+static void s7tv_dbg_hookTextStorageInit(void) {
+    // DIAGNOSTIC PUR (aucun changement de comportement) : le hook
+    // addAttribute:/setAttributes: ne se déclenche JAMAIS pour les
+    // attachments d'emotes (confirmé en logs : 0 [TAG-EARLY], 0 [TAG-MISS]
+    // malgré des dizaines d'emotes détectées). Twitch construit donc son
+    // texte autrement (probablement une primitive bas niveau qui contourne
+    // ces sélecteurs ObjC).
+    //
+    // Objectif ici : voir si le texte BRUT (avec les vrais noms d'emotes,
+    // avant remplacement par le caractère U+FFFC) passe encore, à un
+    // moment donné, par un des initializers standards de NSTextStorage/
+    // NSMutableAttributedString. Si oui → on peut associer la liste
+    // ordonnée des ratios directement sur CET objet (ts), sans dépendre
+    // d'un matching par position. Si non → il faudra chercher ailleurs.
+    void (^logIfInteresting)(NSString *, id) = ^(NSString *label, id str) {
+        if (![str isKindOfClass:[NSString class]] && ![str isKindOfClass:[NSAttributedString class]]) return;
+        NSString *s = [str isKindOfClass:[NSAttributedString class]] ? ((NSAttributedString *)str).string : str;
+        if (s.length == 0) return;
+        static NSUInteger s_count = 0;
+        s_count++;
+        if (s_count <= 25) {
+            NSString *truncated = s.length > 80 ? [s substringToIndex:80] : s;
+            [[SevenTVManager sharedManager] log:@"🐛 [TXT-INIT] %@ #%lu len=%lu texte=\"%@\"",
+                label, (unsigned long)s_count, (unsigned long)s.length, truncated];
+        }
+    };
+
+    Class classes[] = { [NSTextStorage class], [NSMutableAttributedString class] };
+    NSString *labels[] = { @"NSTextStorage", @"NSMutableAttributedString" };
+    for (int c = 0; c < 2; c++) {
+        Class cls = classes[c];
+        NSString *label = labels[c];
+
+        SEL selInitStr = @selector(initWithString:);
+        Method mInitStr = class_getInstanceMethod(cls, selInitStr);
+        if (mInitStr) {
+            IMP orig = method_getImplementation(mInitStr);
+            method_setImplementation(mInitStr, imp_implementationWithBlock(^id(id self_, NSString *str) {
+                id result = ((id(*)(id,SEL,NSString*))orig)(self_, selInitStr, str);
+                logIfInteresting([label stringByAppendingString:@" initWithString:"], str);
+                return result;
+            }));
+        }
+
+        SEL selInitStrAttrs = @selector(initWithString:attributes:);
+        Method mInitStrAttrs = class_getInstanceMethod(cls, selInitStrAttrs);
+        if (mInitStrAttrs) {
+            IMP orig = method_getImplementation(mInitStrAttrs);
+            method_setImplementation(mInitStrAttrs, imp_implementationWithBlock(^id(id self_, NSString *str, NSDictionary *attrs) {
+                id result = ((id(*)(id,SEL,NSString*,NSDictionary*))orig)(self_, selInitStrAttrs, str, attrs);
+                logIfInteresting([label stringByAppendingString:@" initWithString:attributes:"], str);
+                return result;
+            }));
+        }
+
+        SEL selSetAttrStr = @selector(setAttributedString:);
+        Method mSetAttrStr = class_getInstanceMethod(cls, selSetAttrStr);
+        if (mSetAttrStr) {
+            IMP orig = method_getImplementation(mSetAttrStr);
+            method_setImplementation(mSetAttrStr, imp_implementationWithBlock(^void(id self_, NSAttributedString *attrStr) {
+                logIfInteresting([label stringByAppendingString:@" setAttributedString:"], attrStr);
+                ((void(*)(id,SEL,NSAttributedString*))orig)(self_, selSetAttrStr, attrStr);
+            }));
+        }
+
+        SEL selReplaceChars = @selector(replaceCharactersInRange:withString:);
+        Method mReplaceChars = class_getInstanceMethod(cls, selReplaceChars);
+        if (mReplaceChars) {
+            IMP orig = method_getImplementation(mReplaceChars);
+            method_setImplementation(mReplaceChars, imp_implementationWithBlock(^void(id self_, NSRange range, NSString *str) {
+                logIfInteresting([label stringByAppendingString:@" replaceCharactersInRange:withString:"], str);
+                ((void(*)(id,SEL,NSRange,NSString*))orig)(self_, selReplaceChars, range, str);
+            }));
+        }
+    }
+    [[SevenTVManager sharedManager] log:@"✅ [DBG] Hooks diagnostic TXT-INIT posés (NSTextStorage/NSMutableAttributedString)"];
+}
+
 static void s7tv_dbg_hookAddAttribute(void) {
     // Permet de voir, en temps réel, la VRAIE classe utilisée par Twitch
     // pour représenter une emote/attachment dans l'attributed string final,
@@ -2320,6 +2398,7 @@ static void s7tv_debug_dump_layout_system(void) {
         s7tv_dbg_hookAttachmentBounds();
         s7tv_dbg_hookLayoutManagerAttachmentSize();
         s7tv_dbg_hookAddAttribute();
+        s7tv_dbg_hookTextStorageInit();
         s7tv_hook_displayLayer(); // installé tôt → actif dès le premier message
 
         // ── Hook setFrame: sur Twitch.ImageAttachmentLayer ────────────────
