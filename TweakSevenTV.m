@@ -218,6 +218,55 @@ static void s7tv_dumpIvars(Class cls, NSString *label) {
     if (ivars) free(ivars);
 }
 
+// Dump ivars AVEC leurs valeurs (objets uniquement) — utilisé pour chercher
+// un identifiant (emoteID/URL/nom) directement lisible sur l'attachment,
+// sans dépendre d'un matching par position (fragile).
+static void s7tv_dumpIvarValues(id obj, NSString *label) {
+    if (!obj) return;
+    SevenTVManager *mgr = [SevenTVManager sharedManager];
+    Class cls = object_getClass(obj);
+    unsigned int count = 0;
+    Ivar *ivars = class_copyIvarList(cls, &count);
+    [mgr log:[NSString stringWithFormat:@"🩻 %@ (%@) — %u ivars (valeurs):", label, NSStringFromClass(cls), count]];
+    for (unsigned int i = 0; i < count; i++) {
+        const char *name = ivar_getName(ivars[i]);
+        const char *enc  = ivar_getTypeEncoding(ivars[i]);
+        NSString *valStr = @"?";
+        if (enc && enc[0] == '@') {
+            @try {
+                id val = object_getIvar(obj, ivars[i]);
+                valStr = val ? [NSString stringWithFormat:@"%@", val] : @"nil";
+            } @catch (...) { valStr = @"<erreur lecture>"; }
+        } else if (enc) {
+            valStr = [NSString stringWithFormat:@"(type %s, non-objet)", enc];
+        }
+        [mgr log:[NSString stringWithFormat:@"🩻   - %s [%s] = %@", name ?: "?", enc ?: "?", valStr]];
+    }
+    if (ivars) free(ivars);
+
+    Class superCls = class_getSuperclass(cls);
+    if (superCls && superCls != [NSObject class]) {
+        unsigned int scount = 0;
+        Ivar *sivars = class_copyIvarList(superCls, &scount);
+        [mgr log:[NSString stringWithFormat:@"🩻 %@ → superclasse %@ — %u ivars (valeurs):", label, NSStringFromClass(superCls), scount]];
+        for (unsigned int i = 0; i < scount; i++) {
+            const char *name = ivar_getName(sivars[i]);
+            const char *enc  = ivar_getTypeEncoding(sivars[i]);
+            NSString *valStr = @"?";
+            if (enc && enc[0] == '@') {
+                @try {
+                    id val = object_getIvar(obj, sivars[i]);
+                    valStr = val ? [NSString stringWithFormat:@"%@", val] : @"nil";
+                } @catch (...) { valStr = @"<erreur lecture>"; }
+            } else if (enc) {
+                valStr = [NSString stringWithFormat:@"(type %s, non-objet)", enc];
+            }
+            [mgr log:[NSString stringWithFormat:@"🩻   - %s [%s] = %@", name ?: "?", enc ?: "?", valStr]];
+        }
+        if (sivars) free(sivars);
+    }
+}
+
 static void s7tv_dumpMethods(Class cls, NSString *label) {
     SevenTVManager *mgr = [SevenTVManager sharedManager];
     if (!cls) { [mgr log:[NSString stringWithFormat:@"🩻 %@ : classe nil", label]]; return; }
@@ -1900,6 +1949,18 @@ static void s7tv_dbg_hookAttachmentBounds(void) {
         // Condition : bounds "par defaut" (hauteur <=22pt = emotes standard)
         if (r.size.height > 0 && r.size.height <= 22.0) {
 
+            // DUMP PONCTUEL : classe réelle + ivars/valeurs de l'attachment.
+            // Objectif : trouver un identifiant (emoteID/URL/nom) directement
+            // lisible sur l'objet, sans dépendre d'un matching par position
+            // (fragile si l'espace de coordonnées ne correspond pas).
+            static BOOL s_attachmentDumped = NO;
+            if (!s_attachmentDumped && attachment) {
+                s_attachmentDumped = YES;
+                [[SevenTVManager sharedManager] log:@"🩻 ━━━━━ DUMP attachment (une seule fois) ━━━━━"];
+                s7tv_dumpIvarValues(attachment, @"NSTextAttachment concret");
+                [[SevenTVManager sharedManager] log:@"🩻 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"];
+            }
+
             // Détection badge v2 : le textStorage Twitch commence par un char
             // spécial invisible (att[0]=NO mais pas alphanumérique).
             // Les badges viennent ensuite (charIdx=1, 2...).
@@ -1955,7 +2016,7 @@ static void s7tv_dbg_hookAttachmentBounds(void) {
             }
             CGRect newRect = CGRectMake(0, -6.0, targetSize * ratio, targetSize);
             s_resized++;
-            if (s_resized <= 30) {
+            if (s_resized <= 300) {
                 [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
                     @"[BOUNDS] v3 resize #%lu origSize={%.0f,%.0f} ratio=%.2f (%@) orig=%@ new=%@",
                     (unsigned long)s_resized, r.size.width, r.size.height,
@@ -2025,7 +2086,7 @@ static void s7tv_dbg_hookLayoutManagerAttachmentSize(void) {
                     }
                     finalSize = CGSizeMake(targetSize * ratio, targetSize);
                     s_resized++;
-                    if (s_resized <= 30) {
+                    if (s_resized <= 300) {
                         [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
                             @"[ATTSIZE] v3 resize #%lu origSize={%.0f,%.0f} ratio=%.2f (%@) new=%@",
                             (unsigned long)s_resized, size.width, size.height,
@@ -2079,11 +2140,29 @@ static void s7tv_dbg_hookAddAttribute(void) {
 
         SevenTVManager *mgr = [SevenTVManager sharedManager];
         NSString *emoteID = nil;
+        NSArray *knownPositions = nil;
         @synchronized (mgr.emotePositions) {
             emoteID = mgr.emotePositions[@(range.location)];
-            if (emoteID) [mgr.emotePositions removeObjectForKey:@(range.location)];
+            if (emoteID) {
+                [mgr.emotePositions removeObjectForKey:@(range.location)];
+            } else {
+                knownPositions = [mgr.emotePositions.allKeys copy];
+            }
         }
-        if (!emoteID) return;
+        if (!emoteID) {
+            // DIAGNOSTIC : le matching par position a échoué. On logue les
+            // positions actuellement connues pour comparer avec range.location
+            // et déterminer s'il y a un décalage systématique (ex: longueur
+            // du username/badges) plutôt qu'un vrai miss.
+            static NSUInteger s_missCount = 0;
+            s_missCount++;
+            if (s_missCount <= 40) {
+                [mgr log:@"🐛 [TAG-MISS] #%lu range.location=%lu range.length=%lu — positions connues=%@",
+                    (unsigned long)s_missCount, (unsigned long)range.location,
+                    (unsigned long)range.length, knownPositions ?: @[]];
+            }
+            return;
+        }
 
         NSNumber *ratioNum = mgr.emoteRatios[emoteID];
         if (!ratioNum) return; // pas de donnée fiable → on laisse BOUNDS/ATTSIZE faire leur fallback habituel
