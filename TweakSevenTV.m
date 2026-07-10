@@ -1956,8 +1956,13 @@ static void s7tv_dbg_hookAttachmentBounds(void) {
             }
         }
 
-        // Condition : bounds "par defaut" (hauteur <=22pt = emotes standard)
-        if (r.size.height > 0 && r.size.height <= 22.0) {
+        // Condition : bounds "par defaut" (hauteur <=22pt, avant correction)
+        // OU déjà à notre targetSize (rappel ultérieur sur un attachment
+        // qu'on a déjà traité — voir commentaire détaillé dans ATTSIZE).
+        CGFloat targetSizeForCheck2 = [[SevenTVManager sharedManager] targetEmoteSize];
+        BOOL isDefaultSize2 = (r.size.height > 0 && r.size.height <= 22.0);
+        BOOL isOurOwnPreviousSize2 = (r.size.height > 0 && fabs(r.size.height - targetSizeForCheck2) < 0.5);
+        if (isDefaultSize2 || isOurOwnPreviousSize2) {
 
             // DUMP PONCTUEL : classe réelle + ivars/valeurs de l'attachment.
             // Objectif : trouver un identifiant (emoteID/URL/nom) directement
@@ -2073,12 +2078,21 @@ static void s7tv_dbg_hookLayoutManagerAttachmentSize(void) {
                 UIImage *image = (attachment && [attachment respondsToSelector:@selector(image)])
                     ? ((NSTextAttachment *)attachment).image : nil;
 
-                // Condition : size "par defaut" (hauteur <=22pt)
-                // Source de vérité : image.size (la vraie image), pas size —
-                // size est la valeur que NSLayoutManager vient de proposer et
-                // qui reste bloquée à ratio=1.00 (18x18) dans les faits.
-                if (size.height > 0 && size.height <= 22.0) {
-                    CGFloat targetSize = [[SevenTVManager sharedManager] targetEmoteSize];
+                // Condition : size "par defaut" (hauteur <=22pt, avant toute
+                // correction de notre part) OU hauteur déjà égale à notre
+                // targetSize (35pt typiquement) — c'est-à-dire un attachment
+                // qu'ON a déjà traité lors d'un appel précédent. On le
+                // retraite quand même : Twitch rappelle ce hook plusieurs
+                // fois pour le même attachment, et notre propre hauteur
+                // cible dépassait 22pt, ce qui faisait sauter (skip) tous
+                // les rappels suivants — empêchant à vie la bascule vers le
+                // ratio exact une fois l'image chargée. D'où le bug "reste
+                // énorme même après refresh".
+                CGFloat targetSizeForCheck = [[SevenTVManager sharedManager] targetEmoteSize];
+                BOOL isDefaultSize = (size.height > 0 && size.height <= 22.0);
+                BOOL isOurOwnPreviousSize = (size.height > 0 && fabs(size.height - targetSizeForCheck) < 0.5);
+                if (isDefaultSize || isOurOwnPreviousSize) {
+                    CGFloat targetSize = targetSizeForCheck;
                     // Même logique que BOUNDS : image.size en priorité (ratio
                     // exact, une fois l'image chargée — Twitch rappelle ce
                     // hook plusieurs fois par attachment), largeur fixe
