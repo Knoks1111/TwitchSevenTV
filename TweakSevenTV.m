@@ -41,6 +41,10 @@
 
 static const char kS7TVTextFieldTagged = 5;
 static const char kS7TVEmoteRatioKey   = 9;   // associated object sur UIImage/objet animé → NSNumber(ratio)
+// Garde-fou anti double-décalage des voisins (setFrame: ET displayLayer:
+// peuvent tous deux redimensionner le même layer — cette clé partagée évite
+// de décaler les voisins deux fois pour le même emote).
+static const char kS7TVSiblingShiftApplied = 10;
 static const char kS7TVBitsHijacked    = 6;
 static const char kS7TVOrigSectionCount = 7;
 static const char kS7TVShareHijacked   = 8;   // verrou orientation
@@ -1880,6 +1884,8 @@ static void s7tv_hook_displayLayer(void) {
                     if (ratio <= 0) ratio = s7tv_ratioFromLayerContents(outer);
                     if (ratio > 0) {
                         CGFloat newW = targetSize * ratio;
+                        CGFloat oldRightEdge = outerFrame.origin.x + outerFrame.size.width;
+                        CGFloat delta = newW - outerFrame.size.width;
                         CGRect corrected = CGRectMake(
                             outerFrame.origin.x,
                             outerFrame.origin.y + (oh - targetSize) / 2.0,
@@ -1887,6 +1893,34 @@ static void s7tv_hook_displayLayer(void) {
                         [CATransaction begin];
                         [CATransaction setDisableActions:YES];
                         outer.frame = corrected;
+
+                        // ── Décalage des voisins (fix chevauchement) ──────────
+                        // Même logique que le hook setFrame: (voir commentaire
+                        // détaillé là-bas) : CoreText ne sait pas que cet emote
+                        // est plus large que prévu, donc on pousse directement
+                        // les layers voisins positionnés après lui. Garde-fou
+                        // anti double-décalage partagé (même clé) au cas où
+                        // les deux hooks se déclenchent pour le même layer.
+                        if (fabs(delta) > 0.5 && !objc_getAssociatedObject(outer, &kS7TVSiblingShiftApplied)) {
+                            objc_setAssociatedObject(outer, &kS7TVSiblingShiftApplied, @(YES), OBJC_ASSOCIATION_RETAIN);
+                            CALayer *parent = outer.superlayer;
+                            if (parent) {
+                                NSInteger shiftedCount = 0;
+                                for (CALayer *sibling in parent.sublayers) {
+                                    if (sibling == outer) continue;
+                                    if (sibling.frame.origin.x >= oldRightEdge - 0.5) {
+                                        CGRect sf = sibling.frame;
+                                        sibling.frame = CGRectMake(sf.origin.x + delta, sf.origin.y,
+                                                                    sf.size.width, sf.size.height);
+                                        shiftedCount++;
+                                    }
+                                }
+                                if (shiftedCount > 0) {
+                                    [[SevenTVManager sharedManager] log:@"↔️ [SHIFT] %ld voisin(s) décalé(s) de %.1fpt (emote élargi à %.1fpt, via displayLayer:)",
+                                        (long)shiftedCount, delta, newW];
+                                }
+                            }
+                        }
                         [CATransaction commit];
                     }
                     // ratio <= 0 → pas de donnée pixel fiable, on ne touche pas
@@ -2462,12 +2496,49 @@ static void s7tv_debug_dump_layout_system(void) {
 
                             CGFloat newW = targetSize * ratio;
                             CGRect f = l.frame;
+                            CGFloat oldRightEdge = f.origin.x + f.size.width;
+                            CGFloat delta = newW - f.size.width;
+
                             CGRect corrected = CGRectMake(f.origin.x,
                                                           f.origin.y + (f.size.height - targetSize) / 2.0,
                                                           newW, targetSize);
                             [CATransaction begin];
                             [CATransaction setDisableActions:YES];
                             ((void(*)(id,SEL,CGRect))sfOrig)(l, sfSel, corrected);
+
+                            // ── Décalage des voisins (fix chevauchement) ──────────
+                            // Le rendu visuel (ce hook) sait maintenant que cet emote
+                            // est plus large que l'espace réservé par CoreText
+                            // (BOUNDS/ATTSIZE, qui n'ont pas cette info à temps —
+                            // voir commentaires dans ces hooks). Plutôt que d'essayer
+                            // (encore) de faire remonter cette info à CoreText, on
+                            // pousse directement les layers voisins (autres emotes,
+                            // badges) positionnés après celui-ci pour qu'ils ne se
+                            // retrouvent plus dessous. Garde-fou : ne s'applique
+                            // qu'une seule fois par layer (Twitch peut rappeler
+                            // setFrame: plusieurs fois pour le même emote — sans ce
+                            // garde-fou on décalerait les voisins à chaque rappel,
+                            // cumulant les décalages).
+                            if (fabs(delta) > 0.5 && !objc_getAssociatedObject(l, &kS7TVSiblingShiftApplied)) {
+                                objc_setAssociatedObject(l, &kS7TVSiblingShiftApplied, @(YES), OBJC_ASSOCIATION_RETAIN);
+                                CALayer *parent = l.superlayer;
+                                if (parent) {
+                                    NSInteger shiftedCount = 0;
+                                    for (CALayer *sibling in parent.sublayers) {
+                                        if (sibling == l) continue;
+                                        if (sibling.frame.origin.x >= oldRightEdge - 0.5) {
+                                            CGRect sf = sibling.frame;
+                                            sibling.frame = CGRectMake(sf.origin.x + delta, sf.origin.y,
+                                                                        sf.size.width, sf.size.height);
+                                            shiftedCount++;
+                                        }
+                                    }
+                                    if (shiftedCount > 0) {
+                                        [[SevenTVManager sharedManager] log:@"↔️ [SHIFT] %ld voisin(s) décalé(s) de %.1fpt (emote élargi à %.1fpt)",
+                                            (long)shiftedCount, delta, newW];
+                                    }
+                                }
+                            }
                             [CATransaction commit];
                         }
                     });
