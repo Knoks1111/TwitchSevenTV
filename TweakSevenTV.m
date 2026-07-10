@@ -28,6 +28,14 @@
 // setFrame:), pas par une réservation généreuse ici qui ne faisait que
 // laisser un vide permanent sur les emotes carrées sans jamais se corriger.
 
+// Rognage léger appliqué à la largeur calculée depuis le ratio réel des
+// pixels (s7tv_ratioFromLayerContents). Les images 7TV/GIF ont souvent une
+// petite marge transparente autour du visuel utile, ce qui gonfle
+// légèrement le ratio mesuré par rapport à ce qui est visuellement
+// nécessaire — d'où un petit surplus d'espace après chaque emote élargi.
+// Ajuster cette valeur si le gap reste visible ou devient trop serré.
+#define S7TV_WIDTH_TRIM 3.0
+
 
 
 
@@ -1879,7 +1887,7 @@ static void s7tv_hook_displayLayer(void) {
                     CGFloat ratio = s7tv_ratioFromLayerContents((CALayer *)selfObj);
                     if (ratio <= 0) ratio = s7tv_ratioFromLayerContents(outer);
                     if (ratio > 0) {
-                        CGFloat newW = targetSize * ratio;
+                        CGFloat newW = MAX(targetSize, targetSize * ratio - S7TV_WIDTH_TRIM);
                         CGFloat oldRightEdge = outerFrame.origin.x + outerFrame.size.width;
                         CGFloat delta = newW - outerFrame.size.width;
                         CGRect corrected = CGRectMake(
@@ -2488,7 +2496,7 @@ static void s7tv_debug_dump_layout_system(void) {
                             CGFloat ratio = s7tv_ratioFromLayerContents(l);
                             if (ratio <= 0) return; // pas de donnée fiable → ne pas resize
 
-                            CGFloat newW = targetSize * ratio;
+                            CGFloat newW = MAX(targetSize, targetSize * ratio - S7TV_WIDTH_TRIM);
                             CGRect f = l.frame;
                             CGFloat oldRightEdge = f.origin.x + f.size.width;
                             CGFloat delta = newW - f.size.width;
