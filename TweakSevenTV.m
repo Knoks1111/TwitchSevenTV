@@ -30,7 +30,7 @@
 // (qui retombait toujours sur un carré et causait le chevauchement). Le
 // rendu visuel réel (displayLayer:/setFrame:, ratio connu une fois l'image
 // chargée) reste inchangé et s'affiche à sa vraie taille dans cet espace.
-#define S7TV_RESERVED_WIDTH_RATIO 1.7
+#define S7TV_RESERVED_WIDTH_RATIO 3.2
 
 
 
@@ -2002,26 +2002,35 @@ static void s7tv_dbg_hookAttachmentBounds(void) {
             }
 
             CGFloat targetSize = [[SevenTVManager sharedManager] targetEmoteSize];
-            // Réservation de layout : on NE PEUT PAS connaître le vrai ratio
-            // ici (l'image n'est pas encore chargée, et aucun canal fiable
-            // n'existe côté Twitch pour identifier l'emote à ce stade — testé
-            // et écarté : tag à l'insertion, ivar direct, tag sur image décodée).
+            // Twitch rappelle attachmentBoundsForTextContainer: PLUSIEURS FOIS
+            // pour un même attachment : une première fois avant que l'image
+            // soit chargée (image == nil), puis à nouveau une fois l'image
+            // réellement décodée (image.size disponible et fiable — confirmé
+            // en logs : "ratio=1.00 (image)" apparaissait déjà après coup).
             //
-            // Plutôt que d'inventer un ratio (toujours carré en pratique →
-            // chevauchement avec les emotes larges type FLASHBANG), on réserve
-            // une largeur fixe généreuse pour TOUS les emotes 7TV. Le rendu
-            // visuel réel (displayLayer:/setFrame:, qui connaît le vrai ratio
-            // une fois l'image chargée) reste inchangé et s'affiche à sa
-            // vraie taille dans cet espace, aligné à gauche.
-            // Hauteur = toujours targetSize (fixe, inchangé).
-            CGFloat reservedWidth = targetSize * S7TV_RESERVED_WIDTH_RATIO;
-            CGRect newRect = CGRectMake(0, -6.0, reservedWidth, targetSize);
+            // Priorité 1 : image.size — ratio EXACT, dès que Twitch nous le
+            // redonne. C'est le cas normal une fois l'image chargée.
+            // Priorité 2 (image pas encore chargée) : largeur fixe généreuse,
+            // le temps que Twitch relance ce hook avec la vraie image — pas de
+            // chevauchement possible pendant cette courte fenêtre, et la
+            // largeur sera corrigée à la taille exacte au rappel suivant.
+            CGFloat width;
+            NSString *widthSource;
+            if (image && image.size.width > 0 && image.size.height > 0) {
+                CGFloat ratio = image.size.width / image.size.height;
+                width = targetSize * ratio;
+                widthSource = @"image (ratio exact)";
+            } else {
+                width = targetSize * S7TV_RESERVED_WIDTH_RATIO;
+                widthSource = @"fixe temporaire (image pas encore chargée)";
+            }
+            CGRect newRect = CGRectMake(0, -6.0, width, targetSize);
             s_resized++;
             if (s_resized <= 300) {
                 [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
-                    @"[BOUNDS] v3 resize #%lu origSize={%.0f,%.0f} largeur réservée=%.1f (fixe) orig=%@ new=%@",
+                    @"[BOUNDS] v3 resize #%lu origSize={%.0f,%.0f} largeur=%.1f (%@) orig=%@ new=%@",
                     (unsigned long)s_resized, r.size.width, r.size.height,
-                    reservedWidth, NSStringFromCGRect(r), NSStringFromCGRect(newRect)]];
+                    width, widthSource, NSStringFromCGRect(r), NSStringFromCGRect(newRect)]];
             }
             return newRect;
         }
@@ -2070,16 +2079,27 @@ static void s7tv_dbg_hookLayoutManagerAttachmentSize(void) {
                 // qui reste bloquée à ratio=1.00 (18x18) dans les faits.
                 if (size.height > 0 && size.height <= 22.0) {
                     CGFloat targetSize = [[SevenTVManager sharedManager] targetEmoteSize];
-                    // Même logique que BOUNDS : largeur fixe généreuse au lieu
-                    // d'un ratio deviné (voir commentaire détaillé dans BOUNDS).
-                    CGFloat reservedWidth = targetSize * S7TV_RESERVED_WIDTH_RATIO;
-                    finalSize = CGSizeMake(reservedWidth, targetSize);
+                    // Même logique que BOUNDS : image.size en priorité (ratio
+                    // exact, une fois l'image chargée — Twitch rappelle ce
+                    // hook plusieurs fois par attachment), largeur fixe
+                    // généreuse seulement le temps que l'image charge.
+                    CGFloat width;
+                    NSString *widthSource;
+                    if (image && image.size.width > 0 && image.size.height > 0) {
+                        CGFloat ratio = image.size.width / image.size.height;
+                        width = targetSize * ratio;
+                        widthSource = @"image (ratio exact)";
+                    } else {
+                        width = targetSize * S7TV_RESERVED_WIDTH_RATIO;
+                        widthSource = @"fixe temporaire";
+                    }
+                    finalSize = CGSizeMake(width, targetSize);
                     s_resized++;
                     if (s_resized <= 300) {
                         [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
-                            @"[ATTSIZE] v3 resize #%lu origSize={%.0f,%.0f} largeur réservée=%.1f (fixe) new=%@",
+                            @"[ATTSIZE] v3 resize #%lu origSize={%.0f,%.0f} largeur=%.1f (%@) new=%@",
                             (unsigned long)s_resized, size.width, size.height,
-                            reservedWidth, NSStringFromCGSize(finalSize)]];
+                            width, widthSource, NSStringFromCGSize(finalSize)]];
                     }
                 } else {
                     s_skipped++;
