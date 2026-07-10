@@ -22,15 +22,11 @@
 // Cle NSUserDefaults Auto Collect Channel Points
 #define kTCLiveAutoCollectChannelPoints @"TCDBGLiveAutoCollectChannelPoints"
 
-// Largeur réservée dans le layout texte (BOUNDS/ATTSIZE) pour chaque emote
-// 7TV, exprimée en multiple de la hauteur cible (targetEmoteSize). La hauteur,
-// elle, reste toujours fixe. On ne peut pas connaître le vrai ratio à ce
-// stade (image pas encore chargée, aucun identifiant fiable accessible côté
-// Twitch) donc on réserve large pour tous plutôt que de deviner un ratio
-// (qui retombait toujours sur un carré et causait le chevauchement). Le
-// rendu visuel réel (displayLayer:/setFrame:, ratio connu une fois l'image
-// chargée) reste inchangé et s'affiche à sa vraie taille dans cet espace.
-#define S7TV_RESERVED_WIDTH_RATIO 3.2
+// Largeur réservée dans le layout texte : retiré (S7TV_RESERVED_WIDTH_RATIO).
+// Le chevauchement est maintenant géré par le décalage géométrique des
+// layers voisins (voir kS7TVSiblingShiftApplied dans displayLayer:/
+// setFrame:), pas par une réservation généreuse ici qui ne faisait que
+// laisser un vide permanent sur les emotes carrées sans jamais se corriger.
 
 
 
@@ -2041,18 +2037,16 @@ static void s7tv_dbg_hookAttachmentBounds(void) {
             }
 
             CGFloat targetSize = [[SevenTVManager sharedManager] targetEmoteSize];
-            // Twitch rappelle attachmentBoundsForTextContainer: PLUSIEURS FOIS
-            // pour un même attachment : une première fois avant que l'image
-            // soit chargée (image == nil), puis à nouveau une fois l'image
-            // réellement décodée (image.size disponible et fiable — confirmé
-            // en logs : "ratio=1.00 (image)" apparaissait déjà après coup).
-            //
-            // Priorité 1 : image.size — ratio EXACT, dès que Twitch nous le
-            // redonne. C'est le cas normal une fois l'image chargée.
-            // Priorité 2 (image pas encore chargée) : largeur fixe généreuse,
-            // le temps que Twitch relance ce hook avec la vraie image — pas de
-            // chevauchement possible pendant cette courte fenêtre, et la
-            // largeur sera corrigée à la taille exacte au rappel suivant.
+            // Réservation de layout : image.size reste quasi-systématiquement
+            // {0,0} pour ces attachments (Twitch gère le rendu réel ailleurs,
+            // au niveau CALayer — voir displayLayer:/setFrame:), donc on ne
+            // compte plus dessus ici. Réservation simple = carré (largeur =
+            // hauteur), qui sert juste de fallback neutre pour CoreText.
+            // Le chevauchement réel est géré par le décalage des layers
+            // voisins (voir kS7TVSiblingShiftApplied dans displayLayer:/
+            // setFrame:), pas par une réservation généreuse ici — inutile de
+            // laisser un vide permanent sur les emotes carrées pour un cas
+            // qui ne se corrige de toute façon jamais à ce niveau.
             CGFloat width;
             NSString *widthSource;
             if (image && image.size.width > 0 && image.size.height > 0) {
@@ -2060,8 +2054,8 @@ static void s7tv_dbg_hookAttachmentBounds(void) {
                 width = targetSize * ratio;
                 widthSource = @"image (ratio exact)";
             } else {
-                width = targetSize * S7TV_RESERVED_WIDTH_RATIO;
-                widthSource = @"fixe temporaire (image pas encore chargée)";
+                width = targetSize;
+                widthSource = @"carré (chevauchement géré par le décalage des voisins)";
             }
             CGRect newRect = CGRectMake(0, -6.0, width, targetSize);
             s_resized++;
@@ -2127,10 +2121,10 @@ static void s7tv_dbg_hookLayoutManagerAttachmentSize(void) {
                 BOOL isOurOwnPreviousSize = (size.height > 0 && fabs(size.height - targetSizeForCheck) < 0.5);
                 if (isDefaultSize || isOurOwnPreviousSize) {
                     CGFloat targetSize = targetSizeForCheck;
-                    // Même logique que BOUNDS : image.size en priorité (ratio
-                    // exact, une fois l'image chargée — Twitch rappelle ce
-                    // hook plusieurs fois par attachment), largeur fixe
-                    // généreuse seulement le temps que l'image charge.
+                    // Même logique que BOUNDS (voir commentaire détaillé
+                    // là-bas) : image.size en priorité si disponible, sinon
+                    // carré simple — le chevauchement est géré ailleurs par
+                    // le décalage des layers voisins.
                     CGFloat width;
                     NSString *widthSource;
                     if (image && image.size.width > 0 && image.size.height > 0) {
@@ -2138,8 +2132,8 @@ static void s7tv_dbg_hookLayoutManagerAttachmentSize(void) {
                         width = targetSize * ratio;
                         widthSource = @"image (ratio exact)";
                     } else {
-                        width = targetSize * S7TV_RESERVED_WIDTH_RATIO;
-                        widthSource = @"fixe temporaire";
+                        width = targetSize;
+                        widthSource = @"carré (chevauchement géré par le décalage des voisins)";
                     }
                     finalSize = CGSizeMake(width, targetSize);
                     s_resized++;
