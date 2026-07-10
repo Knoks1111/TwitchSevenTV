@@ -22,6 +22,16 @@
 // Cle NSUserDefaults Auto Collect Channel Points
 #define kTCLiveAutoCollectChannelPoints @"TCDBGLiveAutoCollectChannelPoints"
 
+// Largeur réservée dans le layout texte (BOUNDS/ATTSIZE) pour chaque emote
+// 7TV, exprimée en multiple de la hauteur cible (targetEmoteSize). La hauteur,
+// elle, reste toujours fixe. On ne peut pas connaître le vrai ratio à ce
+// stade (image pas encore chargée, aucun identifiant fiable accessible côté
+// Twitch) donc on réserve large pour tous plutôt que de deviner un ratio
+// (qui retombait toujours sur un carré et causait le chevauchement). Le
+// rendu visuel réel (displayLayer:/setFrame:, ratio connu une fois l'image
+// chargée) reste inchangé et s'affiche à sa vraie taille dans cet espace.
+#define S7TV_RESERVED_WIDTH_RATIO 1.7
+
 
 
 
@@ -1992,35 +2002,26 @@ static void s7tv_dbg_hookAttachmentBounds(void) {
             }
 
             CGFloat targetSize = [[SevenTVManager sharedManager] targetEmoteSize];
-            // Priorité 1 : tag posé à l'insertion (s7tv_dbg_hookAddAttribute),
-            // dérivé de emote.width/height via l'API 7TV — connu de façon
-            // SYNCHRONE, bien avant que l'image ne soit chargée. C'est la
-            // source qui corrige le chevauchement (espace réservé = taille
-            // réelle dès le premier passage, plus de désync avec le rendu
-            // visuel corrigé plus tard par displayLayer:/setFrame:).
-            // Priorité 2 : image.size si déjà chargée (emotes natives Twitch,
-            // ou 7TV si jamais le tag a manqué).
-            // Priorité 3 : r (dernier recours, carré la plupart du temps).
-            NSNumber *taggedRatio = objc_getAssociatedObject(attachment, &kS7TVEmoteRatioKey);
-            CGFloat ratio;
-            NSString *ratioSource;
-            if (taggedRatio) {
-                ratio = taggedRatio.floatValue;
-                ratioSource = @"tag";
-            } else if (image && image.size.width > 0 && image.size.height > 0) {
-                ratio = image.size.width / image.size.height;
-                ratioSource = @"image";
-            } else {
-                ratio = (r.size.width > 0 && r.size.height > 0) ? r.size.width / r.size.height : 1.0;
-                ratioSource = @"fallback";
-            }
-            CGRect newRect = CGRectMake(0, -6.0, targetSize * ratio, targetSize);
+            // Réservation de layout : on NE PEUT PAS connaître le vrai ratio
+            // ici (l'image n'est pas encore chargée, et aucun canal fiable
+            // n'existe côté Twitch pour identifier l'emote à ce stade — testé
+            // et écarté : tag à l'insertion, ivar direct, tag sur image décodée).
+            //
+            // Plutôt que d'inventer un ratio (toujours carré en pratique →
+            // chevauchement avec les emotes larges type FLASHBANG), on réserve
+            // une largeur fixe généreuse pour TOUS les emotes 7TV. Le rendu
+            // visuel réel (displayLayer:/setFrame:, qui connaît le vrai ratio
+            // une fois l'image chargée) reste inchangé et s'affiche à sa
+            // vraie taille dans cet espace, aligné à gauche.
+            // Hauteur = toujours targetSize (fixe, inchangé).
+            CGFloat reservedWidth = targetSize * S7TV_RESERVED_WIDTH_RATIO;
+            CGRect newRect = CGRectMake(0, -6.0, reservedWidth, targetSize);
             s_resized++;
             if (s_resized <= 300) {
                 [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
-                    @"[BOUNDS] v3 resize #%lu origSize={%.0f,%.0f} ratio=%.2f (%@) orig=%@ new=%@",
+                    @"[BOUNDS] v3 resize #%lu origSize={%.0f,%.0f} largeur réservée=%.1f (fixe) orig=%@ new=%@",
                     (unsigned long)s_resized, r.size.width, r.size.height,
-                    ratio, ratioSource, NSStringFromCGRect(r), NSStringFromCGRect(newRect)]];
+                    reservedWidth, NSStringFromCGRect(r), NSStringFromCGRect(newRect)]];
             }
             return newRect;
         }
@@ -2069,28 +2070,16 @@ static void s7tv_dbg_hookLayoutManagerAttachmentSize(void) {
                 // qui reste bloquée à ratio=1.00 (18x18) dans les faits.
                 if (size.height > 0 && size.height <= 22.0) {
                     CGFloat targetSize = [[SevenTVManager sharedManager] targetEmoteSize];
-                    // Même priorité que BOUNDS : tag précoce (synchrone, API 7TV)
-                    // avant image.size (peut encore être nil ici) avant fallback carré.
-                    NSNumber *taggedRatio = attachment ? objc_getAssociatedObject(attachment, &kS7TVEmoteRatioKey) : nil;
-                    CGFloat ratio;
-                    NSString *ratioSource;
-                    if (taggedRatio) {
-                        ratio = taggedRatio.floatValue;
-                        ratioSource = @"tag";
-                    } else if (image && image.size.width > 0 && image.size.height > 0) {
-                        ratio = image.size.width / image.size.height;
-                        ratioSource = @"image";
-                    } else {
-                        ratio = (size.width > 0 && size.height > 0) ? size.width / size.height : 1.0;
-                        ratioSource = @"fallback";
-                    }
-                    finalSize = CGSizeMake(targetSize * ratio, targetSize);
+                    // Même logique que BOUNDS : largeur fixe généreuse au lieu
+                    // d'un ratio deviné (voir commentaire détaillé dans BOUNDS).
+                    CGFloat reservedWidth = targetSize * S7TV_RESERVED_WIDTH_RATIO;
+                    finalSize = CGSizeMake(reservedWidth, targetSize);
                     s_resized++;
                     if (s_resized <= 300) {
                         [[SevenTVManager sharedManager] log:[NSString stringWithFormat:
-                            @"[ATTSIZE] v3 resize #%lu origSize={%.0f,%.0f} ratio=%.2f (%@) new=%@",
+                            @"[ATTSIZE] v3 resize #%lu origSize={%.0f,%.0f} largeur réservée=%.1f (fixe) new=%@",
                             (unsigned long)s_resized, size.width, size.height,
-                            ratio, ratioSource, NSStringFromCGSize(finalSize)]];
+                            reservedWidth, NSStringFromCGSize(finalSize)]];
                     }
                 } else {
                     s_skipped++;
