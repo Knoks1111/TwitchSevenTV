@@ -4,13 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Tag de la release contenant l'IPA"
+        description: "Tag de la release contenant l'IPA (ex: ipa-base)"
         required: true
         default: "ipa-base"
-      ipa_filename:
-        description: "Nom exact du fichier IPA dans la release"
-        required: true
-        default: "Twitch29.8.7TV.01.ipa"
       output_name:
         description: "Nom de l'IPA finale (sans .ipa)"
         required: true
@@ -30,10 +26,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          echo "📦 Téléchargement de ${{ github.event.inputs.ipa_filename }} (tag: ${{ github.event.inputs.release_tag }})"
+          echo "📦 Téléchargement depuis release '${{ github.event.inputs.release_tag }}' (*.ipa)"
           gh release download "${{ github.event.inputs.release_tag }}" \
             --repo "${{ github.repository }}" \
-            --pattern "${{ github.event.inputs.ipa_filename }}" \
+            --pattern "*.ipa" \
             --output original.ipa
           echo "✅ Téléchargement terminé : $(du -sh original.ipa | cut -f1)"
 
