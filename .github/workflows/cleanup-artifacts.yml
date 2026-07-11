@@ -12,88 +12,97 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: 🗑️ Supprimer les anciens runs de tous les workflows
+      - name: 🗑️ Supprimer tous les anciens runs
         env:
           GH_TOKEN: ${{ github.token }}
           CURRENT_RUN_ID: ${{ github.run_id }}
         run: |
           REPO="${{ github.repository }}"
-          TOTAL_DELETED=0
 
-          echo "🔍 Récupération de tous les workflows..."
+          echo "🔍 Récupération de tous les runs (y compris workflows supprimés)..."
 
-          # Récupérer tous les workflow IDs + noms
-          WORKFLOWS=$(curl --silent \
-            --header "Authorization: Bearer $GH_TOKEN" \
-            --header "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${REPO}/actions/workflows?per_page=100" | python3 -c "
+          # Collecter tous les runs toutes pages confondues
+          ALL_RUNS_JSON="[]"
+          PAGE=1
+          while true; do
+            PAGE_DATA=$(curl --silent \
+              --header "Authorization: Bearer $GH_TOKEN" \
+              --header "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${REPO}/actions/runs?per_page=100&page=${PAGE}")
+
+            COUNT=$(echo "$PAGE_DATA" | python3 -c "
+          import sys,json
+          d=json.load(sys.stdin)
+          print(len(d.get('workflow_runs',[])))
+          " 2>/dev/null || echo 0)
+
+            [ "$COUNT" = "0" ] && break
+
+            ALL_RUNS_JSON=$(echo "$ALL_RUNS_JSON $PAGE_DATA" | python3 -c "
+          import sys,json
+          parts = sys.stdin.read().split(' ', 1)
+          existing = json.loads(parts[0])
+          new_data = json.loads(parts[1])
+          existing.extend(new_data.get('workflow_runs',[]))
+          print(json.dumps(existing))
+          " 2>/dev/null)
+
+            [ "$COUNT" -lt 100 ] && break
+            PAGE=$((PAGE+1))
+          done
+
+          TOTAL=$(echo "$ALL_RUNS_JSON" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))")
+          echo "📋 Total runs trouvés : $TOTAL"
+
+          # Garder le plus récent par workflow, supprimer tout le reste
+          TO_DELETE=$(echo "$ALL_RUNS_JSON" | python3 -c "
           import sys, json
-          data = json.load(sys.stdin)
-          for w in data.get('workflows', []):
-              print(w['id'], w['name'])
-          ")
 
-          if [ -z "$WORKFLOWS" ]; then
-            echo "⚠️  Aucun workflow trouvé"
-            exit 0
-          fi
+          runs = json.load(sys.stdin)
+          current_run = '$CURRENT_RUN_ID'
 
-          echo "$WORKFLOWS" | while IFS=' ' read -r WF_ID WF_NAME_REST; do
-            WF_NAME="$WF_ID $WF_NAME_REST"
-            echo ""
-            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            echo "📋 Workflow: $WF_NAME_REST (ID: $WF_ID)"
+          # Grouper par workflow_id, garder le plus récent
+          seen = {}
+          to_delete = []
 
-            PAGE=1
-            DELETED=0
-            FIRST=true
+          for r in runs:
+              wf_id = str(r['workflow_id'])
+              run_id = str(r['id'])
 
-            while true; do
-              RUNS=$(curl --silent \
-                --header "Authorization: Bearer $GH_TOKEN" \
-                --header "Accept: application/vnd.github+json" \
-                "https://api.github.com/repos/${REPO}/actions/workflows/${WF_ID}/runs?per_page=100&page=${PAGE}" | python3 -c "
-          import sys, json
-          data = json.load(sys.stdin)
-          for r in data.get('workflow_runs', []):
-              print(r['id'])
-          ")
+              if run_id == current_run:
+                  continue  # Jamais supprimer le run en cours
 
-              [ -z "$(echo "$RUNS" | tr -d '[:space:]')" ] && break
-              COUNT=$(echo "$RUNS" | grep -c '[0-9]' || true)
+              if wf_id not in seen:
+                  seen[wf_id] = run_id  # Plus récent = premier dans la liste
+                  print(f'KEEP {run_id} [{r[\"name\"]}]', file=sys.stderr)
+              else:
+                  to_delete.append(run_id)
 
-              for RUN_ID in $RUNS; do
-                # Toujours garder le run en cours (ce workflow)
-                if [ "$RUN_ID" = "$CURRENT_RUN_ID" ]; then
-                  echo "  ⭐ Conservé (run en cours): $RUN_ID"
-                  FIRST=false
-                  continue
-                fi
-                # Garder le plus récent de chaque workflow
-                if [ "$FIRST" = "true" ]; then
-                  echo "  ⭐ Conservé (plus récent): $RUN_ID"
-                  FIRST=false
-                  continue
-                fi
-                HTTP=$(curl --silent --output /dev/null --write-out "%{http_code}" \
-                  --request DELETE \
-                  --header "Authorization: Bearer $GH_TOKEN" \
-                  --header "Accept: application/vnd.github+json" \
-                  "https://api.github.com/repos/${REPO}/actions/runs/${RUN_ID}")
-                if [ "$HTTP" = "204" ]; then
-                  DELETED=$((DELETED+1))
-                  echo "  ✅ Supprimé: $RUN_ID"
-                else
-                  echo "  ⚠️  Échec ($HTTP): $RUN_ID"
-                fi
-              done
+          for rid in to_delete:
+              print(rid)
+          " 2>/tmp/kept.txt)
 
-              [ "$COUNT" -lt 100 ] && break
-              PAGE=$((PAGE+1))
-            done
+          echo ""
+          echo "⭐ Runs conservés (plus récent par workflow) :"
+          cat /tmp/kept.txt
+          echo ""
 
-            echo "  → $DELETED run(s) supprimé(s)"
+          DELETED=0
+          FAILED=0
+          for RUN_ID in $TO_DELETE; do
+            HTTP=$(curl --silent --output /dev/null --write-out "%{http_code}" \
+              --request DELETE \
+              --header "Authorization: Bearer $GH_TOKEN" \
+              --header "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${REPO}/actions/runs/${RUN_ID}")
+            if [ "$HTTP" = "204" ]; then
+              DELETED=$((DELETED+1))
+              echo "  ✅ Supprimé: $RUN_ID"
+            else
+              FAILED=$((FAILED+1))
+              echo "  ⚠️  Échec ($HTTP): $RUN_ID"
+            fi
           done
 
           echo ""
-          echo "✅ Nettoyage terminé"
+          echo "✅ Terminé — $DELETED supprimé(s), $FAILED échec(s)"
