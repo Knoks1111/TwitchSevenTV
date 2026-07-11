@@ -29,8 +29,11 @@ jobs:
           echo "📦 Téléchargement depuis release '${{ github.event.inputs.release_tag }}' (*.ipa)"
           gh release download "${{ github.event.inputs.release_tag }}" \
             --repo "${{ github.repository }}" \
-            --pattern "*.ipa" \
-            --output original.ipa
+            --pattern "*.ipa"
+          ORIGINAL_IPA=$(ls *.ipa | head -1)
+          echo "📄 Nom original : $ORIGINAL_IPA"
+          mv "$ORIGINAL_IPA" original.ipa
+          echo "ORIGINAL_BASE=${ORIGINAL_IPA%.ipa}" >> $GITHUB_ENV
           echo "✅ Téléchargement terminé : $(du -sh original.ipa | cut -f1)"
 
       # ─── 2. Extraire l'IPA ────────────────────────────────────────────────
@@ -139,11 +142,7 @@ jobs:
       - name: 📦 Repackager en IPA propre
         run: |
           # Récupérer le nom original de l'IPA depuis la release
-          ORIGINAL_NAME=$(gh release view "${{ github.event.inputs.release_tag }}" \
-            --repo "${{ github.repository }}" \
-            --json assets \
-            --jq '.assets[] | select(.name | endswith(".ipa")) | .name' | head -1)
-          ORIGINAL_BASE="${ORIGINAL_NAME%.ipa}"
+          ORIGINAL_BASE="${{ env.ORIGINAL_BASE }}"
 
           PREFIX="${{ github.event.inputs.output_name }}"
           if [ -z "$PREFIX" ]; then PREFIX="Clean"; fi
