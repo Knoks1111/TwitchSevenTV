@@ -8,9 +8,9 @@ on:
         required: true
         default: "ipa-base"
       output_name:
-        description: "Nom de l'IPA finale (sans .ipa)"
-        required: true
-        default: "Twitch_clean"
+        description: "Préfixe optionnel (laisse vide pour 'Clean_')"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -138,7 +138,17 @@ jobs:
       # ─── 9. Repackager en IPA ─────────────────────────────────────────────
       - name: 📦 Repackager en IPA propre
         run: |
-          OUTPUT_IPA="${{ github.event.inputs.output_name }}.ipa"
+          # Récupérer le nom original de l'IPA depuis la release
+          ORIGINAL_NAME=$(gh release view "${{ github.event.inputs.release_tag }}" \
+            --repo "${{ github.repository }}" \
+            --json assets \
+            --jq '.assets[] | select(.name | endswith(".ipa")) | .name' | head -1)
+          ORIGINAL_BASE="${ORIGINAL_NAME%.ipa}"
+
+          PREFIX="${{ github.event.inputs.output_name }}"
+          if [ -z "$PREFIX" ]; then PREFIX="Clean"; fi
+
+          OUTPUT_IPA="${PREFIX}_${ORIGINAL_BASE}.ipa"
           cd IPA_extracted
           zip -qr "../$OUTPUT_IPA" Payload/
           cd ..
@@ -149,7 +159,7 @@ jobs:
       - name: 📤 Upload de l'IPA finale
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ github.event.inputs.output_name }}
+          name: ${{ env.OUTPUT_IPA }}
           path: ${{ env.OUTPUT_IPA }}
           retention-days: 7
           compression-level: 0
