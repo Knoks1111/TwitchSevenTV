@@ -37,6 +37,14 @@
 // MARK: - Clés associated objects
 // ────────────────────────────────────────────────────────────
 
+// Décalage géométrique des voisins : DÉSACTIVÉ. Confirmé en logs qu'il
+// provoque un cumul incontrôlé (les cellules étant réutilisées au scroll,
+// Twitch recrée un nouveau CALayer pour la même emote à chaque réaffichage
+// → nouveau garde-fou vierge → redécalage en plus du précédent, jamais
+// annulé). On mise maintenant sur le re-layout géométrique (RETAG) comme
+// seule source de vérité pour le texte. Repasser à 1 pour réactiver.
+#define S7TV_ENABLE_SIBLING_SHIFT 0
+
 static const char kS7TVTextFieldTagged = 5;
 static const char kS7TVEmoteRatioKey   = 9;   // associated object sur UIImage/objet animé → NSNumber(ratio)
 // Garde-fou anti double-décalage des voisins (setFrame: ET displayLayer:
@@ -339,15 +347,24 @@ static NSLayoutManager *s7tv_findLayoutManagerAndHostView(CALayer *startLayer, U
 // la bonne largeur — corrige le chevauchement AVEC le texte, pas juste
 // avec les autres layers (que le décalage géométrique gère déjà).
 static void s7tv_retagAttachmentAndInvalidate(CALayer *emoteLayer, CGFloat ratio, CGFloat targetSize) {
-    if (ratio <= 0) return;
+    static NSUInteger s_missCount = 0;
+    SevenTVManager *mgr = [SevenTVManager sharedManager];
+    void (^logMiss)(NSString *) = ^(NSString *reason) {
+        s_missCount++;
+        if (s_missCount <= 40) {
+            [mgr log:@"🔁 [RETAG-MISS] #%lu raison=%@", (unsigned long)s_missCount, reason];
+        }
+    };
+
+    if (ratio <= 0) { logMiss(@"ratio<=0"); return; }
 
     UIView *hostView = nil;
     NSLayoutManager *lm = s7tv_findLayoutManagerAndHostView(emoteLayer, &hostView);
-    if (!lm || !hostView) return;
+    if (!lm || !hostView) { logMiss(@"pas de NSLayoutManager/hostView trouvé dans la hiérarchie"); return; }
 
     NSTextContainer *tc = lm.textContainers.firstObject;
     NSTextStorage *ts = lm.textStorage;
-    if (!tc || !ts) return;
+    if (!tc || !ts) { logMiss([NSString stringWithFormat:@"tc=%@ ts=%@", tc ? @"OK" : @"nil", ts ? @"OK" : @"nil"]); return; }
 
     // Position du centre du layer, convertie dans le repère de la vue hôte
     // (celle qui porte le NSLayoutManager) — c'est ce référentiel que
@@ -361,13 +378,22 @@ static void s7tv_retagAttachmentAndInvalidate(CALayer *emoteLayer, CGFloat ratio
     NSUInteger charIdx = [lm characterIndexForPoint:pointInHost
                                      inTextContainer:tc
             fractionOfDistanceBetweenInsertionPoints:NULL];
-    if (charIdx == NSNotFound || charIdx >= ts.length) return;
+    if (charIdx == NSNotFound || charIdx >= ts.length) {
+        logMiss([NSString stringWithFormat:@"charIdx invalide (%@) point=%@ ts.length=%lu",
+            charIdx == NSNotFound ? @"NotFound" : [NSString stringWithFormat:@"%lu", (unsigned long)charIdx],
+            NSStringFromCGPoint(pointInHost), (unsigned long)ts.length]);
+        return;
+    }
 
     id attachment = [ts attribute:NSAttachmentAttributeName atIndex:charIdx effectiveRange:NULL];
-    if (![attachment isKindOfClass:[NSTextAttachment class]]) return;
+    if (![attachment isKindOfClass:[NSTextAttachment class]]) {
+        logMiss([NSString stringWithFormat:@"pas d'attachment à charIdx=%lu (classe=%@)",
+            (unsigned long)charIdx, attachment ? NSStringFromClass([attachment class]) : @"nil"]);
+        return;
+    }
 
     NSNumber *existing = objc_getAssociatedObject(attachment, &kS7TVEmoteRatioKey);
-    if (existing && fabs(existing.floatValue - ratio) < 0.01) return; // déjà tagué avec la même valeur
+    if (existing && fabs(existing.floatValue - ratio) < 0.01) return; // déjà tagué avec la même valeur, pas un échec
 
     objc_setAssociatedObject(attachment, &kS7TVEmoteRatioKey, @(ratio), OBJC_ASSOCIATION_RETAIN);
 
@@ -378,7 +404,7 @@ static void s7tv_retagAttachmentAndInvalidate(CALayer *emoteLayer, CGFloat ratio
     static NSUInteger s_retagCount = 0;
     s_retagCount++;
     if (s_retagCount <= 40) {
-        [[SevenTVManager sharedManager] log:@"🔁 [RETAG] #%lu charIdx=%lu ratio=%.3f — layout invalidé",
+        [mgr log:@"🔁 [RETAG] #%lu charIdx=%lu ratio=%.3f — layout invalidé",
             (unsigned long)s_retagCount, (unsigned long)charIdx, ratio];
     }
 }
@@ -1989,6 +2015,7 @@ static void s7tv_hook_displayLayer(void) {
                         // les layers voisins positionnés après lui. Garde-fou
                         // anti double-décalage partagé (même clé) au cas où
                         // les deux hooks se déclenchent pour le même layer.
+#if S7TV_ENABLE_SIBLING_SHIFT
                         if (fabs(delta) > 0.5 && !objc_getAssociatedObject(outer, &kS7TVSiblingShiftApplied)) {
                             objc_setAssociatedObject(outer, &kS7TVSiblingShiftApplied, @(YES), OBJC_ASSOCIATION_RETAIN);
                             CALayer *parent = outer.superlayer;
@@ -2009,6 +2036,7 @@ static void s7tv_hook_displayLayer(void) {
                                 }
                             }
                         }
+#endif
                         [CATransaction commit];
 
                         // ── Re-layout géométrique (fix chevauchement texte) ──
@@ -2616,6 +2644,7 @@ static void s7tv_debug_dump_layout_system(void) {
                             // setFrame: plusieurs fois pour le même emote — sans ce
                             // garde-fou on décalerait les voisins à chaque rappel,
                             // cumulant les décalages).
+#if S7TV_ENABLE_SIBLING_SHIFT
                             if (fabs(delta) > 0.5 && !objc_getAssociatedObject(l, &kS7TVSiblingShiftApplied)) {
                                 objc_setAssociatedObject(l, &kS7TVSiblingShiftApplied, @(YES), OBJC_ASSOCIATION_RETAIN);
                                 CALayer *parent = l.superlayer;
@@ -2636,6 +2665,7 @@ static void s7tv_debug_dump_layout_system(void) {
                                     }
                                 }
                             }
+#endif
                             [CATransaction commit];
 
                             // ── Re-layout géométrique (fix chevauchement texte) ──
