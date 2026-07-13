@@ -309,32 +309,60 @@ static void s7tv_dumpMethods(Class cls, NSString *label) {
 // contrairement aux tentatives précédentes qui dépendaient d'un canal
 // spécifique (addAttribute:, ivar nommé, tag sur image) tous cassés.
 static NSLayoutManager *s7tv_findLayoutManagerAndHostView(CALayer *startLayer, UIView **outHostView) {
+    static NSUInteger s_traceCount = 0;
+    BOOL shouldTrace = (s_traceCount < 5); // limite le bruit — juste assez pour diagnostiquer
+    if (shouldTrace) s_traceCount++;
+
+    SevenTVManager *mgr = shouldTrace ? [SevenTVManager sharedManager] : nil;
+    if (shouldTrace) {
+        [mgr log:@"🔎 [RETAG-TRACE] début remontée depuis %@", NSStringFromClass([startLayer class])];
+    }
+
     CALayer *l = startLayer;
     NSInteger hops = 0;
-    while (l && hops < 15) {
+    while (l && hops < 30) {
         id delegate = l.delegate;
+        if (shouldTrace) {
+            [mgr log:@"🔎 [RETAG-TRACE]   hop#%ld layer=%@ delegate=%@ (%@)",
+                (long)hops, NSStringFromClass([l class]),
+                delegate ? NSStringFromClass([delegate class]) : @"nil",
+                delegate ? ([delegate isKindOfClass:[UIView class]] ? @"UIView ✅" : @"pas UIView ❌") : @"—"];
+        }
         if (delegate && [delegate isKindOfClass:[UIView class]]) {
             Class cls = [delegate class];
             while (cls && cls != [NSObject class]) {
                 unsigned int count = 0;
                 Ivar *ivars = class_copyIvarList(cls, &count);
+                BOOL foundInThisClass = NO;
                 for (unsigned int i = 0; i < count; i++) {
                     const char *enc = ivar_getTypeEncoding(ivars[i]);
                     if (enc && enc[0] == '@') {
                         id val = object_getIvar(delegate, ivars[i]);
                         if ([val isKindOfClass:[NSLayoutManager class]]) {
+                            foundInThisClass = YES;
                             if (ivars) free(ivars);
                             if (outHostView) *outHostView = (UIView *)delegate;
+                            if (shouldTrace) {
+                                [mgr log:@"🔎 [RETAG-TRACE]   ✅ NSLayoutManager trouvé sur %@ (ivar %s)",
+                                    NSStringFromClass(cls), ivar_getName(ivars[i])];
+                            }
                             return (NSLayoutManager *)val;
                         }
                     }
                 }
                 if (ivars) free(ivars);
+                if (shouldTrace && !foundInThisClass) {
+                    [mgr log:@"🔎 [RETAG-TRACE]     (aucun NSLayoutManager dans les ivars de %@, %u ivars scannés)",
+                        NSStringFromClass(cls), count];
+                }
                 cls = class_getSuperclass(cls);
             }
         }
         l = l.superlayer;
         hops++;
+    }
+    if (shouldTrace) {
+        [mgr log:@"🔎 [RETAG-TRACE] fin remontée (%ld hops) — rien trouvé", (long)hops];
     }
     return nil;
 }
