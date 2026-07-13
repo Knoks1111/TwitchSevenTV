@@ -2736,7 +2736,6 @@ static S7TVLogCategory s7tv_categoryForMessage(NSString *msg) {
     if (has(@"attachmentBoundsForTextContainer") || has(@"setAttachmentSize") ||
         has(@"willDisplayCell") || has(@"Hooks resize layout") ||
         has(@"Tag propagé") || has(@"NSTextAttachment") ||
-        has(@"RETAG") || has(@"[SHIFT]") ||
         ([msg rangeOfString:@"ImageAttachmentLayer"].location != NSNotFound &&
          [msg rangeOfString:@"Animated"].location == NSNotFound))
         return S7TVLogCategoryResize;

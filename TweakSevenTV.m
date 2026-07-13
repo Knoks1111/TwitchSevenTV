@@ -37,14 +37,6 @@
 // MARK: - Clés associated objects
 // ────────────────────────────────────────────────────────────
 
-// Décalage géométrique des voisins : DÉSACTIVÉ. Confirmé en logs qu'il
-// provoque un cumul incontrôlé (les cellules étant réutilisées au scroll,
-// Twitch recrée un nouveau CALayer pour la même emote à chaque réaffichage
-// → nouveau garde-fou vierge → redécalage en plus du précédent, jamais
-// annulé). On mise maintenant sur le re-layout géométrique (RETAG) comme
-// seule source de vérité pour le texte. Repasser à 1 pour réactiver.
-#define S7TV_ENABLE_SIBLING_SHIFT 0
-
 static const char kS7TVTextFieldTagged = 5;
 static const char kS7TVEmoteRatioKey   = 9;   // associated object sur UIImage/objet animé → NSNumber(ratio)
 // Garde-fou anti double-décalage des voisins (setFrame: ET displayLayer:
@@ -54,6 +46,21 @@ static const char kS7TVSiblingShiftApplied = 10;
 static const char kS7TVBitsHijacked    = 6;
 static const char kS7TVOrigSectionCount = 7;
 static const char kS7TVShareHijacked   = 8;   // verrou orientation
+
+// Réinitialise le garde-fou anti double-décalage sur TOUTE la hiérarchie de
+// layers d'une cellule. Nécessaire car Twitch réutilise/recrée les layers
+// au recyclage des cellules (scroll) sans jamais effacer nos associated
+// objects — un drapeau "déjà décalé" qui survit d'un affichage précédent
+// cause un cumul de décalages jamais annulés (confirmé en logs : décalages
+// croissants 6,12,18,24,31...). Appelé au début de CHAQUE willDisplayCell,
+// pour que le décalage ne puisse s'appliquer qu'une fois par affichage réel.
+static void s7tv_clearShiftGuards(CALayer *root) {
+    if (!root) return;
+    objc_setAssociatedObject(root, &kS7TVSiblingShiftApplied, nil, OBJC_ASSOCIATION_RETAIN);
+    for (CALayer *sub in root.sublayers) {
+        s7tv_clearShiftGuards(sub);
+    }
+}
 
 // État global verrou d'orientation
 static BOOL s_orientationLocked             = NO;
@@ -299,142 +306,6 @@ static void s7tv_dumpMethods(Class cls, NSString *label) {
     if (methods) free(methods);
     [mgr log:[NSString stringWithFormat:@"🩻 %@ (%@) — méthodes: %@",
         label, NSStringFromClass(cls), names.count ? [names componentsJoinedByString:@", "] : @"(aucune)"]];
-}
-
-// ── Re-layout géométrique (fix chevauchement texte) ─────────────────────
-// Remonte la hiérarchie de CALayer depuis l'emote jusqu'à trouver la vue
-// hôte, puis fouille ses ivars (peu importe leur nom — on cherche par TYPE,
-// pas par nom, pour ne pas dépendre d'un nom privé Twitch qui pourrait
-// changer) pour trouver un NSLayoutManager. Recherche générique et robuste,
-// contrairement aux tentatives précédentes qui dépendaient d'un canal
-// spécifique (addAttribute:, ivar nommé, tag sur image) tous cassés.
-static NSLayoutManager *s7tv_findLayoutManagerAndHostView(CALayer *startLayer, UIView **outHostView) {
-    static NSUInteger s_traceCount = 0;
-    BOOL shouldTrace = (s_traceCount < 5); // limite le bruit — juste assez pour diagnostiquer
-    if (shouldTrace) s_traceCount++;
-
-    SevenTVManager *mgr = shouldTrace ? [SevenTVManager sharedManager] : nil;
-    if (shouldTrace) {
-        [mgr log:@"🔎 [RETAG-TRACE] début remontée depuis %@", NSStringFromClass([startLayer class])];
-    }
-
-    CALayer *l = startLayer;
-    NSInteger hops = 0;
-    while (l && hops < 30) {
-        id delegate = l.delegate;
-        if (shouldTrace) {
-            [mgr log:@"🔎 [RETAG-TRACE]   hop#%ld layer=%@ delegate=%@ (%@)",
-                (long)hops, NSStringFromClass([l class]),
-                delegate ? NSStringFromClass([delegate class]) : @"nil",
-                delegate ? ([delegate isKindOfClass:[UIView class]] ? @"UIView ✅" : @"pas UIView ❌") : @"—"];
-        }
-        if (delegate && [delegate isKindOfClass:[UIView class]]) {
-            Class cls = [delegate class];
-            while (cls && cls != [NSObject class]) {
-                unsigned int count = 0;
-                Ivar *ivars = class_copyIvarList(cls, &count);
-                BOOL foundInThisClass = NO;
-                for (unsigned int i = 0; i < count; i++) {
-                    const char *enc = ivar_getTypeEncoding(ivars[i]);
-                    if (enc && enc[0] == '@') {
-                        id val = object_getIvar(delegate, ivars[i]);
-                        if ([val isKindOfClass:[NSLayoutManager class]]) {
-                            foundInThisClass = YES;
-                            if (ivars) free(ivars);
-                            if (outHostView) *outHostView = (UIView *)delegate;
-                            if (shouldTrace) {
-                                [mgr log:@"🔎 [RETAG-TRACE]   ✅ NSLayoutManager trouvé sur %@ (ivar %s)",
-                                    NSStringFromClass(cls), ivar_getName(ivars[i])];
-                            }
-                            return (NSLayoutManager *)val;
-                        }
-                    }
-                }
-                if (ivars) free(ivars);
-                if (shouldTrace && !foundInThisClass) {
-                    [mgr log:@"🔎 [RETAG-TRACE]     (aucun NSLayoutManager dans les ivars de %@, %u ivars scannés)",
-                        NSStringFromClass(cls), count];
-                }
-                cls = class_getSuperclass(cls);
-            }
-        }
-        l = l.superlayer;
-        hops++;
-    }
-    if (shouldTrace) {
-        [mgr log:@"🔎 [RETAG-TRACE] fin remontée (%ld hops) — rien trouvé", (long)hops];
-    }
-    return nil;
-}
-
-// Trouve le vrai NSTextAttachment correspondant à la position du CALayer
-// (via NSLayoutManager characterIndexForPoint: — API standard, pas une
-// supposition sur le comportement interne de Twitch), le tague avec le
-// ratio réel, puis force CoreText à refaire le layout de cette petite
-// portion de texte pour que BOUNDS/ATTSIZE relisent le tag et réservent
-// la bonne largeur — corrige le chevauchement AVEC le texte, pas juste
-// avec les autres layers (que le décalage géométrique gère déjà).
-static void s7tv_retagAttachmentAndInvalidate(CALayer *emoteLayer, CGFloat ratio, CGFloat targetSize) {
-    static NSUInteger s_missCount = 0;
-    SevenTVManager *mgr = [SevenTVManager sharedManager];
-    void (^logMiss)(NSString *) = ^(NSString *reason) {
-        s_missCount++;
-        if (s_missCount <= 40) {
-            [mgr log:@"🔁 [RETAG-MISS] #%lu raison=%@", (unsigned long)s_missCount, reason];
-        }
-    };
-
-    if (ratio <= 0) { logMiss(@"ratio<=0"); return; }
-
-    UIView *hostView = nil;
-    NSLayoutManager *lm = s7tv_findLayoutManagerAndHostView(emoteLayer, &hostView);
-    if (!lm || !hostView) { logMiss(@"pas de NSLayoutManager/hostView trouvé dans la hiérarchie"); return; }
-
-    NSTextContainer *tc = lm.textContainers.firstObject;
-    NSTextStorage *ts = lm.textStorage;
-    if (!tc || !ts) { logMiss([NSString stringWithFormat:@"tc=%@ ts=%@", tc ? @"OK" : @"nil", ts ? @"OK" : @"nil"]); return; }
-
-    // Position du centre du layer, convertie dans le repère de la vue hôte
-    // (celle qui porte le NSLayoutManager) — c'est ce référentiel que
-    // characterIndexForPoint: attend (coordonnées du text container, qui
-    // correspondent en général à celles de la vue hôte pour ce genre
-    // d'implémentation TextKit sans UITextView).
-    CGPoint centerInLayer = CGPointMake(emoteLayer.bounds.size.width / 2.0,
-                                        emoteLayer.bounds.size.height / 2.0);
-    CGPoint pointInHost = [emoteLayer convertPoint:centerInLayer toLayer:hostView.layer];
-
-    NSUInteger charIdx = [lm characterIndexForPoint:pointInHost
-                                     inTextContainer:tc
-            fractionOfDistanceBetweenInsertionPoints:NULL];
-    if (charIdx == NSNotFound || charIdx >= ts.length) {
-        logMiss([NSString stringWithFormat:@"charIdx invalide (%@) point=%@ ts.length=%lu",
-            charIdx == NSNotFound ? @"NotFound" : [NSString stringWithFormat:@"%lu", (unsigned long)charIdx],
-            NSStringFromCGPoint(pointInHost), (unsigned long)ts.length]);
-        return;
-    }
-
-    id attachment = [ts attribute:NSAttachmentAttributeName atIndex:charIdx effectiveRange:NULL];
-    if (![attachment isKindOfClass:[NSTextAttachment class]]) {
-        logMiss([NSString stringWithFormat:@"pas d'attachment à charIdx=%lu (classe=%@)",
-            (unsigned long)charIdx, attachment ? NSStringFromClass([attachment class]) : @"nil"]);
-        return;
-    }
-
-    NSNumber *existing = objc_getAssociatedObject(attachment, &kS7TVEmoteRatioKey);
-    if (existing && fabs(existing.floatValue - ratio) < 0.01) return; // déjà tagué avec la même valeur, pas un échec
-
-    objc_setAssociatedObject(attachment, &kS7TVEmoteRatioKey, @(ratio), OBJC_ASSOCIATION_RETAIN);
-
-    NSRange range = NSMakeRange(charIdx, 1);
-    [lm invalidateLayoutForCharacterRange:range actualCharacterRange:NULL];
-    [lm invalidateDisplayForCharacterRange:range];
-
-    static NSUInteger s_retagCount = 0;
-    s_retagCount++;
-    if (s_retagCount <= 40) {
-        [mgr log:@"🔁 [RETAG] #%lu charIdx=%lu ratio=%.3f — layout invalidé",
-            (unsigned long)s_retagCount, (unsigned long)charIdx, ratio];
-    }
 }
 
 static void s7tv_dumpAnimationArchitectureOnce(CALayer *outerLayer) {
@@ -2043,7 +1914,6 @@ static void s7tv_hook_displayLayer(void) {
                         // les layers voisins positionnés après lui. Garde-fou
                         // anti double-décalage partagé (même clé) au cas où
                         // les deux hooks se déclenchent pour le même layer.
-#if S7TV_ENABLE_SIBLING_SHIFT
                         if (fabs(delta) > 0.5 && !objc_getAssociatedObject(outer, &kS7TVSiblingShiftApplied)) {
                             objc_setAssociatedObject(outer, &kS7TVSiblingShiftApplied, @(YES), OBJC_ASSOCIATION_RETAIN);
                             CALayer *parent = outer.superlayer;
@@ -2064,15 +1934,7 @@ static void s7tv_hook_displayLayer(void) {
                                 }
                             }
                         }
-#endif
                         [CATransaction commit];
-
-                        // ── Re-layout géométrique (fix chevauchement texte) ──
-                        // Une fois le rendu visuel correct, on retrouve le vrai
-                        // NSTextAttachment via sa position et on force CoreText
-                        // à refaire le layout pour que le TEXTE (pas juste les
-                        // autres layers) se repositionne correctement.
-                        s7tv_retagAttachmentAndInvalidate(outer, ratio, targetSize);
                     }
                     // ratio <= 0 → pas de donnée pixel fiable, on ne touche pas
                     // (jamais de fallback carré inventé)
@@ -2192,20 +2054,19 @@ static void s7tv_dbg_hookAttachmentBounds(void) {
             }
 
             CGFloat targetSize = [[SevenTVManager sharedManager] targetEmoteSize];
-            // Priorité 1 : tag posé via re-layout géométrique (voir
-            // s7tv_retagAttachmentAndInvalidate — trouve le vrai attachment
-            // via NSLayoutManager characterIndexForPoint: une fois le ratio
-            // réel connu côté CALayer, puis force ce hook à se rappeler).
-            // Priorité 2 : image.size si jamais disponible (rare).
-            // Priorité 3 : carré, en dernier recours (chevauchement partiel
-            // géré par le décalage des voisins, voir setFrame:/displayLayer:).
-            NSNumber *taggedRatio = objc_getAssociatedObject(attachment, &kS7TVEmoteRatioKey);
+            // Réservation de layout : image.size reste quasi-systématiquement
+            // {0,0} pour ces attachments (Twitch gère le rendu réel ailleurs,
+            // au niveau CALayer — voir displayLayer:/setFrame:), donc on ne
+            // compte plus dessus ici. Réservation simple = carré (largeur =
+            // hauteur), qui sert juste de fallback neutre pour CoreText.
+            // Le chevauchement réel est géré par le décalage des layers
+            // voisins (voir kS7TVSiblingShiftApplied dans displayLayer:/
+            // setFrame:), pas par une réservation généreuse ici — inutile de
+            // laisser un vide permanent sur les emotes carrées pour un cas
+            // qui ne se corrige de toute façon jamais à ce niveau.
             CGFloat width;
             NSString *widthSource;
-            if (taggedRatio && taggedRatio.floatValue > 0) {
-                width = targetSize * taggedRatio.floatValue;
-                widthSource = @"tag (re-layout géométrique)";
-            } else if (image && image.size.width > 0 && image.size.height > 0) {
+            if (image && image.size.width > 0 && image.size.height > 0) {
                 CGFloat ratio = image.size.width / image.size.height;
                 width = targetSize * ratio;
                 widthSource = @"image (ratio exact)";
@@ -2278,15 +2139,12 @@ static void s7tv_dbg_hookLayoutManagerAttachmentSize(void) {
                 if (isDefaultSize || isOurOwnPreviousSize) {
                     CGFloat targetSize = targetSizeForCheck;
                     // Même logique que BOUNDS (voir commentaire détaillé
-                    // là-bas) : tag re-layout géométrique en priorité,
-                    // sinon image.size, sinon carré simple.
-                    NSNumber *taggedRatio = attachment ? objc_getAssociatedObject(attachment, &kS7TVEmoteRatioKey) : nil;
+                    // là-bas) : image.size en priorité si disponible, sinon
+                    // carré simple — le chevauchement est géré ailleurs par
+                    // le décalage des layers voisins.
                     CGFloat width;
                     NSString *widthSource;
-                    if (taggedRatio && taggedRatio.floatValue > 0) {
-                        width = targetSize * taggedRatio.floatValue;
-                        widthSource = @"tag (re-layout géométrique)";
-                    } else if (image && image.size.width > 0 && image.size.height > 0) {
+                    if (image && image.size.width > 0 && image.size.height > 0) {
                         CGFloat ratio = image.size.width / image.size.height;
                         width = targetSize * ratio;
                         widthSource = @"image (ratio exact)";
@@ -2672,7 +2530,6 @@ static void s7tv_debug_dump_layout_system(void) {
                             // setFrame: plusieurs fois pour le même emote — sans ce
                             // garde-fou on décalerait les voisins à chaque rappel,
                             // cumulant les décalages).
-#if S7TV_ENABLE_SIBLING_SHIFT
                             if (fabs(delta) > 0.5 && !objc_getAssociatedObject(l, &kS7TVSiblingShiftApplied)) {
                                 objc_setAssociatedObject(l, &kS7TVSiblingShiftApplied, @(YES), OBJC_ASSOCIATION_RETAIN);
                                 CALayer *parent = l.superlayer;
@@ -2693,11 +2550,7 @@ static void s7tv_debug_dump_layout_system(void) {
                                     }
                                 }
                             }
-#endif
                             [CATransaction commit];
-
-                            // ── Re-layout géométrique (fix chevauchement texte) ──
-                            s7tv_retagAttachmentAndInvalidate(l, ratio, targetSize);
                         }
                     });
                 }));
@@ -2786,6 +2639,14 @@ static void TwitchSevenTVInit(void) {
                                                        UITableView *tableView,
                                                        UITableViewCell *cell,
                                                        NSIndexPath *indexPath) {
+                // Réinitialiser le garde-fou de décalage AVANT tout traitement
+                // de cette cellule (voir s7tv_clearShiftGuards) — fait AVANT
+                // l'appel original pour que rien de résiduel ne subsiste au
+                // moment où Twitch relance son propre layout/resize interne.
+                if ([NSStringFromClass([cell class]) isEqualToString:@"Twitch.ChatMessageTableViewCell"]) {
+                    s7tv_clearShiftGuards(cell.layer);
+                }
+
                 // Appel original
                 ((void (*)(id, SEL, UITableView *, UITableViewCell *, NSIndexPath *))origIMP)
                     (self_tv, origSel, tableView, cell, indexPath);
