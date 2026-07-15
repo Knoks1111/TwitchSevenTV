@@ -22,45 +22,15 @@
 // Cle NSUserDefaults Auto Collect Channel Points
 #define kTCLiveAutoCollectChannelPoints @"TCDBGLiveAutoCollectChannelPoints"
 
-// Largeur réservée dans le layout texte : retiré (S7TV_RESERVED_WIDTH_RATIO).
-// Le chevauchement est maintenant géré par le décalage géométrique des
-// layers voisins (voir kS7TVSiblingShiftApplied dans displayLayer:/
-// setFrame:), pas par une réservation généreuse ici qui ne faisait que
-// laisser un vide permanent sur les emotes carrées sans jamais se corriger.
-
-// Rognage léger : retiré (S7TV_WIDTH_TRIM).
-
-
-
-
 // ────────────────────────────────────────────────────────────
 // MARK: - Clés associated objects
 // ────────────────────────────────────────────────────────────
 
 static const char kS7TVTextFieldTagged = 5;
 static const char kS7TVEmoteRatioKey   = 9;   // associated object sur UIImage/objet animé → NSNumber(ratio)
-// Garde-fou anti double-décalage des voisins (setFrame: ET displayLayer:
-// peuvent tous deux redimensionner le même layer — cette clé partagée évite
-// de décaler les voisins deux fois pour le même emote).
-static const char kS7TVSiblingShiftApplied = 10;
 static const char kS7TVBitsHijacked    = 6;
 static const char kS7TVOrigSectionCount = 7;
 static const char kS7TVShareHijacked   = 8;   // verrou orientation
-
-// Réinitialise le garde-fou anti double-décalage sur TOUTE la hiérarchie de
-// layers d'une cellule. Nécessaire car Twitch réutilise/recrée les layers
-// au recyclage des cellules (scroll) sans jamais effacer nos associated
-// objects — un drapeau "déjà décalé" qui survit d'un affichage précédent
-// cause un cumul de décalages jamais annulés (confirmé en logs : décalages
-// croissants 6,12,18,24,31...). Appelé au début de CHAQUE willDisplayCell,
-// pour que le décalage ne puisse s'appliquer qu'une fois par affichage réel.
-static void s7tv_clearShiftGuards(CALayer *root) {
-    if (!root) return;
-    objc_setAssociatedObject(root, &kS7TVSiblingShiftApplied, nil, OBJC_ASSOCIATION_RETAIN);
-    for (CALayer *sub in root.sublayers) {
-        s7tv_clearShiftGuards(sub);
-    }
-}
 
 // État global verrou d'orientation
 static BOOL s_orientationLocked             = NO;
@@ -376,6 +346,64 @@ static void s7tv_dumpAnimationArchitectureOnce(CALayer *outerLayer) {
         }
     }
     [mgr log:@"🩻 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"];
+}
+
+// ── Variante B : marqueur invisible portant l'emoteID (fix chevauchement texte) ──
+//
+// Principe : on encode l'ID complet de l'emote en caractères Unicode
+// invisibles ("Tag characters", U+E0000-U+E007F — bloc prévu à l'origine
+// pour transporter des métadonnées cachées dans du texte, sans largeur ni
+// rendu visuel). Chaque caractère ASCII de l'ID est encodé comme
+// U+E0000+code, suivi d'un caractère de fin U+E007F ("cancel tag").
+//
+// Contrairement aux 5 tentatives précédentes (position texte, ivar direct,
+// hook d'insertion, NSLayoutManager introuvable), celle-ci ne dépend
+// d'AUCUNE coopération de Twitch pour l'identification : le marqueur est
+// autonome, lisible directement dans le texte final (ts.string), qu'on a
+// déjà accès à chaque resize.
+//
+// DIAGNOSTIC UNIQUEMENT pour l'instant : on décode et on logue, sans encore
+// modifier le calcul de largeur — objectif : valider que le marqueur
+// survit intact jusqu'au texte final avant d'investir dans le reste.
+
+// Encode un ID (ASCII) en séquence de tag characters + terminateur.
+static NSString *s7tv_encodeEmoteIDTag(NSString *asciiID) {
+    NSMutableString *tag = [NSMutableString stringWithCapacity:asciiID.length * 2 + 2];
+    for (NSUInteger i = 0; i < asciiID.length; i++) {
+        unichar c = [asciiID characterAtIndex:i];
+        uint32_t codepoint = 0xE0000 + (uint32_t)c;
+        uint16_t high = (uint16_t)(0xD800 + ((codepoint - 0x10000) >> 10));
+        uint16_t low  = (uint16_t)(0xDC00 + ((codepoint - 0x10000) & 0x3FF));
+        [tag appendFormat:@"%C%C", high, low];
+    }
+    // Terminateur : CANCEL TAG U+E007F
+    uint32_t cancel = 0xE007F;
+    uint16_t high = (uint16_t)(0xD800 + ((cancel - 0x10000) >> 10));
+    uint16_t low  = (uint16_t)(0xDC00 + ((cancel - 0x10000) & 0x3FF));
+    [tag appendFormat:@"%C%C", high, low];
+    return tag;
+}
+
+// Tente de décoder une séquence de tag characters commençant exactement à
+// startIdx dans text. Retourne l'ID décodé (ASCII), ou nil si rien trouvé
+// à cette position (pas une erreur — la plupart des positions n'ont pas de
+// marqueur, ex: badges, texte normal).
+static NSString *s7tv_decodeTagIDAtIndex(NSString *text, NSUInteger startIdx) {
+    if (!text || startIdx + 1 >= text.length) return nil;
+    NSMutableString *decoded = [NSMutableString string];
+    NSUInteger i = startIdx;
+    while (i + 1 < text.length) {
+        unichar high = [text characterAtIndex:i];
+        unichar low  = [text characterAtIndex:i + 1];
+        if (high < 0xD800 || high > 0xDBFF || low < 0xDC00 || low > 0xDFFF) break; // pas une paire de substitution
+        uint32_t codepoint = 0x10000 + (((uint32_t)(high - 0xD800)) << 10) + (low - 0xDC00);
+        if (codepoint == 0xE007F) { i += 2; break; } // fin de tag — succès
+        if (codepoint < 0xE0000 || codepoint > 0xE007E) break; // pas (ou plus) un tag character
+        unichar ascii = (unichar)(codepoint - 0xE0000);
+        [decoded appendFormat:@"%C", ascii];
+        i += 2;
+    }
+    return decoded.length > 0 ? [decoded copy] : nil;
 }
 
 
@@ -1897,8 +1925,6 @@ static void s7tv_hook_displayLayer(void) {
                     if (ratio <= 0) ratio = s7tv_ratioFromLayerContents(outer);
                     if (ratio > 0) {
                         CGFloat newW = targetSize * ratio;
-                        CGFloat oldRightEdge = outerFrame.origin.x + outerFrame.size.width;
-                        CGFloat delta = newW - outerFrame.size.width;
                         CGRect corrected = CGRectMake(
                             outerFrame.origin.x,
                             outerFrame.origin.y + (oh - targetSize) / 2.0,
@@ -1906,34 +1932,6 @@ static void s7tv_hook_displayLayer(void) {
                         [CATransaction begin];
                         [CATransaction setDisableActions:YES];
                         outer.frame = corrected;
-
-                        // ── Décalage des voisins (fix chevauchement) ──────────
-                        // Même logique que le hook setFrame: (voir commentaire
-                        // détaillé là-bas) : CoreText ne sait pas que cet emote
-                        // est plus large que prévu, donc on pousse directement
-                        // les layers voisins positionnés après lui. Garde-fou
-                        // anti double-décalage partagé (même clé) au cas où
-                        // les deux hooks se déclenchent pour le même layer.
-                        if (fabs(delta) > 0.5 && !objc_getAssociatedObject(outer, &kS7TVSiblingShiftApplied)) {
-                            objc_setAssociatedObject(outer, &kS7TVSiblingShiftApplied, @(YES), OBJC_ASSOCIATION_RETAIN);
-                            CALayer *parent = outer.superlayer;
-                            if (parent) {
-                                NSInteger shiftedCount = 0;
-                                for (CALayer *sibling in parent.sublayers) {
-                                    if (sibling == outer) continue;
-                                    if (sibling.frame.origin.x >= oldRightEdge - 0.5) {
-                                        CGRect sf = sibling.frame;
-                                        sibling.frame = CGRectMake(sf.origin.x + delta, sf.origin.y,
-                                                                    sf.size.width, sf.size.height);
-                                        shiftedCount++;
-                                    }
-                                }
-                                if (shiftedCount > 0) {
-                                    [[SevenTVManager sharedManager] log:@"↔️ [SHIFT] %ld voisin(s) décalé(s) de %.1fpt (emote élargi à %.1fpt, via displayLayer:)",
-                                        (long)shiftedCount, delta, newW];
-                                }
-                            }
-                        }
                         [CATransaction commit];
                     }
                     // ratio <= 0 → pas de donnée pixel fiable, on ne touche pas
@@ -2031,6 +2029,21 @@ static void s7tv_dbg_hookAttachmentBounds(void) {
             // Dès qu'on trouve un char alphanumérique → username → zone message.
             NSLayoutManager *lm2 = tc ? tc.layoutManager : nil;
             NSTextStorage *ts2 = lm2 ? lm2.textStorage : nil;
+
+            // ── DIAGNOSTIC Variante B : le marqueur invisible a-t-il survécu ? ──
+            // Le marqueur (s'il existe) doit se trouver juste après le caractère
+            // de remplacement de l'attachment (charIdx), donc à charIdx+1.
+            if (ts2 && ts2.length > 0) {
+                static NSUInteger s_tagDiagCount = 0;
+                NSString *decodedID = s7tv_decodeTagIDAtIndex(ts2.string, charIdx + 1);
+                s_tagDiagCount++;
+                if (s_tagDiagCount <= 60) {
+                    [[SevenTVManager sharedManager] log:@"🏷️ [TAGID-DIAG] #%lu charIdx=%lu → %@",
+                        (unsigned long)s_tagDiagCount, (unsigned long)charIdx,
+                        decodedID ? [NSString stringWithFormat:@"✅ trouvé: %@", decodedID] : @"❌ rien à cette position"];
+                }
+            }
+
             if (ts2 && ts2.length > 0 && charIdx <= ts2.length) {
                 BOOL inBadgeZone = YES;
                 NSCharacterSet *alphaNum = [NSCharacterSet alphanumericCharacterSet];
@@ -2058,12 +2071,9 @@ static void s7tv_dbg_hookAttachmentBounds(void) {
             // {0,0} pour ces attachments (Twitch gère le rendu réel ailleurs,
             // au niveau CALayer — voir displayLayer:/setFrame:), donc on ne
             // compte plus dessus ici. Réservation simple = carré (largeur =
-            // hauteur), qui sert juste de fallback neutre pour CoreText.
-            // Le chevauchement réel est géré par le décalage des layers
-            // voisins (voir kS7TVSiblingShiftApplied dans displayLayer:/
-            // setFrame:), pas par une réservation généreuse ici — inutile de
-            // laisser un vide permanent sur les emotes carrées pour un cas
-            // qui ne se corrige de toute façon jamais à ce niveau.
+            // hauteur), qui sert de fallback neutre pour CoreText — le
+            // chevauchement avec les emotes larges reste un problème ouvert
+            // à ce niveau (voir tag ID invisible en cours d'implémentation).
             CGFloat width;
             NSString *widthSource;
             if (image && image.size.width > 0 && image.size.height > 0) {
@@ -2507,8 +2517,6 @@ static void s7tv_debug_dump_layout_system(void) {
 
                             CGFloat newW = targetSize * ratio;
                             CGRect f = l.frame;
-                            CGFloat oldRightEdge = f.origin.x + f.size.width;
-                            CGFloat delta = newW - f.size.width;
 
                             CGRect corrected = CGRectMake(f.origin.x,
                                                           f.origin.y + (f.size.height - targetSize) / 2.0,
@@ -2516,40 +2524,6 @@ static void s7tv_debug_dump_layout_system(void) {
                             [CATransaction begin];
                             [CATransaction setDisableActions:YES];
                             ((void(*)(id,SEL,CGRect))sfOrig)(l, sfSel, corrected);
-
-                            // ── Décalage des voisins (fix chevauchement) ──────────
-                            // Le rendu visuel (ce hook) sait maintenant que cet emote
-                            // est plus large que l'espace réservé par CoreText
-                            // (BOUNDS/ATTSIZE, qui n'ont pas cette info à temps —
-                            // voir commentaires dans ces hooks). Plutôt que d'essayer
-                            // (encore) de faire remonter cette info à CoreText, on
-                            // pousse directement les layers voisins (autres emotes,
-                            // badges) positionnés après celui-ci pour qu'ils ne se
-                            // retrouvent plus dessous. Garde-fou : ne s'applique
-                            // qu'une seule fois par layer (Twitch peut rappeler
-                            // setFrame: plusieurs fois pour le même emote — sans ce
-                            // garde-fou on décalerait les voisins à chaque rappel,
-                            // cumulant les décalages).
-                            if (fabs(delta) > 0.5 && !objc_getAssociatedObject(l, &kS7TVSiblingShiftApplied)) {
-                                objc_setAssociatedObject(l, &kS7TVSiblingShiftApplied, @(YES), OBJC_ASSOCIATION_RETAIN);
-                                CALayer *parent = l.superlayer;
-                                if (parent) {
-                                    NSInteger shiftedCount = 0;
-                                    for (CALayer *sibling in parent.sublayers) {
-                                        if (sibling == l) continue;
-                                        if (sibling.frame.origin.x >= oldRightEdge - 0.5) {
-                                            CGRect sf = sibling.frame;
-                                            sibling.frame = CGRectMake(sf.origin.x + delta, sf.origin.y,
-                                                                        sf.size.width, sf.size.height);
-                                            shiftedCount++;
-                                        }
-                                    }
-                                    if (shiftedCount > 0) {
-                                        [[SevenTVManager sharedManager] log:@"↔️ [SHIFT] %ld voisin(s) décalé(s) de %.1fpt (emote élargi à %.1fpt)",
-                                            (long)shiftedCount, delta, newW];
-                                    }
-                                }
-                            }
                             [CATransaction commit];
                         }
                     });
@@ -2639,14 +2613,6 @@ static void TwitchSevenTVInit(void) {
                                                        UITableView *tableView,
                                                        UITableViewCell *cell,
                                                        NSIndexPath *indexPath) {
-                // Réinitialiser le garde-fou de décalage AVANT tout traitement
-                // de cette cellule (voir s7tv_clearShiftGuards) — fait AVANT
-                // l'appel original pour que rien de résiduel ne subsiste au
-                // moment où Twitch relance son propre layout/resize interne.
-                if ([NSStringFromClass([cell class]) isEqualToString:@"Twitch.ChatMessageTableViewCell"]) {
-                    s7tv_clearShiftGuards(cell.layer);
-                }
-
                 // Appel original
                 ((void (*)(id, SEL, UITableView *, UITableViewCell *, NSIndexPath *))origIMP)
                     (self_tv, origSel, tableView, cell, indexPath);

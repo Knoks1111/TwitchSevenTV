@@ -1206,6 +1206,30 @@ static const CGFloat kS7TVMenuHeight = 520.0;
 // MARK: - Injection IRC (V0.1 — simple)
 // ============================================================
 
+// ── Variante B : marqueur invisible portant l'emoteID ────────────────────
+// Encode l'ID (ASCII) en séquence de "Tag characters" Unicode (U+E0000 +
+// code ASCII), terminée par U+E007F ("cancel tag"). Ce bloc existe pour
+// transporter des métadonnées invisibles dans du texte — aucune largeur ni
+// rendu visuel. Inséré juste après le mot de l'emote dans le texte du
+// message, avant l'envoi à Twitch, pour pouvoir retrouver l'ID directement
+// dans le texte final côté lecture (TweakSevenTV.m), sans dépendre d'une
+// coopération de Twitch pour l'identification.
+static NSString *s7tv_encodeEmoteIDTag(NSString *asciiID) {
+    NSMutableString *tag = [NSMutableString stringWithCapacity:asciiID.length * 2 + 2];
+    for (NSUInteger i = 0; i < asciiID.length; i++) {
+        unichar c = [asciiID characterAtIndex:i];
+        uint32_t codepoint = 0xE0000 + (uint32_t)c;
+        uint16_t high = (uint16_t)(0xD800 + ((codepoint - 0x10000) >> 10));
+        uint16_t low  = (uint16_t)(0xDC00 + ((codepoint - 0x10000) & 0x3FF));
+        [tag appendFormat:@"%C%C", high, low];
+    }
+    uint32_t cancel = 0xE007F;
+    uint16_t high = (uint16_t)(0xD800 + ((cancel - 0x10000) >> 10));
+    uint16_t low  = (uint16_t)(0xDC00 + ((cancel - 0x10000) & 0x3FF));
+    [tag appendFormat:@"%C%C", high, low];
+    return tag;
+}
+
 - (NSString *)injectSevenTVEmotesIntoIRCMessage:(NSString *)raw {
     if (!self.isEnabled || raw.length == 0) return raw;
 
@@ -1236,9 +1260,17 @@ static const CGFloat kS7TVMenuHeight = 520.0;
     });
 
     // Scanner chaque mot et construire le tag emotes=
+    // On construit AUSSI une version du texte du message avec un marqueur
+    // invisible (Variante B) inséré juste après chaque mot d'emote détecté.
+    // cumulativeOffset suit le décalage introduit par NOS PROPRES marqueurs
+    // déjà insérés plus tôt dans la boucle — contrairement au décalage
+    // introduit par le pseudo/badges (qu'on ne maîtrise pas), celui-ci est
+    // entièrement sous notre contrôle, donc calculable avec certitude.
     NSMutableArray<NSString *> *entries = [NSMutableArray array];
     NSArray<NSString *> *words = [messageText componentsSeparatedByString:@" "];
+    NSMutableString *markedMessageText = [messageText mutableCopy];
     NSUInteger pos = 0;
+    NSInteger cumulativeOffset = 0;
 
     for (NSString *word in words) {
         if (word.length > 0) {
@@ -1246,9 +1278,14 @@ static const CGFloat kS7TVMenuHeight = 520.0;
             if (emote) {
                 NSUInteger start = pos;
                 NSUInteger end   = pos + word.length - 1;
+                // Positions ajustées : celles que Twitch va réellement voir
+                // dans markedMessageText, une fois tous les marqueurs
+                // PRÉCÉDENTS déjà insérés (cumulativeOffset).
+                NSUInteger adjStart = (NSUInteger)((NSInteger)start + cumulativeOffset);
+                NSUInteger adjEnd   = (NSUInteger)((NSInteger)end   + cumulativeOffset);
                 NSString *entry  = [NSString stringWithFormat:@"%@%@:%lu-%lu",
                                     S7TV_EMOTE_ID_PREFIX, emote.emoteID,
-                                    (unsigned long)start, (unsigned long)end];
+                                    (unsigned long)adjStart, (unsigned long)adjEnd];
                 [entries addObject:entry];
                 // Stocker { emoteID -> ratio } pour le resize proportionnel
                 if (emote.width > 0 && emote.height > 0) {
@@ -1259,8 +1296,18 @@ static const CGFloat kS7TVMenuHeight = 520.0;
                     self.emoteRatios[emote.emoteID] = @(1.0);
                 }
                 // Stocker { characterIndex → emoteID } pour sizeOfImageAttachmentAtCharacterIndex:
-                self.emotePositions[@(start)] = emote.emoteID;
+                self.emotePositions[@(adjStart)] = emote.emoteID;
                 [self log:@"✅ Emote détectée: %@ → %@", word, entry];
+
+                // Insérer le marqueur invisible juste après ce mot, dans
+                // markedMessageText (qui contient déjà tous les marqueurs
+                // précédents — insertAt tient compte de cumulativeOffset).
+                NSString *marker = s7tv_encodeEmoteIDTag(emote.emoteID);
+                NSUInteger insertAt = adjEnd + 1;
+                if (insertAt <= markedMessageText.length) {
+                    [markedMessageText insertString:marker atIndex:insertAt];
+                    cumulativeOffset += (NSInteger)marker.length;
+                }
             }
         }
         pos += word.length + 1;
@@ -1270,6 +1317,18 @@ static const CGFloat kS7TVMenuHeight = 520.0;
 
     NSString *emoteTag = [entries componentsJoinedByString:@"/"];
     [self log:@"💉 Injection: emotes=%@", emoteTag];
+
+    // Remplacer le texte du message dans raw par la version marquée
+    // (markedMessageText) — même position/longueur que messageText
+    // (original), puisque markedMessageText est une copie de messageText
+    // avec uniquement des insertions APRÈS chaque mot détecté.
+    NSUInteger messageStartInRaw = privmsgRange.location + colonSpace.location + 2;
+    if (messageStartInRaw + messageText.length <= raw.length) {
+        NSMutableString *rawWithMarkers = [raw mutableCopy];
+        [rawWithMarkers replaceCharactersInRange:NSMakeRange(messageStartInRaw, messageText.length)
+                                       withString:markedMessageText];
+        raw = [rawWithMarkers copy];
+    }
 
     // Injecter dans le tag emotes= existant ou créer un nouveau tag
     NSRange existingTag = [raw rangeOfString:@"emotes="];
