@@ -2037,7 +2037,8 @@ static void s7tv_dbg_hookAttachmentBounds(void) {
             // ── DIAGNOSTIC Variante B : le marqueur invisible a-t-il survécu ? ──
             // Le marqueur (s'il existe) doit se trouver juste après le caractère
             // de remplacement de l'attachment (charIdx), donc à charIdx+1.
-            if (ts2 && ts2.length > 0) {
+            BOOL isOurSevenTVEmote = attachment && objc_getAssociatedObject(attachment, &kS7TVEmoteRatioKey);
+            if (ts2 && ts2.length > 0 && isOurSevenTVEmote) {
                 static NSUInteger s_tagDiagCount = 0;
                 uint16_t shortID = 0;
                 BOOL found = s7tv_decodeShortIDMarkerAt(ts2.string, charIdx + 1, &shortID);
