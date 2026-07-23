@@ -370,45 +370,56 @@ static void s7tv_dumpAnimationArchitectureOnce(CALayer *outerLayer) {
 // autonome, lisible directement dans le texte final (ts.string), qu'on a
 // déjà accès à chaque resize.
 
-// Décode UN sélecteur de variation à la position idx. Retourne YES et
-// l'octet correspondant si trouvé, NO sinon. outConsumed = nb d'unités
-// UTF-16 consommées (1 pour VS1-16, 2 pour VS17-256 qui sont hors BMP).
-static BOOL s7tv_decodeVariationSelectorAt(NSString *text, NSUInteger idx,
-                                            uint8_t *outByte, NSUInteger *outConsumed) {
-    if (idx >= text.length) return NO;
-    unichar c = [text characterAtIndex:idx];
-    if (c >= 0xFE00 && c <= 0xFE0F) {
-        *outByte = (uint8_t)(c - 0xFE00);
-        *outConsumed = 1;
-        return YES;
-    }
-    if (c >= 0xD800 && c <= 0xDBFF && idx + 1 < text.length) {
-        unichar low = [text characterAtIndex:idx + 1];
-        if (low >= 0xDC00 && low <= 0xDFFF) {
-            uint32_t codepoint = 0x10000 + (((uint32_t)(c - 0xD800)) << 10) + (low - 0xDC00);
-            if (codepoint >= 0xE0100 && codepoint <= 0xE01EF) {
-                *outByte = (uint8_t)(16 + (codepoint - 0xE0100));
-                *outConsumed = 2;
-                return YES;
-            }
-        }
-    }
-    return NO;
+// Décode UN tag character (U+E0000-U+E00FF, toujours en paire de
+// substitution UTF-16) à la position idx. Retourne YES et l'octet
+// correspondant si trouvé, NO sinon.
+static BOOL s7tv_decodeTagCharByteAt(NSString *text, NSUInteger idx, uint8_t *outByte) {
+    if (idx + 1 >= text.length) return NO;
+    unichar hi = [text characterAtIndex:idx];
+    unichar lo = [text characterAtIndex:idx + 1];
+    if (hi < 0xD800 || hi > 0xDBFF || lo < 0xDC00 || lo > 0xDFFF) return NO;
+    uint32_t codepoint = 0x10000 + (((uint32_t)(hi - 0xD800)) << 10) + (lo - 0xDC00);
+    if (codepoint < 0xE0000 || codepoint > 0xE00FF) return NO;
+    *outByte = (uint8_t)(codepoint - 0xE0000);
+    return YES;
 }
 
-// Tente de décoder un marqueur (2 sélecteurs de variation = 1 short ID)
-// commençant exactement à startIdx. Retourne YES si un ID complet a été
-// décodé, NO sinon (pas une erreur — la plupart des positions n'ont pas
-// de marqueur, ex: badges, texte normal).
+// Tente de décoder un marqueur (2 tag characters = 1 short ID, 4 unités
+// UTF-16 au total) commençant exactement à startIdx. Retourne YES si un ID
+// complet a été décodé, NO sinon (pas une erreur — la plupart des positions
+// n'ont pas de marqueur, ex: badges, texte normal).
 static BOOL s7tv_decodeShortIDMarkerAt(NSString *text, NSUInteger startIdx, uint16_t *outShortID) {
     if (!text) return NO;
     uint8_t highByte, lowByte;
-    NSUInteger consumed1 = 0, consumed2 = 0;
-    if (!s7tv_decodeVariationSelectorAt(text, startIdx, &highByte, &consumed1)) return NO;
-    if (!s7tv_decodeVariationSelectorAt(text, startIdx + consumed1, &lowByte, &consumed2)) return NO;
+    if (!s7tv_decodeTagCharByteAt(text, startIdx, &highByte)) return NO;
+    if (!s7tv_decodeTagCharByteAt(text, startIdx + 2, &lowByte)) return NO;
     *outShortID = (uint16_t)(((uint16_t)highByte << 8) | lowByte);
     return YES;
 }
+
+// Trouve la première "run" contiguë de tag characters (nos marqueurs) dans
+// [from, limit). Retourne NSMakeRange(NSNotFound, 0) si aucune trouvée.
+// Sert au hook addAttribute:/setAttributes: pour styliser ces caractères en
+// invisible (couleur transparente + police quasi nulle) sans dépendre de
+// notre propre tracking de position — on scanne juste ce que Twitch nous
+// donne à styliser, ce qui reste correct même si les positions ont bougé.
+static NSRange s7tv_tagCharRunAt(NSString *s, NSUInteger from, NSUInteger limit) {
+    NSUInteger i = from;
+    NSUInteger runStart = NSNotFound;
+    while (i + 1 < limit) {
+        uint8_t byte;
+        if (s7tv_decodeTagCharByteAt(s, i, &byte)) {
+            if (runStart == NSNotFound) runStart = i;
+            i += 2;
+            continue;
+        }
+        if (runStart != NSNotFound) break;
+        i++;
+    }
+    if (runStart == NSNotFound) return NSMakeRange(NSNotFound, 0);
+    return NSMakeRange(runStart, i - runStart);
+}
+
 
 
 // ────────────────────────────────────────────────────────────
@@ -2278,6 +2289,9 @@ static void s7tv_dbg_hookTextStorageInit(void) {
     [[SevenTVManager sharedManager] log:@"✅ [DBG] Hooks diagnostic TXT-INIT posés (NSTextStorage/NSMutableAttributedString)"];
 }
 
+static IMP s_origAddAttributeIMP = NULL;
+static SEL s_selAddAttribute = NULL;
+
 static void s7tv_dbg_hookAddAttribute(void) {
     // Permet de voir, en temps réel, la VRAIE classe utilisée par Twitch
     // pour représenter une emote/attachment dans l'attributed string final,
@@ -2347,10 +2361,35 @@ static void s7tv_dbg_hookAddAttribute(void) {
         }
     };
 
+    // ── Invisibilité forcée du marqueur (Variante C) ──────────────────
+    // Le marqueur (tag characters) a survécu au filtrage texte de Twitch
+    // (contrairement aux variation selectors). Il faut maintenant le rendre
+    // invisible NOUS-MÊMES, ici, en stylant sa range avec couleur
+    // transparente + police quasi nulle. On appelle l'IMP ORIGINAL
+    // (non swizzlé) pour éviter de re-déclencher notre propre hook en
+    // boucle — s_origAddAttributeIMP est assigné juste après le swizzle
+    // de sel1 ci-dessous, avant que ce bloc soit jamais exécuté.
+    void (^hideMarkerIfPresent)(id, NSRange) = ^(id self_, NSRange range) {
+        if (!s_origAddAttributeIMP || !s_selAddAttribute) return;
+        NSString *full = [self_ string];
+        if (!full) return;
+        NSUInteger limit = MIN(full.length, range.location + range.length);
+        if (range.location >= limit) return;
+        NSRange found = s7tv_tagCharRunAt(full, range.location, limit);
+        if (found.location == NSNotFound) return;
+        void (*rawAdd)(id, SEL, NSString *, id, NSRange) =
+            (void(*)(id, SEL, NSString *, id, NSRange))s_origAddAttributeIMP;
+        rawAdd(self_, s_selAddAttribute, NSForegroundColorAttributeName, [UIColor clearColor], found);
+        rawAdd(self_, s_selAddAttribute, NSFontAttributeName, [UIFont systemFontOfSize:0.1], found);
+        rawAdd(self_, s_selAddAttribute, NSKernAttributeName, @(-0.1), found);
+    };
+
     SEL sel1 = @selector(addAttribute:value:range:);
     Method m1 = class_getInstanceMethod(cls, sel1);
     if (m1) {
         IMP orig1 = method_getImplementation(m1);
+        s_origAddAttributeIMP = orig1;
+        s_selAddAttribute = sel1;
         static NSUInteger s_count1 = 0;
         method_setImplementation(m1, imp_implementationWithBlock(^void(id self_, NSString *attrName, id value, NSRange range) {
             if ([attrName isEqualToString:NSAttachmentAttributeName] || [value isKindOfClass:[NSTextAttachment class]]) {
@@ -2363,6 +2402,7 @@ static void s7tv_dbg_hookAddAttribute(void) {
                 }
             }
             ((void(*)(id,SEL,NSString*,id,NSRange))orig1)(self_, sel1, attrName, value, range);
+            hideMarkerIfPresent(self_, range);
         }));
     }
 
@@ -2383,9 +2423,10 @@ static void s7tv_dbg_hookAddAttribute(void) {
                 }
             }
             ((void(*)(id,SEL,NSDictionary*,NSRange))orig2)(self_, sel2, attrs, range);
+            hideMarkerIfPresent(self_, range);
         }));
     }
-    [[SevenTVManager sharedManager] log:@"✅ [DBG] addAttribute:/setAttributes: hookés sur NSMutableAttributedString (+ tag ratio précoce)"];
+    [[SevenTVManager sharedManager] log:@"✅ [DBG] addAttribute:/setAttributes: hookés sur NSMutableAttributedString (+ tag ratio précoce + invisibilité marqueur)"];
 }
 
 static void s7tv_hook_uiimage_decode_tagging(void) {

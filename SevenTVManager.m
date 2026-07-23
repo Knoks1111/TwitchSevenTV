@@ -1213,26 +1213,29 @@ static const CGFloat kS7TVMenuHeight = 520.0;
 // MARK: - Injection IRC (V0.1 — simple)
 // ============================================================
 
-// ── Variante B (v2) : marqueur invisible via sélecteurs de variation ─────
-// Les "Tag characters" (U+E0000+) essayés en premier ne sont invisibles que
-// derrière un emoji drapeau — en dehors de ce cas, aucune police ne sait
-// les afficher, donc elle montre un glyphe "manquant" visible (confirmé en
-// test réel). Les sélecteurs de variation (Variation Selectors) sont, eux,
-// invisibles PARTOUT, sans condition : ils ne servent qu'à modifier
-// l'apparence du caractère juste avant eux, et n'ont eux-mêmes aucun
-// glyphe — posés après un caractère normal qui n'a aucune variante
-// définie, ils ne s'affichent jamais.
+// ── Variante C : marqueur "tag character" survivant + invisibilité forcée ──
+// Constat des tests réels :
+//   - Tag characters (U+E0000+)      → survivent au filtrage Twitch, MAIS
+//                                       s'affichent (glyphe "tofu" visible)
+//                                       car aucune police ne les rend
+//                                       invisibles hors séquence drapeau.
+//   - Variation selectors (VS1-256)  → invisibles nativement, MAIS filtrés
+//                                       à 100% par Twitch (texte + emotes
+//                                       cassés, cf. test précédent).
+// On combine les deux propriétés séparément au lieu de compter sur Unicode
+// pour donner l'invisibilité gratuitement :
+//   1. On encode avec des tag characters → passent le filtre Twitch intact.
+//   2. On les rend invisibles NOUS-MÊMES côté rendu, dans le hook
+//      addAttribute:/setAttributes: de TweakSevenTV.m (couleur transparente
+//      + police quasi nulle + kerning négatif), APRÈS que Twitch ait fini
+//      de construire l'attributed string — donc indépendant du filtrage
+//      texte brut qui, lui, a déjà eu lieu avant.
 //
-// On n'encode plus l'ID complet de l'emote (26 caractères) mais un petit
-// numéro court (0-65535, généré par nos soins — voir shortIDToEmoteID/
-// nextShortID) sur exactement 2 sélecteurs de variation (= 2 octets).
-// VS1-VS16  = U+FE00-U+FE0F   (16 valeurs, 1 unité UTF-16 chacune)
-// VS17-VS256 = U+E0100-U+E01EF (240 valeurs, 2 unités UTF-16 — paire de substitution)
-static NSString *s7tv_encodeVariationSelectorByte(uint8_t b) {
-    uint32_t codepoint = (b < 16) ? (0xFE00 + b) : (0xE0100 + (b - 16));
-    if (codepoint <= 0xFFFF) {
-        return [NSString stringWithFormat:@"%C", (unichar)codepoint];
-    }
+// On encode un petit numéro court (0-65535, voir shortIDToEmoteID/
+// nextShortID) sur exactement 2 tag characters (= 2 octets, plage
+// U+E0000-U+E00FF, toujours codée en paire de substitution UTF-16).
+static NSString *s7tv_encodeTagCharByte(uint8_t b) {
+    uint32_t codepoint = 0xE0000 + b;
     uint16_t high = (uint16_t)(0xD800 + ((codepoint - 0x10000) >> 10));
     uint16_t low  = (uint16_t)(0xDC00 + ((codepoint - 0x10000) & 0x3FF));
     return [NSString stringWithFormat:@"%C%C", high, low];
@@ -1242,15 +1245,14 @@ static NSString *s7tv_encodeShortIDMarker(uint16_t shortID) {
     uint8_t highByte = (uint8_t)((shortID >> 8) & 0xFF);
     uint8_t lowByte  = (uint8_t)(shortID & 0xFF);
     NSMutableString *marker = [NSMutableString stringWithCapacity:4];
-    [marker appendString:s7tv_encodeVariationSelectorByte(highByte)];
-    [marker appendString:s7tv_encodeVariationSelectorByte(lowByte)];
+    [marker appendString:s7tv_encodeTagCharByte(highByte)];
+    [marker appendString:s7tv_encodeTagCharByte(lowByte)];
     return marker;
 }
 
-// Mettre à 0 pour désactiver l'insertion du marqueur invisible (Variante B)
-// sans toucher au reste de l'injection — sert à isoler si c'est le marqueur
-// qui casse l'affichage des emotes.
-#define S7TV_ENABLE_TAGID_MARKER 0
+// Marqueur réactivé (Variante C) — voir hideMarkerCharsInRange dans
+// TweakSevenTV.m pour la partie "invisibilité forcée" côté rendu.
+#define S7TV_ENABLE_TAGID_MARKER 1
 
 - (NSString *)injectSevenTVEmotesIntoIRCMessage:(NSString *)raw {
     if (!self.isEnabled || raw.length == 0) return raw;
