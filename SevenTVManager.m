@@ -107,6 +107,11 @@ static const NSTimeInterval kCacheTTLChannel = 1800.0;   // 30 minutes
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSNumber *> *emoteRatios;
 // Dictionnaire { @(characterIndex): emoteID } pour sizeOfImageAttachmentAtCharacterIndex:
 @property (nonatomic, strong) NSMutableDictionary<NSNumber *, NSString *> *emotePositions;
+// Dictionnaire { @(shortID) : emoteID } — Variante B : le marqueur invisible
+// (sélecteurs de variation) transporte un petit numéro (0-65535), pas
+// l'ID complet. Ce dictionnaire fait la correspondance à la lecture.
+@property (nonatomic, strong) NSMutableDictionary<NSNumber *, NSString *> *shortIDToEmoteID;
+@property (nonatomic, assign) uint16_t nextShortID;
 @property (nonatomic, strong) NSLock *logLock;
 
 // Dossier racine du cache JSON (créé à la demande)
@@ -342,6 +347,8 @@ static const CGFloat kS7TVMenuHeight = 520.0;
         _logBuffer = [NSMutableArray arrayWithCapacity:256];
     _emoteRatios = [NSMutableDictionary dictionary];
     _emotePositions = [NSMutableDictionary dictionary];
+    _shortIDToEmoteID = [NSMutableDictionary dictionary];
+    _nextShortID = 0;
         _logLock   = [[NSLock alloc] init];
 
         _favoriteEmoteIDs        = [NSMutableSet set];
@@ -1206,28 +1213,38 @@ static const CGFloat kS7TVMenuHeight = 520.0;
 // MARK: - Injection IRC (V0.1 — simple)
 // ============================================================
 
-// ── Variante B : marqueur invisible portant l'emoteID ────────────────────
-// Encode l'ID (ASCII) en séquence de "Tag characters" Unicode (U+E0000 +
-// code ASCII), terminée par U+E007F ("cancel tag"). Ce bloc existe pour
-// transporter des métadonnées invisibles dans du texte — aucune largeur ni
-// rendu visuel. Inséré juste après le mot de l'emote dans le texte du
-// message, avant l'envoi à Twitch, pour pouvoir retrouver l'ID directement
-// dans le texte final côté lecture (TweakSevenTV.m), sans dépendre d'une
-// coopération de Twitch pour l'identification.
-static NSString *s7tv_encodeEmoteIDTag(NSString *asciiID) {
-    NSMutableString *tag = [NSMutableString stringWithCapacity:asciiID.length * 2 + 2];
-    for (NSUInteger i = 0; i < asciiID.length; i++) {
-        unichar c = [asciiID characterAtIndex:i];
-        uint32_t codepoint = 0xE0000 + (uint32_t)c;
-        uint16_t high = (uint16_t)(0xD800 + ((codepoint - 0x10000) >> 10));
-        uint16_t low  = (uint16_t)(0xDC00 + ((codepoint - 0x10000) & 0x3FF));
-        [tag appendFormat:@"%C%C", high, low];
+// ── Variante B (v2) : marqueur invisible via sélecteurs de variation ─────
+// Les "Tag characters" (U+E0000+) essayés en premier ne sont invisibles que
+// derrière un emoji drapeau — en dehors de ce cas, aucune police ne sait
+// les afficher, donc elle montre un glyphe "manquant" visible (confirmé en
+// test réel). Les sélecteurs de variation (Variation Selectors) sont, eux,
+// invisibles PARTOUT, sans condition : ils ne servent qu'à modifier
+// l'apparence du caractère juste avant eux, et n'ont eux-mêmes aucun
+// glyphe — posés après un caractère normal qui n'a aucune variante
+// définie, ils ne s'affichent jamais.
+//
+// On n'encode plus l'ID complet de l'emote (26 caractères) mais un petit
+// numéro court (0-65535, généré par nos soins — voir shortIDToEmoteID/
+// nextShortID) sur exactement 2 sélecteurs de variation (= 2 octets).
+// VS1-VS16  = U+FE00-U+FE0F   (16 valeurs, 1 unité UTF-16 chacune)
+// VS17-VS256 = U+E0100-U+E01EF (240 valeurs, 2 unités UTF-16 — paire de substitution)
+static NSString *s7tv_encodeVariationSelectorByte(uint8_t b) {
+    uint32_t codepoint = (b < 16) ? (0xFE00 + b) : (0xE0100 + (b - 16));
+    if (codepoint <= 0xFFFF) {
+        return [NSString stringWithFormat:@"%C", (unichar)codepoint];
     }
-    uint32_t cancel = 0xE007F;
-    uint16_t high = (uint16_t)(0xD800 + ((cancel - 0x10000) >> 10));
-    uint16_t low  = (uint16_t)(0xDC00 + ((cancel - 0x10000) & 0x3FF));
-    [tag appendFormat:@"%C%C", high, low];
-    return tag;
+    uint16_t high = (uint16_t)(0xD800 + ((codepoint - 0x10000) >> 10));
+    uint16_t low  = (uint16_t)(0xDC00 + ((codepoint - 0x10000) & 0x3FF));
+    return [NSString stringWithFormat:@"%C%C", high, low];
+}
+
+static NSString *s7tv_encodeShortIDMarker(uint16_t shortID) {
+    uint8_t highByte = (uint8_t)((shortID >> 8) & 0xFF);
+    uint8_t lowByte  = (uint8_t)(shortID & 0xFF);
+    NSMutableString *marker = [NSMutableString stringWithCapacity:4];
+    [marker appendString:s7tv_encodeVariationSelectorByte(highByte)];
+    [marker appendString:s7tv_encodeVariationSelectorByte(lowByte)];
+    return marker;
 }
 
 - (NSString *)injectSevenTVEmotesIntoIRCMessage:(NSString *)raw {
@@ -1299,10 +1316,17 @@ static NSString *s7tv_encodeEmoteIDTag(NSString *asciiID) {
                 self.emotePositions[@(adjStart)] = emote.emoteID;
                 [self log:@"✅ Emote détectée: %@ → %@", word, entry];
 
-                // Insérer le marqueur invisible juste après ce mot, dans
-                // markedMessageText (qui contient déjà tous les marqueurs
-                // précédents — insertAt tient compte de cumulativeOffset).
-                NSString *marker = s7tv_encodeEmoteIDTag(emote.emoteID);
+                // Générer un petit ID court (0-65535) pour cette occurrence,
+                // et retenir la correspondance courte→complète pour la lecture.
+                uint16_t shortID = self.nextShortID;
+                self.nextShortID = (uint16_t)(self.nextShortID + 1); // wrap naturel à 65536
+                self.shortIDToEmoteID[@(shortID)] = emote.emoteID;
+
+                // Insérer le marqueur invisible (2 sélecteurs de variation)
+                // juste après ce mot, dans markedMessageText (qui contient
+                // déjà tous les marqueurs précédents — insertAt tient compte
+                // de cumulativeOffset).
+                NSString *marker = s7tv_encodeShortIDMarker(shortID);
                 NSUInteger insertAt = adjEnd + 1;
                 if (insertAt <= markedMessageText.length) {
                     [markedMessageText insertString:marker atIndex:insertAt];
@@ -1357,6 +1381,11 @@ static NSString *s7tv_encodeEmoteIDTag(NSString *asciiID) {
         }
         return [NSString stringWithFormat:@"@emotes=%@ %@", emoteTag, raw];
     }
+}
+
+- (NSString *)emoteIDForShortIndex:(NSUInteger)shortIndex {
+    if (shortIndex > 0xFFFF) return nil;
+    return self.shortIDToEmoteID[@(shortIndex)];
 }
 
 

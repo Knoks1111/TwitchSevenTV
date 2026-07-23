@@ -176,4 +176,10 @@ typedef NS_ENUM(NSInteger, S7TVLogCategory) {
 // Taille cible emote (hauteur) depuis NSUserDefaults
 - (CGFloat)targetEmoteSize;
 
+// --- Marqueur invisible (Variante B) ---
+// Résolution inverse : retrouve l'emoteID à partir du petit index numérique
+// décodé dans le texte final (voir shortIDToEmoteID). Retourne nil si
+// l'index est inconnu. Thread-safe.
+- (NSString *)emoteIDForShortIndex:(NSUInteger)shortIndex;
+
 @end

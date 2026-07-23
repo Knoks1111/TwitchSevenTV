@@ -348,62 +348,66 @@ static void s7tv_dumpAnimationArchitectureOnce(CALayer *outerLayer) {
     [mgr log:@"🩻 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"];
 }
 
-// ── Variante B : marqueur invisible portant l'emoteID (fix chevauchement texte) ──
+// ── Variante B (v2) : marqueur invisible via sélecteurs de variation ─────
 //
-// Principe : on encode l'ID complet de l'emote en caractères Unicode
-// invisibles ("Tag characters", U+E0000-U+E007F — bloc prévu à l'origine
-// pour transporter des métadonnées cachées dans du texte, sans largeur ni
-// rendu visuel). Chaque caractère ASCII de l'ID est encodé comme
-// U+E0000+code, suivi d'un caractère de fin U+E007F ("cancel tag").
+// Les "Tag characters" (U+E0000+) essayés en premier ne sont invisibles que
+// derrière un emoji drapeau — testé en conditions réelles, ils s'affichaient
+// comme des glyphes "manquant" visibles. Les sélecteurs de variation
+// (Variation Selectors, U+FE00-U+FE0F et U+E0100-U+E01EF) sont, eux,
+// invisibles PARTOUT sans condition : ils ne font que modifier l'apparence
+// du caractère juste avant eux, et n'ont eux-mêmes aucun glyphe — posés
+// après un caractère qui n'a aucune variante définie, ils ne s'affichent
+// jamais.
+//
+// On encode un petit numéro court (0-65535, généré côté injection — voir
+// SevenTVManager.shortIDToEmoteID) sur exactement 2 sélecteurs de variation
+// (2 octets), pas l'ID complet. La correspondance courte→complète se lit
+// dans le dictionnaire partagé.
 //
 // Contrairement aux 5 tentatives précédentes (position texte, ivar direct,
 // hook d'insertion, NSLayoutManager introuvable), celle-ci ne dépend
 // d'AUCUNE coopération de Twitch pour l'identification : le marqueur est
 // autonome, lisible directement dans le texte final (ts.string), qu'on a
 // déjà accès à chaque resize.
-//
-// DIAGNOSTIC UNIQUEMENT pour l'instant : on décode et on logue, sans encore
-// modifier le calcul de largeur — objectif : valider que le marqueur
-// survit intact jusqu'au texte final avant d'investir dans le reste.
 
-// Encode un ID (ASCII) en séquence de tag characters + terminateur.
-static NSString *s7tv_encodeEmoteIDTag(NSString *asciiID) {
-    NSMutableString *tag = [NSMutableString stringWithCapacity:asciiID.length * 2 + 2];
-    for (NSUInteger i = 0; i < asciiID.length; i++) {
-        unichar c = [asciiID characterAtIndex:i];
-        uint32_t codepoint = 0xE0000 + (uint32_t)c;
-        uint16_t high = (uint16_t)(0xD800 + ((codepoint - 0x10000) >> 10));
-        uint16_t low  = (uint16_t)(0xDC00 + ((codepoint - 0x10000) & 0x3FF));
-        [tag appendFormat:@"%C%C", high, low];
+// Décode UN sélecteur de variation à la position idx. Retourne YES et
+// l'octet correspondant si trouvé, NO sinon. outConsumed = nb d'unités
+// UTF-16 consommées (1 pour VS1-16, 2 pour VS17-256 qui sont hors BMP).
+static BOOL s7tv_decodeVariationSelectorAt(NSString *text, NSUInteger idx,
+                                            uint8_t *outByte, NSUInteger *outConsumed) {
+    if (idx >= text.length) return NO;
+    unichar c = [text characterAtIndex:idx];
+    if (c >= 0xFE00 && c <= 0xFE0F) {
+        *outByte = (uint8_t)(c - 0xFE00);
+        *outConsumed = 1;
+        return YES;
     }
-    // Terminateur : CANCEL TAG U+E007F
-    uint32_t cancel = 0xE007F;
-    uint16_t high = (uint16_t)(0xD800 + ((cancel - 0x10000) >> 10));
-    uint16_t low  = (uint16_t)(0xDC00 + ((cancel - 0x10000) & 0x3FF));
-    [tag appendFormat:@"%C%C", high, low];
-    return tag;
+    if (c >= 0xD800 && c <= 0xDBFF && idx + 1 < text.length) {
+        unichar low = [text characterAtIndex:idx + 1];
+        if (low >= 0xDC00 && low <= 0xDFFF) {
+            uint32_t codepoint = 0x10000 + (((uint32_t)(c - 0xD800)) << 10) + (low - 0xDC00);
+            if (codepoint >= 0xE0100 && codepoint <= 0xE01EF) {
+                *outByte = (uint8_t)(16 + (codepoint - 0xE0100));
+                *outConsumed = 2;
+                return YES;
+            }
+        }
+    }
+    return NO;
 }
 
-// Tente de décoder une séquence de tag characters commençant exactement à
-// startIdx dans text. Retourne l'ID décodé (ASCII), ou nil si rien trouvé
-// à cette position (pas une erreur — la plupart des positions n'ont pas de
-// marqueur, ex: badges, texte normal).
-static NSString *s7tv_decodeTagIDAtIndex(NSString *text, NSUInteger startIdx) {
-    if (!text || startIdx + 1 >= text.length) return nil;
-    NSMutableString *decoded = [NSMutableString string];
-    NSUInteger i = startIdx;
-    while (i + 1 < text.length) {
-        unichar high = [text characterAtIndex:i];
-        unichar low  = [text characterAtIndex:i + 1];
-        if (high < 0xD800 || high > 0xDBFF || low < 0xDC00 || low > 0xDFFF) break; // pas une paire de substitution
-        uint32_t codepoint = 0x10000 + (((uint32_t)(high - 0xD800)) << 10) + (low - 0xDC00);
-        if (codepoint == 0xE007F) { i += 2; break; } // fin de tag — succès
-        if (codepoint < 0xE0000 || codepoint > 0xE007E) break; // pas (ou plus) un tag character
-        unichar ascii = (unichar)(codepoint - 0xE0000);
-        [decoded appendFormat:@"%C", ascii];
-        i += 2;
-    }
-    return decoded.length > 0 ? [decoded copy] : nil;
+// Tente de décoder un marqueur (2 sélecteurs de variation = 1 short ID)
+// commençant exactement à startIdx. Retourne YES si un ID complet a été
+// décodé, NO sinon (pas une erreur — la plupart des positions n'ont pas
+// de marqueur, ex: badges, texte normal).
+static BOOL s7tv_decodeShortIDMarkerAt(NSString *text, NSUInteger startIdx, uint16_t *outShortID) {
+    if (!text) return NO;
+    uint8_t highByte, lowByte;
+    NSUInteger consumed1 = 0, consumed2 = 0;
+    if (!s7tv_decodeVariationSelectorAt(text, startIdx, &highByte, &consumed1)) return NO;
+    if (!s7tv_decodeVariationSelectorAt(text, startIdx + consumed1, &lowByte, &consumed2)) return NO;
+    *outShortID = (uint16_t)(((uint16_t)highByte << 8) | lowByte);
+    return YES;
 }
 
 
@@ -2035,12 +2039,21 @@ static void s7tv_dbg_hookAttachmentBounds(void) {
             // de remplacement de l'attachment (charIdx), donc à charIdx+1.
             if (ts2 && ts2.length > 0) {
                 static NSUInteger s_tagDiagCount = 0;
-                NSString *decodedID = s7tv_decodeTagIDAtIndex(ts2.string, charIdx + 1);
+                uint16_t shortID = 0;
+                BOOL found = s7tv_decodeShortIDMarkerAt(ts2.string, charIdx + 1, &shortID);
+                NSString *resolvedEmoteID = found ? [[SevenTVManager sharedManager] emoteIDForShortIndex:shortID] : nil;
                 s_tagDiagCount++;
                 if (s_tagDiagCount <= 60) {
+                    NSString *result;
+                    if (!found) {
+                        result = @"❌ rien à cette position";
+                    } else if (resolvedEmoteID) {
+                        result = [NSString stringWithFormat:@"✅ shortID=%u → %@", shortID, resolvedEmoteID];
+                    } else {
+                        result = [NSString stringWithFormat:@"⚠️ shortID=%u décodé mais introuvable dans le dictionnaire", shortID];
+                    }
                     [[SevenTVManager sharedManager] log:@"🏷️ [TAGID-DIAG] #%lu charIdx=%lu → %@",
-                        (unsigned long)s_tagDiagCount, (unsigned long)charIdx,
-                        decodedID ? [NSString stringWithFormat:@"✅ trouvé: %@", decodedID] : @"❌ rien à cette position"];
+                        (unsigned long)s_tagDiagCount, (unsigned long)charIdx, result];
                 }
             }
 
