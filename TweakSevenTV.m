@@ -2048,8 +2048,7 @@ static void s7tv_dbg_hookAttachmentBounds(void) {
             // ── DIAGNOSTIC Variante B : le marqueur invisible a-t-il survécu ? ──
             // Le marqueur (s'il existe) doit se trouver juste après le caractère
             // de remplacement de l'attachment (charIdx), donc à charIdx+1.
-            BOOL isOurSevenTVEmote = attachment && objc_getAssociatedObject(attachment, &kS7TVEmoteRatioKey);
-            if (ts2 && ts2.length > 0 && isOurSevenTVEmote) {
+            if (ts2 && ts2.length > 0) {
                 static NSUInteger s_tagDiagCount = 0;
                 uint16_t shortID = 0;
                 BOOL found = s7tv_decodeShortIDMarkerAt(ts2.string, charIdx + 1, &shortID);
@@ -2370,6 +2369,13 @@ static void s7tv_dbg_hookAddAttribute(void) {
     // boucle — s_origAddAttributeIMP est assigné juste après le swizzle
     // de sel1 ci-dessous, avant que ce bloc soit jamais exécuté.
     void (^hideMarkerIfPresent)(id, NSRange) = ^(id self_, NSRange range) {
+        static NSUInteger s_hookCallCount = 0;
+        s_hookCallCount++;
+        if (s_hookCallCount <= 5 || s_hookCallCount % 200 == 0) {
+            [[SevenTVManager sharedManager] log:@"🙈 [HIDE-DIAG] hook appelé #%lu (class=%@ range={%lu,%lu})",
+                (unsigned long)s_hookCallCount, NSStringFromClass([self_ class]),
+                (unsigned long)range.location, (unsigned long)range.length];
+        }
         if (!s_origAddAttributeIMP || !s_selAddAttribute) return;
         NSString *full = [self_ string];
         if (!full) return;
