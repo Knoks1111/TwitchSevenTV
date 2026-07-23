@@ -1247,6 +1247,11 @@ static NSString *s7tv_encodeShortIDMarker(uint16_t shortID) {
     return marker;
 }
 
+// Mettre à 0 pour désactiver l'insertion du marqueur invisible (Variante B)
+// sans toucher au reste de l'injection — sert à isoler si c'est le marqueur
+// qui casse l'affichage des emotes.
+#define S7TV_ENABLE_TAGID_MARKER 0
+
 - (NSString *)injectSevenTVEmotesIntoIRCMessage:(NSString *)raw {
     if (!self.isEnabled || raw.length == 0) return raw;
 
@@ -1322,6 +1327,7 @@ static NSString *s7tv_encodeShortIDMarker(uint16_t shortID) {
                 self.nextShortID = (uint16_t)(self.nextShortID + 1); // wrap naturel à 65536
                 self.shortIDToEmoteID[@(shortID)] = emote.emoteID;
 
+#if S7TV_ENABLE_TAGID_MARKER
                 // Insérer le marqueur invisible (2 sélecteurs de variation)
                 // juste après ce mot, dans markedMessageText (qui contient
                 // déjà tous les marqueurs précédents — insertAt tient compte
@@ -1332,6 +1338,7 @@ static NSString *s7tv_encodeShortIDMarker(uint16_t shortID) {
                     [markedMessageText insertString:marker atIndex:insertAt];
                     cumulativeOffset += (NSInteger)marker.length;
                 }
+#endif
             }
         }
         pos += word.length + 1;
